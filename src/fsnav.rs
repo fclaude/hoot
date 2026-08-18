@@ -196,3 +196,108 @@ pub fn reference_count(root: &Path, name: &str) -> u32 {
     }
     count
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "steer-fsnav-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn extracts_rust_definitions() {
+        assert_eq!(extract_symbol_name("pub fn draw() {"), Some("draw".to_string()));
+        assert_eq!(extract_symbol_name("  async fn run() {"), Some("run".to_string()));
+        assert_eq!(extract_symbol_name("pub struct FileEntry {"), Some("FileEntry".to_string()));
+        assert_eq!(extract_symbol_name("pub enum DiffLineKind {"), Some("DiffLineKind".to_string()));
+        assert_eq!(extract_symbol_name("trait Widget {"), Some("Widget".to_string()));
+    }
+
+    #[test]
+    fn extracts_go_plain_function() {
+        assert_eq!(extract_symbol_name("func NewServer(addr string) *Server {"), Some("NewServer".to_string()));
+    }
+
+    #[test]
+    fn extracts_go_method_with_receiver() {
+        // The receiver `(s *Server)` used to break plain prefix matching and
+        // silently drop the method entirely — see fsnav.rs's dedicated case.
+        assert_eq!(extract_symbol_name("func (s *Server) Handle(w string) {"), Some("Handle".to_string()));
+    }
+
+    #[test]
+    fn extracts_go_type_declarations() {
+        assert_eq!(extract_symbol_name("type Server struct {"), Some("Server".to_string()));
+        assert_eq!(extract_symbol_name("type Reader interface {"), Some("Reader".to_string()));
+        assert_eq!(extract_symbol_name("type Handler func(w string)"), Some("Handler".to_string()));
+    }
+
+    #[test]
+    fn extracts_python_definitions_including_async() {
+        assert_eq!(extract_symbol_name("class Widget:"), Some("Widget".to_string()));
+        assert_eq!(extract_symbol_name("    def __init__(self, name):"), Some("__init__".to_string()));
+        assert_eq!(extract_symbol_name("    async def render(self):"), Some("render".to_string()));
+    }
+
+    #[test]
+    fn non_definition_lines_extract_nothing() {
+        assert_eq!(extract_symbol_name("    self.name = name"), None);
+        assert_eq!(extract_symbol_name("// just a comment"), None);
+        assert_eq!(extract_symbol_name(""), None);
+    }
+
+    #[test]
+    fn hover_for_line_finds_whole_word_matches_only() {
+        let symbols = vec![
+            SymbolResult { name: "parse".to_string(), path: PathBuf::from("a.rs"), line: 1, preview: "fn parse()".to_string() },
+        ];
+        assert!(hover_for_line(&symbols, "let x = parse(input);").is_some());
+        // "reparse" contains "parse" as a substring but not as a whole word.
+        assert!(hover_for_line(&symbols, "let x = reparse(input);").is_none());
+        assert!(hover_for_line(&symbols, "totally unrelated line").is_none());
+    }
+
+    #[test]
+    fn scan_symbols_finds_definitions_across_go_and_python_files() {
+        let dir = scratch_dir("scan");
+        fs::write(dir.join("server.go"), "package main\n\nfunc (s *Server) Handle() {}\n\ntype Server struct {}\n").unwrap();
+        fs::write(dir.join("app.py"), "class Widget:\n    async def render(self):\n        pass\n").unwrap();
+        fs::write(dir.join("skip.bin"), "not source").unwrap();
+
+        let symbols = scan_symbols(&dir);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Handle"), "names = {names:?}");
+        assert!(names.contains(&"Server"), "names = {names:?}");
+        assert!(names.contains(&"Widget"), "names = {names:?}");
+        assert!(names.contains(&"render"), "names = {names:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_tree_skips_noise_directories() {
+        let dir = scratch_dir("tree");
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(dir.join("target/junk"), "").unwrap();
+        fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let tree = build_tree(&dir);
+        let labels: Vec<&str> = tree.iter().map(|e| e.label.as_str()).collect();
+        assert!(labels.contains(&"src/"), "labels = {labels:?}");
+        assert!(labels.contains(&"main.rs"), "labels = {labels:?}");
+        assert!(!labels.iter().any(|l| l.starts_with('.')), "labels = {labels:?}");
+        assert!(!labels.contains(&"target/"), "labels = {labels:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

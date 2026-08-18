@@ -3,7 +3,7 @@
 
 use crate::theme::FileStatus;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DiffLineKind {
     Context,
     Added,

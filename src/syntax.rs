@@ -11,7 +11,7 @@
 //! layering a second, unrelated color meaning on top of that would make
 //! both harder to read.
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TokenKind {
     Plain,
     Keyword,
@@ -141,4 +141,86 @@ fn matches_at(chars: &[char], i: usize, prefix: &str) -> bool {
 
 pub fn ext_for(path: &std::path::Path) -> String {
     path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kinds(ext: &str, line: &str) -> Vec<(TokenKind, String)> {
+        highlight_line(ext, line).into_iter().map(|t| (t.kind, t.text)).collect()
+    }
+
+    #[test]
+    fn rust_keyword_and_plain_identifier() {
+        let toks = kinds("rs", "pub fn draw() {");
+        assert_eq!(toks[0].0, TokenKind::Keyword);
+        assert_eq!(toks[0].1, "pub");
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::Keyword && *t == "fn"));
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::Plain && *t == "draw"));
+    }
+
+    #[test]
+    fn rust_line_comment_takes_rest_of_line() {
+        let toks = kinds("rs", "let x = 1; // trailing note");
+        let comment = toks.iter().find(|(k, _)| *k == TokenKind::Comment).expect("comment token");
+        assert_eq!(comment.1, "// trailing note");
+    }
+
+    #[test]
+    fn string_literal_with_escaped_quote() {
+        let toks = kinds("rs", r#"let s = "a \" b";"#);
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::String && *t == r#""a \" b""#));
+    }
+
+    #[test]
+    fn unterminated_string_consumes_to_end_of_line() {
+        // Single-line tokenizer: no multi-line string tracking, so an
+        // unterminated quote just runs to the end of this line.
+        let toks = kinds("rs", r#"let s = "oops"#);
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::String && *t == r#""oops"#));
+    }
+
+    #[test]
+    fn number_token() {
+        let toks = kinds("rs", "let x = 42;");
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::Number && *t == "42"));
+    }
+
+    #[test]
+    fn python_async_def_and_hash_comment() {
+        let toks = kinds("py", "async def render(self):  # comment");
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::Keyword && *t == "async"));
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::Keyword && *t == "def"));
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::Comment && *t == "# comment"));
+    }
+
+    #[test]
+    fn go_func_and_type_are_keywords() {
+        let toks = kinds("go", "func (s *Server) Handle() {");
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::Keyword && *t == "func"));
+        let toks = kinds("go", "type Server struct {");
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::Keyword && *t == "type"));
+        assert!(toks.iter().any(|(k, t)| *k == TokenKind::Keyword && *t == "struct"));
+    }
+
+    #[test]
+    fn unrecognized_extension_is_unsupported() {
+        assert!(!supported("xyz"));
+        assert!(supported("rs"));
+        assert!(supported("py"));
+    }
+
+    #[test]
+    fn tokens_reassemble_to_the_original_line() {
+        let line = "pub fn draw(f: &mut Frame) { let s = \"hi\"; } // done";
+        let rebuilt: String = highlight_line("rs", line).into_iter().map(|t| t.text).collect();
+        assert_eq!(rebuilt, line);
+    }
+
+    #[test]
+    fn ext_for_reads_the_extension() {
+        assert_eq!(ext_for(std::path::Path::new("src/main.rs")), "rs");
+        assert_eq!(ext_for(std::path::Path::new("README")), "");
+    }
 }

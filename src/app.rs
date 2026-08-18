@@ -263,15 +263,8 @@ impl App {
     /// Drains any events the background reader thread has queued up. Called
     /// once per event-loop tick; never blocks.
     pub fn poll_agent(&mut self) {
-        if self.pi_session.is_none() {
-            return;
-        }
-        loop {
-            let event = match &self.pi_session {
-                Some(s) => s.rx.try_recv(),
-                None => break,
-            };
-            match event {
+        while let Some(session) = &self.pi_session {
+            match session.rx.try_recv() {
                 Ok(ev) => self.apply_agent_event(ev),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -424,10 +417,8 @@ impl App {
         if self.mode == Mode::Curation && self.editing_commit {
             return self.on_key_curation_edit(key);
         }
-        if self.mode == Mode::Agent {
-            if self.on_key_agent_input(key) {
-                return;
-            }
+        if self.mode == Mode::Agent && self.on_key_agent_input(key) {
+            return;
         }
 
         if self.keymap.is(&key, Action::OpenSymbolJump) {

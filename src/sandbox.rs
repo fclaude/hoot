@@ -92,3 +92,91 @@ pub fn discard(target_dir: &Path, worktree: &Path) {
         .current_dir(target_dir)
         .output();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn scratch_repo(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "steer-sandbox-test-{label}-{}-{:?}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        for args in [["init", "-q"].as_slice(), &["config", "user.email", "test@example.com"], &["config", "user.name", "test"]] {
+            assert!(Command::new("git").args(args).current_dir(&dir).status().unwrap().success());
+        }
+        dir
+    }
+
+    #[test]
+    fn create_fails_without_a_commit() {
+        let dir = scratch_repo("no-head");
+        let err = create(&dir).unwrap_err();
+        assert!(err.contains("at least one commit"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn full_round_trip_create_edit_diff_apply_discard() {
+        let dir = scratch_repo("round-trip");
+        fs::write(dir.join("f.txt"), "hello\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+
+        let worktree = create(&dir).unwrap();
+        assert!(worktree.exists());
+        // Editing the sandbox must never touch the real file.
+        fs::write(worktree.join("f.txt"), "hello from sandbox\n").unwrap();
+        assert_eq!(fs::read_to_string(dir.join("f.txt")).unwrap(), "hello\n");
+
+        let changes = diff(&worktree);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "f.txt");
+
+        apply(&worktree, &dir).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("f.txt")).unwrap(), "hello from sandbox\n");
+
+        discard(&dir, &worktree);
+        assert!(!worktree.exists(), "worktree should be removed after discard");
+        let worktrees = Command::new("git").args(["worktree", "list"]).current_dir(&dir).output().unwrap();
+        let listing = String::from_utf8_lossy(&worktrees.stdout);
+        assert_eq!(listing.lines().count(), 1, "expected only the main worktree left: {listing}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_with_no_sandbox_changes_errors() {
+        let dir = scratch_repo("no-changes");
+        fs::write(dir.join("f.txt"), "hello\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+
+        let worktree = create(&dir).unwrap();
+        let err = apply(&worktree, &dir).unwrap_err();
+        assert!(err.contains("nothing to apply"), "{err}");
+
+        discard(&dir, &worktree);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_without_apply_leaves_real_dir_untouched() {
+        let dir = scratch_repo("reject-path");
+        fs::write(dir.join("f.txt"), "hello\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+
+        let worktree = create(&dir).unwrap();
+        fs::write(worktree.join("f.txt"), "sandbox edit that gets rejected\n").unwrap();
+        discard(&dir, &worktree);
+
+        assert_eq!(fs::read_to_string(dir.join("f.txt")).unwrap(), "hello\n");
+        assert!(!worktree.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

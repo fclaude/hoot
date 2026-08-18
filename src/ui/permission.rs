@@ -19,15 +19,15 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled("Agent", Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)),
-        Span::styled(" wants to apply the following", Style::default().fg(theme::FG)),
-    ]))
-    ;
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("File writes:", Style::default().fg(theme::FG))));
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Agent", Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(" wants to apply the following", Style::default().fg(theme::FG)),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled("File writes:", Style::default().fg(theme::FG))),
+    ];
     if app.perm_writes.is_empty() {
         lines.push(Line::from(Span::styled("  (none)", Style::default().fg(theme::DIM))));
     }

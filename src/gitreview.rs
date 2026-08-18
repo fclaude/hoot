@@ -114,3 +114,166 @@ fn parse_diff_git_path(rest: &str) -> String {
         None => rest.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    const TWO_FILE_DIFF: &str = "\
+diff --git a/src/main.rs b/src/main.rs
+index 1111111..2222222 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,4 @@
+ fn main() {
+-    old();
++    new();
++    extra();
+ }
+diff --git a/README.md b/README.md
+index 3333333..4444444 100644
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,2 @@
+-# Old Title
++# New Title
+ body text
+";
+
+    #[test]
+    fn parses_multiple_files_and_hunks() {
+        let files = parse_unified_diff(TWO_FILE_DIFF);
+        assert_eq!(files.len(), 2);
+
+        let main_rs = &files[0];
+        assert_eq!(main_rs.path, "src/main.rs");
+        assert_eq!(main_rs.hunks.len(), 1);
+        assert_eq!(main_rs.hunk_count, 1);
+        assert!(main_rs.selected);
+        assert!(!main_rs.flagged);
+
+        let readme = &files[1];
+        assert_eq!(readme.path, "README.md");
+        assert_eq!(readme.hunks.len(), 1);
+    }
+
+    #[test]
+    fn classifies_diff_line_kinds_correctly() {
+        let files = parse_unified_diff(TWO_FILE_DIFF);
+        let hunk = &files[0].hunks[0];
+
+        assert_eq!(hunk.lines[0].kind, DiffLineKind::HunkHeader);
+        assert_eq!(hunk.lines[0].text, "@@ -1,3 +1,4 @@");
+
+        let removed: Vec<&str> = hunk.lines.iter().filter(|l| l.kind == DiffLineKind::Removed).map(|l| l.text.as_str()).collect();
+        assert_eq!(removed, vec!["-    old();"]);
+
+        let added: Vec<&str> = hunk.lines.iter().filter(|l| l.kind == DiffLineKind::Added).map(|l| l.text.as_str()).collect();
+        assert_eq!(added, vec!["+    new();", "+    extra();"]);
+
+        let context: Vec<&str> = hunk.lines.iter().filter(|l| l.kind == DiffLineKind::Context).map(|l| l.text.as_str()).collect();
+        assert_eq!(context, vec![" fn main() {", " }"]);
+    }
+
+    #[test]
+    fn multiple_hunks_in_one_file_stay_separate() {
+        let diff = "\
+diff --git a/f.txt b/f.txt
+index 111..222 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+-line1
++line1-CHANGED
+ line2
+@@ -9,2 +9,2 @@ line8
+ line9
+-line10
++line10-CHANGED
+";
+        let files = parse_unified_diff(diff);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].hunks.len(), 2);
+        assert_eq!(files[0].hunks[0].lines[0].text, "@@ -1,2 +1,2 @@");
+        assert_eq!(files[0].hunks[1].lines[0].text, "@@ -9,2 +9,2 @@ line8");
+    }
+
+    #[test]
+    fn empty_diff_produces_no_files() {
+        assert!(parse_unified_diff("").is_empty());
+    }
+
+    #[test]
+    fn parse_diff_git_path_strips_a_and_b_prefixes() {
+        assert_eq!(parse_diff_git_path("a/src/main.rs b/src/main.rs"), "src/main.rs");
+        assert_eq!(parse_diff_git_path("a/nested/dir/file.py b/nested/dir/file.py"), "nested/dir/file.py");
+    }
+
+    // --- integration: exercises is_git_repo/run_git_diff/load against a real repo ---
+
+    fn scratch_repo(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "steer-gitreview-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        run(&dir, &["init", "-q"]);
+        run(&dir, &["config", "user.email", "test@example.com"]);
+        run(&dir, &["config", "user.name", "test"]);
+        dir
+    }
+
+    fn run(dir: &Path, args: &[&str]) {
+        let status = Command::new("git").args(args).current_dir(dir).status().unwrap();
+        assert!(status.success(), "git {args:?} failed in {dir:?}");
+    }
+
+    #[test]
+    fn load_falls_back_to_mock_outside_a_git_repo() {
+        let dir = std::env::temp_dir().join(format!("steer-gitreview-not-a-repo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let review = load(&dir);
+        assert!(!review.is_real);
+        assert_eq!(review.project.name, "search-index"); // mock_project's fixed name
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_reports_honest_empty_state_on_a_clean_repo() {
+        let dir = scratch_repo("clean");
+        fs::write(dir.join("f.txt"), "hello\n").unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "init"]);
+
+        let review = load(&dir);
+        assert!(review.is_real);
+        assert!(review.project.files.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_reflects_a_real_uncommitted_change() {
+        let dir = scratch_repo("dirty");
+        fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "init"]);
+        fs::write(dir.join("f.txt"), "line1-changed\nline2\n").unwrap();
+
+        let review = load(&dir);
+        assert!(review.is_real);
+        assert_eq!(review.project.files.len(), 1);
+        assert_eq!(review.project.files[0].path, "f.txt");
+        assert_eq!(review.curation_files.len(), 1);
+        assert_eq!(review.curation_files[0].total(), 1);
+        assert_eq!(review.curation_files[0].selected(), 1); // starts fully selected
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

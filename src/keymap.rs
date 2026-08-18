@@ -327,3 +327,108 @@ pub fn generate_markdown(keymap: &Keymap) -> String {
 
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_binding_name_is_unique() {
+        let mut names: Vec<&str> = BINDINGS.iter().map(|b| b.name).collect();
+        names.sort();
+        let mut deduped = names.clone();
+        deduped.dedup();
+        assert_eq!(names, deduped, "duplicate binding name in BINDINGS");
+    }
+
+    #[test]
+    fn every_default_chord_parses() {
+        // Keymap::defaults() already panics on a bad default; this just
+        // makes the failure message point at the specific binding.
+        for b in BINDINGS {
+            assert!(KeyChord::parse(b.default).is_some(), "binding {:?} has an unparsable default {:?}", b.name, b.default);
+        }
+    }
+
+    #[test]
+    fn parses_plain_key() {
+        let c = KeyChord::parse("g").unwrap();
+        assert_eq!(c, KeyChord { code: KeyCode::Char('g'), mods: KeyModifiers::NONE });
+    }
+
+    #[test]
+    fn parses_modified_key_case_insensitively() {
+        let c = KeyChord::parse("Ctrl+Enter").unwrap();
+        assert_eq!(c, KeyChord { code: KeyCode::Enter, mods: KeyModifiers::CONTROL });
+    }
+
+    #[test]
+    fn parses_stacked_modifiers() {
+        let c = KeyChord::parse("ctrl+shift+tab").unwrap();
+        assert_eq!(c, KeyChord { code: KeyCode::Tab, mods: KeyModifiers::CONTROL | KeyModifiers::SHIFT });
+    }
+
+    #[test]
+    fn parses_named_keys() {
+        assert_eq!(KeyChord::parse("space").unwrap().code, KeyCode::Char(' '));
+        assert_eq!(KeyChord::parse("esc").unwrap().code, KeyCode::Esc);
+        assert_eq!(KeyChord::parse("escape").unwrap().code, KeyCode::Esc);
+        assert_eq!(KeyChord::parse("f4").unwrap().code, KeyCode::F(4));
+        assert_eq!(KeyChord::parse("f12").unwrap().code, KeyCode::F(12));
+        assert_eq!(KeyChord::parse("/").unwrap().code, KeyCode::Char('/'));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(KeyChord::parse("").is_none());
+        assert!(KeyChord::parse("ctrl+").is_none());
+        assert!(KeyChord::parse("banana").is_none());
+        assert!(KeyChord::parse("foo+g").is_none());
+        assert!(KeyChord::parse("f99x").is_none());
+    }
+
+    #[test]
+    fn display_round_trips_through_parse() {
+        for s in ["g", "ctrl+enter", "space", "f1", "shift+tab", "/"] {
+            let chord = KeyChord::parse(s).unwrap();
+            let reparsed = KeyChord::parse(&chord.to_string()).unwrap();
+            assert_eq!(chord, reparsed, "{s} did not round-trip through Display");
+        }
+    }
+
+    #[test]
+    fn matches_checks_code_and_modifiers() {
+        let chord = KeyChord::parse("ctrl+a").unwrap();
+        let hit = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        let wrong_mods = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let wrong_code = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert!(chord.matches(&hit));
+        assert!(!chord.matches(&wrong_mods));
+        assert!(!chord.matches(&wrong_code));
+    }
+
+    #[test]
+    fn defaults_is_populated_and_matches_binding_table() {
+        let keymap = Keymap::defaults();
+        assert_eq!(keymap.chords.len(), BINDINGS.len());
+        let steer_up = keymap.chord(Action::SteerUp);
+        assert_eq!(steer_up, KeyChord::parse("up").unwrap());
+    }
+
+    #[test]
+    fn is_uses_the_configured_chord() {
+        let keymap = Keymap::defaults();
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(keymap.is(&key, Action::Quit));
+        assert!(!keymap.is(&key, Action::SteerMarkGood));
+    }
+
+    #[test]
+    fn generated_markdown_lists_every_binding_name() {
+        let keymap = Keymap::defaults();
+        let md = generate_markdown(&keymap);
+        for b in BINDINGS {
+            assert!(md.contains(&format!("`{}`", b.name)), "KEYBINDINGS.md missing entry for {}", b.name);
+        }
+    }
+}

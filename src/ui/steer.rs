@@ -168,7 +168,7 @@ fn wrap_note(note: &str, prefix: &str, width: usize) -> Vec<String> {
 }
 
 fn diff_title(app: &App) -> String {
-    format!("{}", app.project.files[app.steer_selected].path)
+    app.project.files[app.steer_selected].path.clone()
 }
 
 fn draw_diff_unified(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
