@@ -1,0 +1,203 @@
+//! Drives a real `pi` coding-agent subprocess (https://github.com/earendil-works/pi)
+//! and streams its `--mode json` NDJSON event log back as [`AgentEvent`]s.
+//!
+//! `pi` already supports routing through OpenAI's Codex via
+//! `--provider openai-codex`, so "codex" is exposed here as a selectable
+//! [`Backend`] rather than a second, separate integration.
+
+use std::io::{BufRead, BufReader};
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+
+use serde_json::Value;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Backend {
+    Pi,
+    PiCodex,
+}
+
+impl Backend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Backend::Pi => "pi",
+            Backend::PiCodex => "pi \u{2192} openai-codex",
+        }
+    }
+
+    pub fn toggled(self) -> Backend {
+        match self {
+            Backend::Pi => Backend::PiCodex,
+            Backend::PiCodex => Backend::Pi,
+        }
+    }
+
+    fn extra_args(self) -> &'static [&'static str] {
+        match self {
+            Backend::Pi => &[],
+            Backend::PiCodex => &["--provider", "openai-codex"],
+        }
+    }
+}
+
+pub enum AgentEvent {
+    Model(String),
+    Thinking(String),
+    Text(String),
+    ToolCall { name: String, args: String },
+    ToolResult { name: String, summary: String },
+    TurnEnd,
+    AgentEnd,
+    Error(String),
+}
+
+pub struct PiSession {
+    pub rx: Receiver<AgentEvent>,
+}
+
+/// Which tools a spawned turn is allowed to use.
+///
+/// `ReadOnly` is for normal chat/Q&A in the Agent pane — pi can inspect the
+/// real target directory but never write to it. `ReadWrite` is only ever
+/// used against a disposable sandbox worktree (see `sandbox.rs`), never the
+/// real target directory directly: pi has no native "pause and wait for
+/// external approval before writing" hook (confirmed by testing — `write`
+/// executes as soon as the model calls it, `--approve` or not), so the
+/// approval step has to happen at the filesystem level, before any real
+/// files are touched.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToolProfile {
+    ReadOnly,
+    ReadWrite,
+}
+
+impl ToolProfile {
+    fn tools_arg(self) -> &'static str {
+        match self {
+            ToolProfile::ReadOnly => "read",
+            ToolProfile::ReadWrite => "read,write",
+        }
+    }
+}
+
+/// Spawns `pi --mode json --print --session-id <id> --tools <profile>
+/// [backend args] <prompt>` in `cwd` and streams parsed events back over a
+/// channel. Non-blocking: stdout and stderr are each read on their own
+/// thread. `session_id` is reused across calls within one steer run, giving
+/// pi real cross-turn memory via its own session storage.
+pub fn spawn(
+    prompt: &str,
+    cwd: &Path,
+    backend: Backend,
+    session_id: &str,
+    tools: ToolProfile,
+) -> std::io::Result<PiSession> {
+    let mut cmd = Command::new("pi");
+    cmd.arg("--mode")
+        .arg("json")
+        .arg("--print")
+        .arg("--approve")
+        .arg("--session-id")
+        .arg(session_id)
+        .arg("--tools")
+        .arg(tools.tools_arg())
+        .args(backend.extra_args())
+        .arg(prompt)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+
+    let (tx, rx) = mpsc::channel();
+
+    let tx_out = tx.clone();
+    thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some(ev) = parse_line(&line) {
+                if tx_out.send(ev).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            if !line.trim().is_empty() {
+                let _ = tx.send(AgentEvent::Error(line));
+            }
+        }
+        let _ = child.wait();
+    });
+
+    Ok(PiSession { rx })
+}
+
+fn parse_line(line: &str) -> Option<AgentEvent> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    let ty = v.get("type")?.as_str()?;
+    match ty {
+        "message_start" => {
+            let msg = v.get("message")?;
+            if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
+                    return Some(AgentEvent::Model(model.to_string()));
+                }
+            }
+            None
+        }
+        "message_update" => {
+            let ev = v.get("assistantMessageEvent")?;
+            match ev.get("type")?.as_str()? {
+                "thinking_end" => Some(AgentEvent::Thinking(ev.get("content")?.as_str()?.to_string())),
+                "text_end" => Some(AgentEvent::Text(ev.get("content")?.as_str()?.to_string())),
+                "toolcall_end" => {
+                    let tc = ev.get("toolCall")?;
+                    let name = tc.get("name")?.as_str()?.to_string();
+                    let args = tc
+                        .get("arguments")
+                        .map(|a| a.to_string())
+                        .unwrap_or_default();
+                    Some(AgentEvent::ToolCall { name, args })
+                }
+                _ => None,
+            }
+        }
+        "tool_execution_end" => {
+            let name = v.get("toolName")?.as_str()?.to_string();
+            let summary = summarize_result(v.get("result"));
+            Some(AgentEvent::ToolResult { name, summary })
+        }
+        "turn_end" => Some(AgentEvent::TurnEnd),
+        "agent_end" => Some(AgentEvent::AgentEnd),
+        _ => None,
+    }
+}
+
+fn summarize_result(result: Option<&Value>) -> String {
+    let Some(result) = result else { return "done".to_string() };
+    if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
+        let text_len: usize = content
+            .iter()
+            .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+            .map(|t| t.len())
+            .sum();
+        if text_len > 0 {
+            return format!("[{text_len} bytes]");
+        }
+    }
+    "done".to_string()
+}
