@@ -183,3 +183,201 @@ pub fn draw_panel(
         f.render_widget(body, inner);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keymap::Keymap;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn scratch_repo(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "steer-ui-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        for args in [["init", "-q"].as_slice(), &["config", "user.email", "test@example.com"], &["config", "user.name", "test"]] {
+            assert!(Command::new("git").args(args).current_dir(&dir).status().unwrap().success());
+        }
+        dir
+    }
+
+    fn commit_file(dir: &std::path::Path, name: &str, content: &str) {
+        fs::write(dir.join(name), content).unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(dir).status().unwrap();
+    }
+
+    /// Renders `app` into an in-memory buffer and flattens it to plain text
+    /// (row by row, no styling) so tests can assert on visible content
+    /// without a real terminal.
+    fn render(app: &App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn steer_screen_shows_real_file_and_diff() {
+        let dir = scratch_repo("steer");
+        commit_file(&dir, "f.txt", "line1\nline2\n");
+        fs::write(dir.join("f.txt"), "line1-changed\nline2\n").unwrap();
+
+        let app = App::new(dir.clone(), Keymap::defaults());
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("f.txt"), "{screen}");
+        assert!(screen.contains("line1-changed"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn steer_screen_reports_honest_empty_state_on_a_clean_repo() {
+        let dir = scratch_repo("steer-clean");
+        commit_file(&dir, "f.txt", "line1\n");
+
+        let app = App::new(dir.clone(), Keymap::defaults());
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("No uncommitted changes"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_screen_shows_real_source_via_f2() {
+        let dir = scratch_repo("nav");
+        commit_file(&dir, "main.rs", "fn main() {\n    println!(\"hi\");\n}\n");
+
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("main.rs"), "{screen}");
+        assert!(screen.contains("println"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_screen_shows_backend_and_chat_mode_via_f3() {
+        let dir = scratch_repo("agent");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("Backend"), "{screen}");
+        assert!(screen.contains("Chat (read-only)"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_edit_mode_toggle_is_reflected_on_screen() {
+        let dir = scratch_repo("agent-edit");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("Edit (sandboxed writes)"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curation_screen_shows_real_hunk_selection_via_f4() {
+        let dir = scratch_repo("curate");
+        commit_file(&dir, "f.txt", "a\nb\n");
+        fs::write(dir.join("f.txt"), "a-changed\nb\n").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("f.txt"), "{screen}");
+        assert!(screen.contains("1/1 sel"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn symbol_jump_overlay_shows_real_matches_via_ctrl_k() {
+        let dir = scratch_repo("symjump");
+        commit_file(&dir, "lib.rs", "pub fn parse_query(s: &str) {}\n");
+
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        for c in "parse_q".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let screen = render(&app, 150, 40);
+        assert!(screen.contains("parse_query"), "{screen}");
+        assert!(screen.contains("lib.rs"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn symbol_jump_enter_navigates_to_the_real_definition() {
+        let dir = scratch_repo("symjump-goto");
+        commit_file(&dir, "lib.rs", "fn unrelated() {}\npub fn parse_query(s: &str) {}\n");
+
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        for c in "parse_query".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.nav_file.file_name().unwrap(), "lib.rs");
+        assert_eq!(app.nav_line, 1); // 0-indexed line of the `pub fn parse_query` definition
+        let screen = render(&app, 150, 40);
+        assert!(screen.contains("parse_query"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn permission_overlay_demo_via_ctrl_p() {
+        let dir = scratch_repo("perm");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        let screen = render(&app, 150, 30);
+        assert!(screen.contains("wants to apply"), "{screen}");
+        assert!(screen.contains("Approve all"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn narrow_terminal_uses_compact_steer_header() {
+        let dir = scratch_repo("narrow");
+        let app = App::new(dir.clone(), Keymap::defaults());
+        let screen = render(&app, 80, 30);
+        // Narrow layout abbreviates "Ctrl+Enter" to "^Enter" in the header.
+        assert!(screen.contains("^Enter"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wide_terminal_uses_full_steer_header() {
+        let dir = scratch_repo("wide");
+        let app = App::new(dir.clone(), Keymap::defaults());
+        let screen = render(&app, 150, 30);
+        assert!(screen.contains("Ctrl+Enter iterate"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

@@ -275,6 +275,15 @@ impl Keymap {
     pub fn chord(&self, action: Action) -> KeyChord {
         self.chords[&action]
     }
+
+    /// Overrides a single binding programmatically. The `~/.steer.toml`
+    /// loader doesn't need this (it builds the map directly) — it exists so
+    /// tests can exercise a specific remap without touching the real
+    /// filesystem.
+    #[cfg(test)]
+    pub fn set(&mut self, action: Action, chord: KeyChord) {
+        self.chords.insert(action, chord);
+    }
 }
 
 /// Generates KEYBINDINGS.md content from [`BINDINGS`] (+ `keymap`'s current,

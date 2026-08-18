@@ -694,3 +694,258 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn scratch_repo(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "steer-app-test-{label}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        for args in [["init", "-q"].as_slice(), &["config", "user.email", "test@example.com"], &["config", "user.name", "test"]] {
+            assert!(Command::new("git").args(args).current_dir(&dir).status().unwrap().success());
+        }
+        dir
+    }
+
+    fn commit_file(dir: &PathBuf, name: &str, content: &str) {
+        fs::write(dir.join(name), content).unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(dir).status().unwrap();
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    /// Two files, each with one hunk, so Steer/Curation navigation and
+    /// selection have more than one row to move between.
+    fn two_file_app(label: &str) -> (App, PathBuf) {
+        let dir = scratch_repo(label);
+        commit_file(&dir, "a.txt", "a1\na2\n");
+        commit_file(&dir, "b.txt", "b1\nb2\n");
+        fs::write(dir.join("a.txt"), "a1-changed\na2\n").unwrap();
+        fs::write(dir.join("b.txt"), "b1-changed\nb2\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        // Leave both staged-but-uncommitted so `git diff HEAD` still sees them.
+        let app = App::new(dir.clone(), Keymap::defaults());
+        (app, dir)
+    }
+
+    #[test]
+    fn f_keys_switch_mode_from_anywhere() {
+        let (mut app, dir) = two_file_app("fkeys");
+        app.on_key(key(KeyCode::F(2)));
+        assert!(app.mode == Mode::Navigate);
+        app.on_key(key(KeyCode::F(4)));
+        assert!(app.mode == Mode::Curation);
+        app.on_key(key(KeyCode::F(3)));
+        assert!(app.mode == Mode::Agent);
+        app.on_key(key(KeyCode::F(1)));
+        assert!(app.mode == Mode::Steer);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ctrl_c_quits_regardless_of_the_keymap() {
+        // Ctrl+C is checked before the keymap is even consulted (see
+        // on_key's first lines) — it's a fixed safety net, not a binding.
+        // `quit_key_is_configurable` below covers the actually-configurable
+        // `q` binding separately.
+        let dir = scratch_repo("ctrlc");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(ctrl('c'));
+        assert!(app.should_quit);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quit_key_is_configurable() {
+        let dir = scratch_repo("quit-remap");
+        let mut keymap = Keymap::defaults();
+        keymap.set(Action::Quit, crate::keymap::KeyChord { code: KeyCode::Char('z'), mods: KeyModifiers::NONE });
+        let mut app = App::new(dir.clone(), keymap);
+
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(!app.should_quit, "plain q should no longer quit once remapped");
+        app.on_key(key(KeyCode::Char('z')));
+        assert!(app.should_quit, "the remapped chord should quit");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn steer_navigation_and_toggles() {
+        let (mut app, dir) = two_file_app("steer-nav");
+        assert_eq!(app.steer_selected, 0);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.steer_selected, 1);
+        app.on_key(key(KeyCode::Down)); // clamps at the last file
+        assert_eq!(app.steer_selected, 1);
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.steer_selected, 0);
+
+        let was_selected = app.project.files[0].selected;
+        app.on_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.project.files[0].selected, !was_selected);
+
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.project.files[0].flagged);
+        app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(app.project.files[0].notes, 1);
+        app.on_key(key(KeyCode::Char('g')));
+        assert!(!app.project.files[0].flagged);
+        assert_eq!(app.project.files[0].notes, 0);
+
+        assert!(!app.steer_split);
+        app.on_key(key(KeyCode::Char('s')));
+        assert!(app.steer_split);
+        app.on_key(key(KeyCode::Char('u')));
+        assert!(!app.steer_split);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_tree_and_cursor_movement() {
+        let dir = scratch_repo("navigate");
+        commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n    let y = 2;\n}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Navigate;
+
+        let start_line = app.nav_line;
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.nav_line, start_line + 1);
+        app.on_key(key(KeyCode::Char('k')));
+        assert_eq!(app.nav_line, start_line);
+
+        let show = app.show_hover;
+        app.on_key(key(KeyCode::Char('h')));
+        assert_eq!(app.show_hover, !show);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_enter_opens_the_selected_tree_file() {
+        let dir = scratch_repo("navigate-open");
+        commit_file(&dir, "a.rs", "fn a() {}\n");
+        commit_file(&dir, "b.rs", "fn b() {}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Navigate;
+
+        // No subdirectories, so the tree is just [a.rs, b.rs] in that order;
+        // App::new() opens a.rs by default. Moving down and pressing Enter
+        // should switch the open file to b.rs.
+        assert_eq!(app.nav_file.file_name().unwrap(), "a.rs");
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.nav_file.file_name().unwrap(), "b.rs");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curation_navigation_and_edit_message_typing() {
+        let (mut app, dir) = two_file_app("curate-edit");
+        app.mode = Mode::Curation;
+        assert_eq!(app.curation_index, 0);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.curation_index, 1);
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.curation_index, 0);
+
+        let was_fully_selected = app.curation_files[0].selected() == app.curation_files[0].total();
+        app.on_key(key(KeyCode::Char(' ')));
+        let now_fully_selected = app.curation_files[0].selected() == app.curation_files[0].total();
+        assert_eq!(now_fully_selected, !was_fully_selected);
+
+        assert!(!app.editing_commit);
+        app.on_key(key(KeyCode::Char('e')));
+        assert!(app.editing_commit);
+        app.on_key(key(KeyCode::Char('h')));
+        app.on_key(key(KeyCode::Char('i')));
+        assert_eq!(app.commit_message, "hi");
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.commit_message, "h");
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.editing_commit);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_input_accumulates_text_without_spawning_pi() {
+        let dir = scratch_repo("agent-input");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Agent;
+
+        for c in "hello".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.agent_input, "hello");
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.agent_input, "hell");
+        // Deliberately not pressing Enter here — that would spawn a real
+        // `pi` subprocess, which belongs in a slower, opt-in test if ever.
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_backend_and_edit_mode_toggle() {
+        let dir = scratch_repo("agent-toggles");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Agent;
+
+        assert_eq!(app.backend, Backend::Pi);
+        app.on_key(ctrl('b'));
+        assert_eq!(app.backend, Backend::PiCodex);
+        app.on_key(ctrl('b'));
+        assert_eq!(app.backend, Backend::Pi);
+
+        assert!(!app.edit_mode);
+        app.on_key(ctrl('e'));
+        assert!(app.edit_mode);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn permission_demo_cycle_and_cancel() {
+        let dir = scratch_repo("perm-cycle");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(ctrl('p'));
+        assert!(app.overlay == Overlay::Permission);
+        assert_eq!(app.perm_focus, 1);
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.perm_focus, 2);
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.overlay == Overlay::None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn symbol_jump_close_discards_filter_state_choice() {
+        let dir = scratch_repo("symjump-close");
+        commit_file(&dir, "lib.rs", "fn foo() {}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(ctrl('k'));
+        app.on_key(key(KeyCode::Char('f')));
+        assert_eq!(app.symbol_filter, "f");
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.overlay == Overlay::None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
