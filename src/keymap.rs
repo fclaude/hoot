@@ -26,6 +26,7 @@ pub enum Action {
     SwitchCurate,
     OpenSymbolJump,
     OpenPermissionDemo,
+    OpenFileFinder,
 
     SteerUp,
     SteerDown,
@@ -40,9 +41,14 @@ pub enum Action {
 
     NavUp,
     NavDown,
+    NavPageUp,
+    NavPageDown,
+    NavHome,
+    NavEnd,
     NavOpen,
-    NavCursorDown,
-    NavCursorUp,
+    NavToggleFocus,
+    NavScrollLeft,
+    NavScrollRight,
     NavToggleHover,
     NavOpenSymbolJump,
 
@@ -50,6 +56,11 @@ pub enum Action {
     SymbolDown,
     SymbolJumpTo,
     SymbolClose,
+
+    FinderUp,
+    FinderDown,
+    FinderOpen,
+    FinderClose,
 
     AgentSend,
     AgentAcceptAll,
@@ -95,6 +106,7 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::SwitchCurate, "switch_curate", "Switch: Curate", "Global", "f4", "Jump to the Curation screen"),
     b!(Action::OpenSymbolJump, "open_symbol_jump", "Open Symbol Jump", "Global", "ctrl+k", "Open the fuzzy symbol-jump overlay from anywhere"),
     b!(Action::OpenPermissionDemo, "open_permission_demo", "Open Permission Prompt (demo)", "Global", "ctrl+p", "Open the permission-prompt overlay"),
+    b!(Action::OpenFileFinder, "open_file_finder", "Open File Finder", "Global", "ctrl+f", "Open the fuzzy file finder (with live preview) from anywhere"),
 
     b!(Action::SteerUp, "steer_up", "Move up", "Steer", "up", "Select the previous file"),
     b!(Action::SteerDown, "steer_down", "Move down", "Steer", "down", "Select the next file"),
@@ -107,11 +119,16 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::SteerUnifiedView, "steer_unified_view", "Unified view", "Steer", "u", "Switch the diff panel back to unified"),
     b!(Action::SteerIterate, "steer_iterate", "Iterate", "Steer", "ctrl+enter", "Send queued notes to the real pi agent"),
 
-    b!(Action::NavUp, "nav_up", "Move up", "Navigate", "up", "Move the tree selection up (k also always works)"),
-    b!(Action::NavDown, "nav_down", "Move down", "Navigate", "down", "Move the tree selection down (j also always works)"),
-    b!(Action::NavOpen, "nav_open", "Open file", "Navigate", "enter", "Open the selected file"),
-    b!(Action::NavCursorDown, "nav_cursor_down", "Cursor down", "Navigate", "]", "Move the source cursor down a line (for hover)"),
-    b!(Action::NavCursorUp, "nav_cursor_up", "Cursor up", "Navigate", "[", "Move the source cursor up a line (for hover)"),
+    b!(Action::NavUp, "nav_up", "Move up", "Navigate", "up", "Move up in whichever pane is focused (k also always works)"),
+    b!(Action::NavDown, "nav_down", "Move down", "Navigate", "down", "Move down in whichever pane is focused (j also always works)"),
+    b!(Action::NavPageUp, "nav_page_up", "Page up", "Navigate", "pageup", "Move up a page in whichever pane is focused"),
+    b!(Action::NavPageDown, "nav_page_down", "Page down", "Navigate", "pagedown", "Move down a page in whichever pane is focused"),
+    b!(Action::NavHome, "nav_home", "Jump to top", "Navigate", "home", "Jump to the first entry/line in the focused pane"),
+    b!(Action::NavEnd, "nav_end", "Jump to bottom", "Navigate", "end", "Jump to the last entry/line in the focused pane"),
+    b!(Action::NavOpen, "nav_open", "Open file", "Navigate", "enter", "Open the selected file and focus the source pane"),
+    b!(Action::NavToggleFocus, "nav_toggle_focus", "Switch pane", "Navigate", "tab", "Switch focus between the tree and source panes"),
+    b!(Action::NavScrollLeft, "nav_scroll_left", "Scroll left", "Navigate", "left", "Scroll the source pane left (only while it's focused)"),
+    b!(Action::NavScrollRight, "nav_scroll_right", "Scroll right", "Navigate", "right", "Scroll the source pane right (only while it's focused)"),
     b!(Action::NavToggleHover, "nav_toggle_hover", "Toggle hover", "Navigate", "h", "Show/hide symbol info for the current line"),
     b!(Action::NavOpenSymbolJump, "nav_open_symbol_jump", "Open symbol jump", "Navigate", "/", "Open the fuzzy symbol-jump overlay"),
 
@@ -119,6 +136,11 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::SymbolDown, "symbol_down", "Move down", "Symbol Jump", "down", "Move the result selection down"),
     b!(Action::SymbolJumpTo, "symbol_jump_to", "Jump", "Symbol Jump", "enter", "Jump to the selected symbol's definition"),
     b!(Action::SymbolClose, "symbol_close", "Close", "Symbol Jump", "esc", "Close the overlay without jumping"),
+
+    b!(Action::FinderUp, "finder_up", "Move up", "File Finder", "up", "Move the result selection up"),
+    b!(Action::FinderDown, "finder_down", "Move down", "File Finder", "down", "Move the result selection down"),
+    b!(Action::FinderOpen, "finder_open", "Open", "File Finder", "enter", "Open the selected file"),
+    b!(Action::FinderClose, "finder_close", "Close", "File Finder", "esc", "Close the overlay without opening"),
 
     b!(Action::AgentSend, "agent_send", "Send prompt", "Agent", "enter", "Send the typed prompt to the real pi agent"),
     b!(Action::AgentAcceptAll, "agent_accept_all", "Accept all", "Agent", "ctrl+a", "Open the real diff from Edit mode for approval"),
@@ -178,6 +200,10 @@ impl KeyChord {
             "down" => KeyCode::Down,
             "left" => KeyCode::Left,
             "right" => KeyCode::Right,
+            "pageup" | "pgup" => KeyCode::PageUp,
+            "pagedown" | "pgdn" => KeyCode::PageDown,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
             f if f.len() >= 2 && f.starts_with('f') && f[1..].chars().all(|c| c.is_ascii_digit()) => {
                 KeyCode::F(f[1..].parse().ok()?)
             }
@@ -209,6 +235,10 @@ impl fmt::Display for KeyChord {
             KeyCode::Down => write!(f, "\u{2193}"),
             KeyCode::Left => write!(f, "\u{2190}"),
             KeyCode::Right => write!(f, "\u{2192}"),
+            KeyCode::PageUp => write!(f, "PgUp"),
+            KeyCode::PageDown => write!(f, "PgDn"),
+            KeyCode::Home => write!(f, "Home"),
+            KeyCode::End => write!(f, "End"),
             KeyCode::F(n) => write!(f, "F{n}"),
             KeyCode::Char(c) => write!(f, "{c}"),
             other => write!(f, "{other:?}"),

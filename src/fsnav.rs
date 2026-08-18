@@ -180,6 +180,27 @@ pub fn hover_for_line<'a>(symbols: &'a [SymbolResult], line_text: &str) -> Optio
     symbols.iter().find(|s| words.contains(&s.name.as_str()))
 }
 
+/// Simple case-insensitive subsequence fuzzy match: every character of
+/// `needle` must appear in `haystack` in the same order, not necessarily
+/// adjacent — so "mnrs" matches "main.rs". No scoring/ranking, just
+/// yes-or-no; callers sort however they like (here, filtered lists just
+/// keep the underlying collection's order).
+pub fn fuzzy_match(needle: &str, haystack: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let mut hay = haystack.to_lowercase().chars().collect::<Vec<_>>().into_iter();
+    'needle: for nc in needle.to_lowercase().chars() {
+        for hc in hay.by_ref() {
+            if hc == nc {
+                continue 'needle;
+            }
+        }
+        return false;
+    }
+    true
+}
+
 /// Whole-word occurrence count of `name` across scanned source files.
 pub fn reference_count(root: &Path, name: &str) -> u32 {
     let mut files = Vec::new();
@@ -299,5 +320,20 @@ mod tests {
         assert!(!labels.contains(&"target/"), "labels = {labels:?}");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fuzzy_match_finds_non_contiguous_subsequences() {
+        assert!(fuzzy_match("mnrs", "main.rs"));
+        assert!(fuzzy_match("main.rs", "main.rs"));
+        assert!(fuzzy_match("", "anything"));
+        assert!(fuzzy_match("MNRS", "main.rs"), "should be case-insensitive");
+    }
+
+    #[test]
+    fn fuzzy_match_rejects_out_of_order_or_missing_characters() {
+        assert!(!fuzzy_match("srn", "main.rs")); // right letters, wrong order
+        assert!(!fuzzy_match("xyz", "main.rs"));
+        assert!(!fuzzy_match("main.rs.extra", "main.rs")); // needle longer than haystack
     }
 }

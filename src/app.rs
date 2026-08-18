@@ -24,6 +24,14 @@ pub enum Overlay {
     None,
     SymbolJump,
     Permission,
+    FileFinder,
+}
+
+/// Which Navigate pane arrow keys currently move.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NavFocus {
+    Tree,
+    Source,
 }
 
 /// What the Permission overlay is currently showing: the static Ctrl+P demo
@@ -60,9 +68,11 @@ pub struct App {
     // NAVIGATE
     pub tree: Vec<TreeEntry>,
     pub tree_index: usize,
+    pub nav_focus: NavFocus,
     pub nav_file: PathBuf,
     pub source: Vec<String>,
     pub nav_line: usize,
+    pub nav_scroll_x: u16,
     pub hover: Option<HoverInfo>,
     pub show_hover: bool,
 
@@ -70,6 +80,10 @@ pub struct App {
     pub symbols: Vec<SymbolResult>,
     pub symbol_filter: String,
     pub symbol_index: usize,
+
+    // FILE FINDER (overlay)
+    pub file_finder_filter: String,
+    pub file_finder_index: usize,
 
     // AGENT
     pub target_dir: PathBuf,
@@ -107,6 +121,23 @@ pub struct App {
 
 const PERM_OPTIONS: [&str; 4] = ["Review files", "Approve all", "Modify", "Reject"];
 
+/// Lines per Page Up/Page Down in Navigate. app.rs doesn't know the actual
+/// rendered pane height, so this is a fixed, editor-typical step rather
+/// than a true screen-relative page.
+const PAGE_SIZE: usize = 20;
+
+fn clamped_move(current: usize, delta: i64, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let max = len - 1;
+    if delta < 0 {
+        current.saturating_sub(delta.unsigned_abs() as usize)
+    } else {
+        (current + delta as usize).min(max)
+    }
+}
+
 impl App {
     pub fn new(target_dir: PathBuf, keymap: Keymap) -> Self {
         let review = crate::gitreview::load(&target_dir);
@@ -128,15 +159,20 @@ impl App {
 
             tree,
             tree_index: 0,
+            nav_focus: NavFocus::Tree,
             nav_file,
             source,
             nav_line: 0,
+            nav_scroll_x: 0,
             hover: None,
             show_hover: true,
 
             symbols,
             symbol_filter: String::new(),
             symbol_index: 0,
+
+            file_finder_filter: String::new(),
+            file_finder_index: 0,
 
             target_dir,
             session_id: format!("steer-{}", std::process::id()),
@@ -198,6 +234,7 @@ impl App {
         self.source = fsnav::read_file(&path);
         self.nav_file = path;
         self.nav_line = 0;
+        self.nav_scroll_x = 0;
         self.refresh_hover();
     }
 
@@ -481,6 +518,7 @@ impl App {
         match self.overlay {
             Overlay::SymbolJump => return self.on_key_symbol_jump(key),
             Overlay::Permission => return self.on_key_permission(key),
+            Overlay::FileFinder => return self.on_key_file_finder(key),
             Overlay::None => {}
         }
 
@@ -513,6 +551,12 @@ impl App {
 
         if self.keymap.is(&key, Action::OpenSymbolJump) {
             self.overlay = Overlay::SymbolJump;
+            return;
+        }
+        if self.keymap.is(&key, Action::OpenFileFinder) {
+            self.overlay = Overlay::FileFinder;
+            self.file_finder_filter.clear();
+            self.file_finder_index = 0;
             return;
         }
         if self.keymap.is(&key, Action::OpenPermissionDemo) {
@@ -600,15 +644,55 @@ impl App {
     // -------------------------------------------------------------
     // NAVIGATE
     // -------------------------------------------------------------
+
+    /// Moves the focused pane's index by `delta` (negative = up/back),
+    /// clamped to its bounds. `tree_len` is passed in since the tree and
+    /// source have different lengths and only one is relevant per call.
+    fn move_nav_focus(&mut self, delta: i64, tree_len: usize) {
+        match self.nav_focus {
+            NavFocus::Tree => self.tree_index = clamped_move(self.tree_index, delta, tree_len),
+            NavFocus::Source => {
+                self.nav_line = clamped_move(self.nav_line, delta, self.source.len());
+                if self.show_hover {
+                    self.refresh_hover();
+                }
+            }
+        }
+    }
+
+    /// Jumps the focused pane's index directly to `target` (clamped to its
+    /// bounds) — `usize::MAX` means "the last entry".
+    fn jump_nav_focus(&mut self, target: usize, tree_len: usize) {
+        match self.nav_focus {
+            NavFocus::Tree => self.tree_index = target.min(tree_len.saturating_sub(1)),
+            NavFocus::Source => {
+                self.nav_line = target.min(self.source.len().saturating_sub(1));
+                if self.show_hover {
+                    self.refresh_hover();
+                }
+            }
+        }
+    }
+
     fn on_key_navigate(&mut self, key: KeyEvent) {
         let n = self.tree.len();
         let k = &self.keymap;
-        // j/k always move the tree too, regardless of NavUp/NavDown's
-        // configured chord — vim muscle memory shouldn't require a remap.
+        // j/k always move too, regardless of NavUp/NavDown's configured
+        // chord — vim muscle memory shouldn't require a remap. Which pane
+        // they move depends on nav_focus, same as the arrows: only one
+        // pane moves at a time, never both.
         if k.is(&key, Action::NavUp) || key.code == KeyCode::Char('k') {
-            self.tree_index = self.tree_index.saturating_sub(1);
+            self.move_nav_focus(-1, n);
         } else if k.is(&key, Action::NavDown) || key.code == KeyCode::Char('j') {
-            self.tree_index = (self.tree_index + 1).min(n.saturating_sub(1));
+            self.move_nav_focus(1, n);
+        } else if k.is(&key, Action::NavPageUp) {
+            self.move_nav_focus(-(PAGE_SIZE as i64), n);
+        } else if k.is(&key, Action::NavPageDown) {
+            self.move_nav_focus(PAGE_SIZE as i64, n);
+        } else if k.is(&key, Action::NavHome) {
+            self.jump_nav_focus(0, n);
+        } else if k.is(&key, Action::NavEnd) {
+            self.jump_nav_focus(usize::MAX, n);
         } else if k.is(&key, Action::NavOpen) {
             if let Some(entry) = self.tree.get(self.tree_index) {
                 if !entry.is_dir {
@@ -616,15 +700,19 @@ impl App {
                     self.open_file(path);
                 }
             }
-        } else if k.is(&key, Action::NavCursorDown) {
-            self.nav_line = (self.nav_line + 1).min(self.source.len().saturating_sub(1));
-            if self.show_hover {
-                self.refresh_hover();
+            self.nav_focus = NavFocus::Source;
+        } else if k.is(&key, Action::NavToggleFocus) {
+            self.nav_focus = match self.nav_focus {
+                NavFocus::Tree => NavFocus::Source,
+                NavFocus::Source => NavFocus::Tree,
+            };
+        } else if k.is(&key, Action::NavScrollLeft) {
+            if self.nav_focus == NavFocus::Source {
+                self.nav_scroll_x = self.nav_scroll_x.saturating_sub(4);
             }
-        } else if k.is(&key, Action::NavCursorUp) {
-            self.nav_line = self.nav_line.saturating_sub(1);
-            if self.show_hover {
-                self.refresh_hover();
+        } else if k.is(&key, Action::NavScrollRight) {
+            if self.nav_focus == NavFocus::Source {
+                self.nav_scroll_x = self.nav_scroll_x.saturating_add(4);
             }
         } else if k.is(&key, Action::NavToggleHover) {
             self.show_hover = !self.show_hover;
@@ -640,11 +728,10 @@ impl App {
     // SYMBOL JUMP
     // -------------------------------------------------------------
     fn filtered_symbols(&self) -> Vec<usize> {
-        let needle = self.symbol_filter.to_lowercase();
         self.symbols
             .iter()
             .enumerate()
-            .filter(|(_, s)| needle.is_empty() || s.name.to_lowercase().contains(&needle))
+            .filter(|(_, s)| fsnav::fuzzy_match(&self.symbol_filter, &s.name))
             .map(|(i, _)| i)
             .collect()
     }
@@ -682,6 +769,54 @@ impl App {
 
     pub fn symbol_results(&self) -> Vec<&SymbolResult> {
         self.filtered_symbols().into_iter().map(|i| &self.symbols[i]).collect()
+    }
+
+    // -------------------------------------------------------------
+    // FILE FINDER
+    // -------------------------------------------------------------
+    fn filtered_files(&self) -> Vec<usize> {
+        self.tree
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.is_dir)
+            .filter(|(_, e)| {
+                let rel = e.path.strip_prefix(&self.target_dir).unwrap_or(&e.path).display().to_string();
+                fsnav::fuzzy_match(&self.file_finder_filter, &rel)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn file_finder_results(&self) -> Vec<&TreeEntry> {
+        self.filtered_files().into_iter().map(|i| &self.tree[i]).collect()
+    }
+
+    fn on_key_file_finder(&mut self, key: KeyEvent) {
+        let k = &self.keymap;
+        if k.is(&key, Action::FinderClose) {
+            self.overlay = Overlay::None;
+        } else if k.is(&key, Action::FinderOpen) {
+            if let Some(&i) = self.filtered_files().get(self.file_finder_index) {
+                let path = self.tree[i].path.clone();
+                self.open_file(path);
+                self.nav_focus = NavFocus::Source;
+            }
+            self.overlay = Overlay::None;
+            self.mode = Mode::Navigate;
+        } else if k.is(&key, Action::FinderUp) {
+            self.file_finder_index = self.file_finder_index.saturating_sub(1);
+        } else if k.is(&key, Action::FinderDown) {
+            let len = self.filtered_files().len();
+            if len > 0 {
+                self.file_finder_index = (self.file_finder_index + 1).min(len - 1);
+            }
+        } else if key.code == KeyCode::Backspace {
+            self.file_finder_filter.pop();
+            self.file_finder_index = 0;
+        } else if let KeyCode::Char(c) = key.code {
+            self.file_finder_filter.push(c);
+            self.file_finder_index = 0;
+        }
     }
 
     // -------------------------------------------------------------
@@ -935,15 +1070,98 @@ mod tests {
         let mut app = App::new(dir.clone(), Keymap::defaults());
         app.mode = Mode::Navigate;
 
+        // Up/Down move the tree until the source pane is focused — arrows
+        // never move both at once.
+        assert!(app.nav_focus == NavFocus::Tree);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.nav_line, 0, "still tree-focused, shouldn't touch the cursor");
+
+        app.on_key(key(KeyCode::Tab));
+        assert!(app.nav_focus == NavFocus::Source);
+
         let start_line = app.nav_line;
-        app.on_key(key(KeyCode::Char(']')));
+        app.on_key(key(KeyCode::Down));
         assert_eq!(app.nav_line, start_line + 1);
-        app.on_key(key(KeyCode::Char('[')));
+        app.on_key(key(KeyCode::Up));
         assert_eq!(app.nav_line, start_line);
 
         let show = app.show_hover;
         app.on_key(key(KeyCode::Char('h')));
         assert_eq!(app.show_hover, !show);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_left_right_scroll_the_source_pane_only_when_focused() {
+        let dir = scratch_repo("navigate-scroll");
+        commit_file(&dir, "main.rs", "fn main() {}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Navigate;
+
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.nav_scroll_x, 0, "tree-focused: arrows shouldn't scroll source");
+
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Right));
+        assert!(app.nav_scroll_x > 0, "source-focused: Right should scroll");
+        let scrolled = app.nav_scroll_x;
+        app.on_key(key(KeyCode::Left));
+        assert!(app.nav_scroll_x < scrolled, "Left should scroll back");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_page_up_down_and_home_end_in_source() {
+        let dir = scratch_repo("navigate-page");
+        let content: String = (1..=60).map(|n| format!("line{n}\n")).collect();
+        commit_file(&dir, "big.rs", &content);
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Navigate;
+        app.on_key(key(KeyCode::Tab)); // focus source
+        assert!(app.nav_focus == NavFocus::Source);
+
+        app.on_key(key(KeyCode::PageDown));
+        assert_eq!(app.nav_line, PAGE_SIZE);
+        app.on_key(key(KeyCode::PageDown));
+        assert_eq!(app.nav_line, PAGE_SIZE * 2);
+        app.on_key(key(KeyCode::PageUp));
+        assert_eq!(app.nav_line, PAGE_SIZE);
+
+        app.on_key(key(KeyCode::End));
+        assert_eq!(app.nav_line, 59); // 60 lines, 0-indexed
+        app.on_key(key(KeyCode::Home));
+        assert_eq!(app.nav_line, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_page_down_clamps_at_the_end_of_a_short_file() {
+        let dir = scratch_repo("navigate-page-short");
+        commit_file(&dir, "small.rs", "line1\nline2\nline3\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Navigate;
+        app.on_key(key(KeyCode::Tab));
+
+        app.on_key(key(KeyCode::PageDown));
+        assert_eq!(app.nav_line, 2, "should clamp to the last line, not overshoot");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_enter_focuses_source_and_opening_a_file_resets_scroll() {
+        let dir = scratch_repo("navigate-open-focus");
+        commit_file(&dir, "a.rs", "fn a() {}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Navigate;
+        app.nav_scroll_x = 12;
+
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.nav_focus == NavFocus::Source);
+        assert_eq!(app.nav_scroll_x, 0);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1124,6 +1342,49 @@ mod tests {
         assert!(app.commit_message_status.as_deref().unwrap().contains("pi exploded"));
         assert_eq!(app.transcript.len(), transcript_len_before);
         assert!(!app.open_editor_requested, "an error shouldn't open the editor");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_finder_fuzzy_filters_and_opens_the_selected_file() {
+        let dir = scratch_repo("finder");
+        commit_file(&dir, "main.rs", "fn main() {}\n");
+        commit_file(&dir, "readme.md", "# hi\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+
+        app.on_key(ctrl('f'));
+        assert!(app.overlay == Overlay::FileFinder);
+
+        // "mnrs" should subsequence-match "main.rs" but not "readme.md".
+        for c in "mnrs".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        let results = app.file_finder_results();
+        assert_eq!(results.len(), 1, "results = {:?}", results.iter().map(|e| &e.label).collect::<Vec<_>>());
+        assert_eq!(results[0].label, "main.rs");
+
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.overlay == Overlay::None);
+        assert!(app.mode == Mode::Navigate);
+        assert_eq!(app.nav_file.file_name().unwrap(), "main.rs");
+        assert!(app.nav_focus == NavFocus::Source);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_finder_esc_closes_without_opening_anything() {
+        let dir = scratch_repo("finder-close");
+        commit_file(&dir, "a.rs", "fn a() {}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let original_file = app.nav_file.clone();
+
+        app.on_key(ctrl('f'));
+        app.on_key(key(KeyCode::Char('z')));
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.overlay == Overlay::None);
+        assert_eq!(app.nav_file, original_file);
 
         let _ = fs::remove_dir_all(&dir);
     }

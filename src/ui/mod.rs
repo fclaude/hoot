@@ -1,5 +1,6 @@
 mod agent;
 mod curation;
+mod file_finder;
 mod navigate;
 mod permission;
 mod steer;
@@ -40,6 +41,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     match app.overlay {
         Overlay::SymbolJump => symbol_jump::draw(f, app, area),
         Overlay::Permission => permission::draw(f, app, area),
+        Overlay::FileFinder => file_finder::draw(f, app, area),
         Overlay::None => {}
     }
 }
@@ -273,6 +275,34 @@ mod tests {
     }
 
     #[test]
+    fn navigate_source_viewport_follows_the_cursor_on_a_long_file() {
+        let dir = scratch_repo("nav-scroll");
+        let content: String = (1..=200).map(|n| format!("UNIQUE_LINE_MARKER_{n}\n")).collect();
+        commit_file(&dir, "big.rs", &content);
+
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // focus source
+
+        // Before jumping: line 1 is visible, line 150 is nowhere near the
+        // top of a freshly opened file, so it shouldn't be on screen yet.
+        let before = render(&app, 120, 30);
+        assert!(before.contains("UNIQUE_LINE_MARKER_1\n") || before.contains("UNIQUE_LINE_MARKER_1 "), "{before}");
+        assert!(!before.contains("UNIQUE_LINE_MARKER_150"), "{before}");
+
+        for _ in 0..7 {
+            app.on_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        assert_eq!(app.nav_line, 140); // 7 * PAGE_SIZE(20)
+
+        let after = render(&app, 120, 30);
+        assert!(after.contains("UNIQUE_LINE_MARKER_141"), "viewport should have scrolled to follow the cursor: {after}");
+        assert!(!after.contains("UNIQUE_LINE_MARKER_1\n"), "the original top of the file should have scrolled off: {after}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn agent_screen_shows_backend_and_chat_mode_via_f3() {
         let dir = scratch_repo("agent");
         let mut app = App::new(dir.clone(), Keymap::defaults());
@@ -344,6 +374,25 @@ mod tests {
         assert_eq!(app.nav_line, 1); // 0-indexed line of the `pub fn parse_query` definition
         let screen = render(&app, 150, 40);
         assert!(screen.contains("parse_query"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_finder_shows_fuzzy_matches_with_a_live_preview() {
+        let dir = scratch_repo("finder-ui");
+        commit_file(&dir, "main.rs", "fn main() {\n    println!(\"finder preview\");\n}\n");
+        commit_file(&dir, "readme.md", "# unrelated\n");
+
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        for c in "mnrs".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let screen = render(&app, 150, 40);
+        assert!(screen.contains("main.rs"), "{screen}");
+        assert!(screen.contains("finder preview"), "live preview should show the file's real content: {screen}");
+        assert!(!screen.contains("unrelated"), "readme.md shouldn't match \"mnrs\": {screen}");
 
         let _ = fs::remove_dir_all(&dir);
     }

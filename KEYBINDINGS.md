@@ -27,6 +27,7 @@ Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) 
 | `switch_curate` | Switch: Curate | `F4` |  | Jump to the Curation screen |
 | `open_symbol_jump` | Open Symbol Jump | `Ctrl+k` |  | Open the fuzzy symbol-jump overlay from anywhere |
 | `open_permission_demo` | Open Permission Prompt (demo) | `Ctrl+p` |  | Open the permission-prompt overlay |
+| `open_file_finder` | Open File Finder | `Ctrl+f` |  | Open the fuzzy file finder (with live preview) from anywhere |
 
 ## Steer
 
@@ -47,11 +48,16 @@ Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) 
 
 | Binding name | Action | Default | Current | Description |
 |---|---|---|---|---|
-| `nav_up` | Move up | `↑` |  | Move the tree selection up (k also always works) |
-| `nav_down` | Move down | `↓` |  | Move the tree selection down (j also always works) |
-| `nav_open` | Open file | `Enter` |  | Open the selected file |
-| `nav_cursor_down` | Cursor down | `]` |  | Move the source cursor down a line (for hover) |
-| `nav_cursor_up` | Cursor up | `[` |  | Move the source cursor up a line (for hover) |
+| `nav_up` | Move up | `↑` |  | Move up in whichever pane is focused (k also always works) |
+| `nav_down` | Move down | `↓` |  | Move down in whichever pane is focused (j also always works) |
+| `nav_page_up` | Page up | `PgUp` |  | Move up a page in whichever pane is focused |
+| `nav_page_down` | Page down | `PgDn` |  | Move down a page in whichever pane is focused |
+| `nav_home` | Jump to top | `Home` |  | Jump to the first entry/line in the focused pane |
+| `nav_end` | Jump to bottom | `End` |  | Jump to the last entry/line in the focused pane |
+| `nav_open` | Open file | `Enter` |  | Open the selected file and focus the source pane |
+| `nav_toggle_focus` | Switch pane | `Tab` |  | Switch focus between the tree and source panes |
+| `nav_scroll_left` | Scroll left | `←` |  | Scroll the source pane left (only while it's focused) |
+| `nav_scroll_right` | Scroll right | `→` |  | Scroll the source pane right (only while it's focused) |
 | `nav_toggle_hover` | Toggle hover | `h` |  | Show/hide symbol info for the current line |
 | `nav_open_symbol_jump` | Open symbol jump | `/` |  | Open the fuzzy symbol-jump overlay |
 
@@ -63,6 +69,15 @@ Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) 
 | `symbol_down` | Move down | `↓` |  | Move the result selection down |
 | `symbol_jump_to` | Jump | `Enter` |  | Jump to the selected symbol's definition |
 | `symbol_close` | Close | `Esc` |  | Close the overlay without jumping |
+
+## File Finder
+
+| Binding name | Action | Default | Current | Description |
+|---|---|---|---|---|
+| `finder_up` | Move up | `↑` |  | Move the result selection up |
+| `finder_down` | Move down | `↓` |  | Move the result selection down |
+| `finder_open` | Open | `Enter` |  | Open the selected file |
+| `finder_close` | Close | `Esc` |  | Close the overlay without opening |
 
 ## Agent
 

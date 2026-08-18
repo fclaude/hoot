@@ -4,11 +4,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, NavFocus};
 use crate::syntax::TokenKind;
 use crate::theme;
 
-fn highlighted_line(ext: &str, src_line: &str, bg: Option<ratatui::style::Color>) -> Line<'static> {
+pub(crate) fn highlighted_line(ext: &str, src_line: &str, bg: Option<ratatui::style::Color>) -> Line<'static> {
     let base = match bg {
         Some(bg) => Style::default().bg(bg),
         None => Style::default(),
@@ -32,6 +32,17 @@ fn highlighted_line(ext: &str, src_line: &str, bg: Option<ratatui::style::Color>
     Line::from(spans)
 }
 
+/// Where a scrolling window of `visible` rows over `total` items should
+/// start so that `selected` stays on screen — centered when there's room,
+/// clamped at both ends otherwise.
+fn scroll_offset(selected: usize, total: usize, visible: usize) -> usize {
+    if visible == 0 || total <= visible {
+        return 0;
+    }
+    let max_start = total - visible;
+    selected.saturating_sub(visible / 2).min(max_start)
+}
+
 pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let sidebar_width = if narrow { 22 } else { 34 };
     let chunks = Layout::default()
@@ -44,16 +55,20 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
 }
 
 fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
+    let tick_color = if app.nav_focus == NavFocus::Tree { theme::CYAN } else { theme::DIM };
+    let visible = area.height.saturating_sub(1) as usize; // 1 row for the root path
+    let scroll = scroll_offset(app.tree_index, app.tree.len(), visible);
+
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         app.target_dir.display().to_string(),
         Style::default().fg(theme::FG),
     )));
 
-    for (i, entry) in app.tree.iter().enumerate() {
+    for (i, entry) in app.tree.iter().enumerate().skip(scroll).take(visible) {
         let indent = "\u{2502}  ".repeat(entry.depth as usize);
         let mut spans = vec![
-            Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
+            Span::styled("\u{258c} ", Style::default().fg(tick_color)),
             Span::styled(indent, Style::default().fg(theme::DIM)),
             Span::styled("\u{251c}\u{2500} ", Style::default().fg(theme::DIM)),
             Span::styled(entry.label.clone(), Style::default().fg(theme::FG)),
@@ -84,25 +99,23 @@ fn draw_source(f: &mut Frame, app: &App, area: Rect) {
         .display()
         .to_string();
 
-    let ext = crate::syntax::ext_for(&app.nav_file);
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for (i, src_line) in app.source.iter().enumerate() {
-        let bg = if i == app.nav_line { Some(theme::BG_SELECTION) } else { None };
-        lines.push(highlighted_line(&ext, src_line, bg));
-    }
-    if app.source.is_empty() {
-        lines.push(Line::from(Span::styled("(select a file and press Enter)", Style::default().fg(theme::DIM))));
-    }
-
-    let title = format!("{name} \u{2014} {} lines", app.source.len());
+    let focused = app.nav_focus == NavFocus::Source;
+    let scroll_x = app.nav_scroll_x as usize;
+    let title = if !app.source.is_empty() {
+        format!("{name} \u{2014} line {}/{}", app.nav_line + 1, app.source.len())
+    } else {
+        format!("{name} \u{2014} 0 lines")
+    };
     let hints = vec![super::key_hints(&[
-        ("j/k", "Move"),
+        ("Tab", "Switch pane"),
+        ("\u{2191}\u{2193}", "Move"),
+        ("PgUp/PgDn", "Page"),
+        ("\u{2190}\u{2192}", "Scroll"),
         ("Enter", "Open"),
-        ("[/]", "Cursor"),
-        ("h", "Toggle hover"),
-        ("/", "Symbol jump"),
+        ("h", "Hover"),
+        ("/", "Symbols"),
     ])];
-    let block = super::panel_block(&title);
+    let block = super::panel_block(&title).border_style(Style::default().fg(if focused { theme::CYAN } else { theme::DIM }));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -110,6 +123,21 @@ fn draw_source(f: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Length(hints.len() as u16)])
         .split(inner);
+
+    let visible_height = rows[0].height as usize;
+    let scroll_y = scroll_offset(app.nav_line, app.source.len(), visible_height);
+
+    let ext = crate::syntax::ext_for(&app.nav_file);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, src_line) in app.source.iter().enumerate().skip(scroll_y).take(visible_height) {
+        let bg = if i == app.nav_line { Some(theme::BG_SELECTION) } else { None };
+        let visible_line: String = src_line.chars().skip(scroll_x).collect();
+        lines.push(highlighted_line(&ext, &visible_line, bg));
+    }
+    if app.source.is_empty() {
+        lines.push(Line::from(Span::styled("(select a file and press Enter)", Style::default().fg(theme::DIM))));
+    }
+
     f.render_widget(Paragraph::new(lines), rows[0]);
     let divider = "\u{2500}".repeat(rows[1].width as usize);
     f.render_widget(Paragraph::new(divider).style(Style::default().fg(theme::DIM)), rows[1]);
@@ -117,7 +145,8 @@ fn draw_source(f: &mut Frame, app: &App, area: Rect) {
 
     if app.show_hover {
         if let Some(hover) = &app.hover {
-            draw_hover(f, hover, app.nav_line, rows[0]);
+            let on_screen_line = app.nav_line.saturating_sub(scroll_y);
+            draw_hover(f, hover, on_screen_line, rows[0]);
         }
     }
 }
