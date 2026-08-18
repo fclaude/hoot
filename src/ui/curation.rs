@@ -30,11 +30,10 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     draw_hunk_box(f, app, right[1]);
 
     let hints = super::key_hints(&[
-        ("Space", "Toggle"),
-        ("e", "Edit message"),
+        ("Space", "Toggle hunks"),
+        ("g", "Generate message"),
+        ("e", "Quick edit"),
         ("c", "Commit"),
-        ("h", "Help"),
-        ("Esc", "Back"),
     ]);
     let mut spans = vec![Span::styled("\u{258c} ", Style::default().fg(theme::DIM))];
     spans.extend(hints.spans);
@@ -92,8 +91,18 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_commit_box(f: &mut Frame, app: &App, area: Rect) {
-    let title = "Commit message (editable, drafted by local model)";
+    let title = if app.review_is_real { "Commit message" } else { "Commit message (editable, drafted by local model)" };
     let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(status) = &app.commit_message_status {
+        lines.push(Line::from(Span::styled(status.clone(), Style::default().fg(theme::ORANGE))));
+        lines.push(Line::raw(""));
+    }
+    if app.commit_message.is_empty() && !app.editing_commit {
+        lines.push(Line::from(Span::styled(
+            "(empty — press g to draft one with pi, or e to write your own)",
+            Style::default().fg(theme::DIM),
+        )));
+    }
     for l in app.commit_message.split('\n') {
         lines.push(Line::from(Span::styled(l.to_string(), Style::default().fg(theme::FG))));
     }
@@ -103,7 +112,7 @@ fn draw_commit_box(f: &mut Frame, app: &App, area: Rect) {
     let hints = if app.editing_commit {
         vec![super::key_hints(&[("Esc", "Stop editing"), ("Enter", "Newline")])]
     } else {
-        vec![]
+        vec![super::key_hints(&[("g", "Generate + open $EDITOR"), ("e", "Quick edit")])]
     };
     super::draw_panel(f, area, title, Paragraph::new(lines), &hints);
 }

@@ -1,5 +1,6 @@
 mod app;
 mod data;
+mod editor;
 mod fsnav;
 mod gitcommit;
 mod gitreview;
@@ -64,7 +65,7 @@ fn main() -> io::Result<()> {
     result
 }
 
-fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, target_dir: PathBuf, keymap: Keymap) -> io::Result<()> {
+fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, target_dir: PathBuf, keymap: Keymap) -> io::Result<()> {
     let mut app = App::new(target_dir, keymap);
 
     loop {
@@ -77,8 +78,34 @@ fn run<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, target_dir: Pat
             }
         }
 
+        if app.open_editor_requested {
+            app.open_editor_requested = false;
+            open_external_editor(terminal, &mut app)?;
+        }
+
         if app.should_quit {
             return Ok(());
         }
     }
+}
+
+/// Suspends the TUI (raw mode + alternate screen) so an interactive editor
+/// can draw directly to the real terminal, runs it on `app.commit_message`,
+/// then restores the TUI and forces a full redraw.
+fn open_external_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    let result = editor::edit_text(&app.commit_message);
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+
+    match result {
+        Ok(text) => app.commit_message = text.trim_end().to_string(),
+        Err(e) => app.commit_message_status = Some(e),
+    }
+
+    Ok(())
 }

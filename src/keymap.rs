@@ -66,6 +66,7 @@ pub enum Action {
     CurateDown,
     CurateToggleHunk,
     CurateEditMessage,
+    CurateGenerateMessage,
     CurateCommit,
     CurateStopEditing,
 }
@@ -133,7 +134,8 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::CurateUp, "curate_up", "Move up", "Curate", "up", "Select the previous file"),
     b!(Action::CurateDown, "curate_down", "Move down", "Curate", "down", "Select the next file"),
     b!(Action::CurateToggleHunk, "curate_toggle_hunk", "Toggle hunks", "Curate", "space", "Select/deselect all hunks for this file"),
-    b!(Action::CurateEditMessage, "curate_edit_message", "Edit message", "Curate", "e", "Start editing the commit message"),
+    b!(Action::CurateEditMessage, "curate_edit_message", "Quick edit", "Curate", "e", "In-TUI quick edit of the commit message"),
+    b!(Action::CurateGenerateMessage, "curate_generate_message", "Generate message", "Curate", "g", "Draft a message from the real diff with pi, then open it in $EDITOR for a last pass"),
     b!(Action::CurateCommit, "curate_commit", "Commit", "Curate", "c", "git commit the selected hunks with the drafted message"),
     b!(Action::CurateStopEditing, "curate_stop_editing", "Stop editing", "Curate", "esc", "Stop editing the commit message"),
 ];

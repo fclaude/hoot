@@ -34,6 +34,17 @@ enum PermTarget {
     SandboxApply,
 }
 
+/// What an in-flight `pi` turn is for. `Chat` (the normal Agent-pane
+/// conversation, in either read-only or sandboxed-edit mode) streams into
+/// the visible transcript as usual. `CommitMessage` is a silent background
+/// turn — its result goes straight to `commit_message`, never the
+/// transcript, and completing it opens `$EDITOR` for a last pass.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TurnPurpose {
+    Chat,
+    CommitMessage,
+}
+
 pub struct App {
     pub mode: Mode,
     pub overlay: Overlay,
@@ -70,6 +81,7 @@ pub struct App {
     pub agent_running: bool,
     pub demo_transcript: bool,
     pi_session: Option<PiSession>,
+    agent_purpose: TurnPurpose,
     /// Chat (read-only) vs Edit (sandboxed writes) — see `sandbox.rs`.
     pub edit_mode: bool,
     sandbox: Option<PathBuf>,
@@ -85,7 +97,11 @@ pub struct App {
     pub curation_files: Vec<CurationFile>,
     pub curation_index: usize,
     pub commit_message: String,
+    pub commit_message_status: Option<String>,
     pub editing_commit: bool,
+    /// Set true to ask main.rs's event loop to suspend the TUI and open
+    /// $EDITOR on `commit_message` — App itself doesn't own the Terminal.
+    pub open_editor_requested: bool,
     pub last_commit: Option<Result<String, String>>,
 }
 
@@ -131,6 +147,7 @@ impl App {
             agent_running: false,
             demo_transcript: true,
             pi_session: None,
+            agent_purpose: TurnPurpose::Chat,
             edit_mode: false,
             sandbox: None,
             pending_changes: Vec::new(),
@@ -145,7 +162,9 @@ impl App {
             // Real diffs get an empty message the user must actually write —
             // the drafted mock text belongs only to the non-git demo path.
             commit_message: if review.is_real { String::new() } else { data::mock_commit_message() },
+            commit_message_status: None,
             editing_commit: false,
+            open_editor_requested: false,
             last_commit: None,
         };
         app.refresh_hover();
@@ -162,6 +181,7 @@ impl App {
         self.steer_selected = 0;
         self.curation_index = 0;
         self.commit_message.clear();
+        self.commit_message_status = None;
     }
 
     /// Commits whatever's currently selected in Curation, for real.
@@ -208,7 +228,7 @@ impl App {
     pub fn start_agent_turn(&mut self, prompt: String) {
         if !self.edit_mode {
             let target_dir = self.target_dir.clone();
-            self.spawn_turn(prompt, target_dir, ToolProfile::ReadOnly);
+            self.spawn_turn(prompt, target_dir, ToolProfile::ReadOnly, TurnPurpose::Chat);
             return;
         }
 
@@ -225,26 +245,30 @@ impl App {
                 }
             },
         };
-        self.spawn_turn(prompt, sandbox, ToolProfile::ReadWrite);
+        self.spawn_turn(prompt, sandbox, ToolProfile::ReadWrite, TurnPurpose::Chat);
     }
 
     /// Spawns a `pi` turn in `cwd` with the given tool profile. Reuses
     /// `self.session_id` across every call in this run, so pi has real
-    /// cross-turn memory via its own session storage. The visible
-    /// transcript is cleared only once (to drop the initial demo content);
-    /// after that, turns append rather than replace.
-    fn spawn_turn(&mut self, prompt: String, cwd: PathBuf, tools: ToolProfile) {
+    /// cross-turn memory via its own session storage. For `TurnPurpose::Chat`
+    /// the visible transcript is cleared only once (to drop the initial demo
+    /// content) and then appended to on every call; `CommitMessage` turns
+    /// never touch the transcript at all — see `apply_agent_event`.
+    fn spawn_turn(&mut self, prompt: String, cwd: PathBuf, tools: ToolProfile, purpose: TurnPurpose) {
         let prompt = prompt.trim().to_string();
         if prompt.is_empty() || self.agent_running {
             return;
         }
-        if self.demo_transcript {
-            self.demo_transcript = false;
-            self.transcript.clear();
-        }
+        self.agent_purpose = purpose;
         self.agent_model_live = None;
-        self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("> {prompt}") });
-        self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() });
+        if purpose == TurnPurpose::Chat {
+            if self.demo_transcript {
+                self.demo_transcript = false;
+                self.transcript.clear();
+            }
+            self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("> {prompt}") });
+            self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() });
+        }
 
         match pi_client::spawn(&prompt, &cwd, self.backend, &self.session_id, tools) {
             Ok(session) => {
@@ -252,12 +276,61 @@ impl App {
                 self.agent_running = true;
             }
             Err(e) => {
-                self.transcript.push(AgentLine {
-                    kind: AgentLineKind::Text,
-                    text: format!("Error: couldn't start `pi` ({e}). Is it installed and on PATH?"),
-                });
+                let msg = format!("Error: couldn't start `pi` ({e}). Is it installed and on PATH?");
+                if purpose == TurnPurpose::Chat {
+                    self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: msg });
+                } else {
+                    self.commit_message_status = Some(msg);
+                }
             }
         }
+    }
+
+    /// Ctrl+G in Curation: asks `pi` to draft a commit message from the real
+    /// diff of everything currently selected — a silent, read-only,
+    /// no-tools-needed turn that never touches the visible Agent
+    /// transcript. Completing it opens `$EDITOR` for a last pass (see
+    /// `apply_agent_event`'s `AgentEnd` handling).
+    pub fn generate_commit_message(&mut self) {
+        if self.agent_running {
+            return;
+        }
+        let diff_text = self.selected_diff_text();
+        if diff_text.trim().is_empty() {
+            self.commit_message_status = Some("Nothing selected to summarize.".to_string());
+            return;
+        }
+        let prompt = format!(
+            "Write a concise commit message (a short summary line, plus a body only if it adds \
+             real value) for the following diff. Output ONLY the commit message text — no \
+             commentary, no markdown code fences.\n\n{diff_text}"
+        );
+        self.commit_message_status = Some("Generating\u{2026}".to_string());
+        let target_dir = self.target_dir.clone();
+        self.spawn_turn(prompt, target_dir, ToolProfile::ReadOnly, TurnPurpose::CommitMessage);
+    }
+
+    /// Real unified-diff text for every currently-selected hunk, grouped by
+    /// file — used as the source material for commit-message generation.
+    fn selected_diff_text(&self) -> String {
+        let mut out = String::new();
+        for cf in &self.curation_files {
+            if cf.selected() == 0 {
+                continue;
+            }
+            let Some(file) = self.project.files.iter().find(|f| f.path == cf.path) else { continue };
+            out.push_str(&format!("diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n", cf.path));
+            for (hunk, &sel) in file.hunks.iter().zip(&cf.hunk_selected) {
+                if !sel {
+                    continue;
+                }
+                for line in &hunk.lines {
+                    out.push_str(&line.text);
+                    out.push('\n');
+                }
+            }
+        }
+        out
     }
 
     /// Drains any events the background reader thread has queued up. Called
@@ -278,6 +351,23 @@ impl App {
 
     fn apply_agent_event(&mut self, event: AgentEvent) {
         use AgentEvent::*;
+
+        if self.agent_purpose == TurnPurpose::CommitMessage {
+            match event {
+                Model(m) => self.agent_model_live = Some(m),
+                Text(t) => self.commit_message = t.trim().to_string(),
+                AgentEnd => {
+                    self.agent_running = false;
+                    self.pi_session = None;
+                    self.commit_message_status = None;
+                    self.open_editor_requested = true;
+                }
+                Error(e) => self.commit_message_status = Some(format!("Error generating message: {e}")),
+                Thinking(_) | ToolCall { .. } | ToolResult { .. } | TurnEnd => {}
+            }
+            return;
+        }
+
         match event {
             Model(m) => self.agent_model_live = Some(m),
             Thinking(t) => self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("  {t}") }),
@@ -674,6 +764,8 @@ impl App {
             }
         } else if k.is(&key, Action::CurateEditMessage) {
             self.editing_commit = true;
+        } else if k.is(&key, Action::CurateGenerateMessage) {
+            self.generate_commit_message();
         } else if k.is(&key, Action::CurateCommit) {
             self.commit_selected();
         }
@@ -945,6 +1037,72 @@ mod tests {
         assert_eq!(app.symbol_filter, "f");
         app.on_key(key(KeyCode::Esc));
         assert!(app.overlay == Overlay::None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_message_with_nothing_selected_does_not_spawn_pi() {
+        let (mut app, dir) = two_file_app("gen-none-selected");
+        app.mode = Mode::Curation;
+        for cf in &mut app.curation_files {
+            for s in &mut cf.hunk_selected {
+                *s = false;
+            }
+        }
+        app.on_key(key(KeyCode::Char('g')));
+        assert!(!app.agent_running);
+        assert_eq!(app.commit_message_status.as_deref(), Some("Nothing selected to summarize."));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn selected_diff_text_includes_only_selected_hunks() {
+        let (mut app, dir) = two_file_app("diff-text");
+        // a.txt selected (default), b.txt deselected.
+        for s in &mut app.curation_files[1].hunk_selected {
+            *s = false;
+        }
+        let text = app.selected_diff_text();
+        assert!(text.contains("a.txt"), "{text}");
+        assert!(text.contains("a1-changed"), "{text}");
+        assert!(!text.contains("b1-changed"), "{text}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_message_purpose_routes_text_and_end_away_from_the_transcript() {
+        let dir = scratch_repo("purpose-text");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let transcript_len_before = app.transcript.len();
+
+        app.agent_purpose = TurnPurpose::CommitMessage;
+        app.commit_message_status = Some("Generating\u{2026}".to_string());
+        app.apply_agent_event(AgentEvent::Text("feat: add the thing".to_string()));
+        assert_eq!(app.commit_message, "feat: add the thing");
+        assert_eq!(app.transcript.len(), transcript_len_before, "should not touch the chat transcript");
+
+        app.apply_agent_event(AgentEvent::AgentEnd);
+        assert!(app.open_editor_requested, "completing generation should request the editor");
+        assert!(app.commit_message_status.is_none());
+        assert!(!app.agent_running);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_message_purpose_routes_errors_to_status_not_transcript() {
+        let dir = scratch_repo("purpose-error");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let transcript_len_before = app.transcript.len();
+
+        app.agent_purpose = TurnPurpose::CommitMessage;
+        app.apply_agent_event(AgentEvent::Error("pi exploded".to_string()));
+        assert!(app.commit_message_status.as_deref().unwrap().contains("pi exploded"));
+        assert_eq!(app.transcript.len(), transcript_len_before);
+        assert!(!app.open_editor_requested, "an error shouldn't open the editor");
 
         let _ = fs::remove_dir_all(&dir);
     }
