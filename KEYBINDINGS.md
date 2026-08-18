@@ -89,6 +89,8 @@ Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) 
 | `agent_reject` | Reject | `Ctrl+r` |  | Discard the sandbox's changes |
 | `agent_switch_backend` | Switch backend | `Ctrl+b` |  | Toggle pi ↔ pi/openai-codex |
 | `agent_toggle_edit_mode` | Toggle edit mode | `Ctrl+e` |  | Chat (read-only) ↔ Edit (sandboxed writes) |
+| `agent_scroll_up` | Scroll up | `PgUp` |  | Scroll the transcript up to review history |
+| `agent_scroll_down` | Scroll down | `PgDn` |  | Scroll the transcript back down toward the latest |
 
 ## Permission
 

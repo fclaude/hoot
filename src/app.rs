@@ -90,6 +90,11 @@ pub struct App {
     pub session_id: String,
     pub transcript: Vec<AgentLine>,
     pub agent_input: String,
+    /// Char index into `agent_input` (not a byte offset — see `char_boundary`).
+    pub agent_cursor: usize,
+    /// Lines scrolled up from the bottom of the transcript; 0 = pinned to
+    /// the latest content (and stays pinned as new lines arrive).
+    pub agent_scroll: usize,
     pub agent_model_live: Option<String>,
     pub backend: Backend,
     pub agent_running: bool,
@@ -138,6 +143,13 @@ fn clamped_move(current: usize, delta: i64, len: usize) -> usize {
     }
 }
 
+/// Byte offset of the `n`th character in `s` (or `s.len()` if `n` is past
+/// the end) — lets a char-indexed cursor drive byte-indexed String methods
+/// like `insert`/`remove` without splitting a multi-byte character.
+fn char_boundary(s: &str, n: usize) -> usize {
+    s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
+}
+
 impl App {
     pub fn new(target_dir: PathBuf, keymap: Keymap) -> Self {
         let review = crate::gitreview::load(&target_dir);
@@ -178,6 +190,8 @@ impl App {
             session_id: format!("steer-{}", std::process::id()),
             transcript: data::mock_transcript(),
             agent_input: String::new(),
+            agent_cursor: 0,
+            agent_scroll: 0,
             agent_model_live: None,
             backend: Backend::Pi,
             agent_running: false,
@@ -305,6 +319,7 @@ impl App {
             }
             self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("> {prompt}") });
             self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() });
+            self.agent_scroll = 0; // jump to the bottom to watch it stream in
         }
 
         match pi_client::spawn(&prompt, &cwd, self.backend, &self.session_id, tools) {
@@ -827,16 +842,49 @@ impl App {
     fn on_key_agent_input(&mut self, key: KeyEvent) -> bool {
         if self.keymap.is(&key, Action::AgentSend) {
             let prompt = std::mem::take(&mut self.agent_input);
+            self.agent_cursor = 0;
             self.start_agent_turn(prompt);
             return true;
         }
+        let char_count = self.agent_input.chars().count();
         match key.code {
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.agent_input.push(c);
+                let byte = char_boundary(&self.agent_input, self.agent_cursor);
+                self.agent_input.insert(byte, c);
+                self.agent_cursor += 1;
                 true
             }
             KeyCode::Backspace => {
-                self.agent_input.pop();
+                if self.agent_cursor > 0 {
+                    let start = char_boundary(&self.agent_input, self.agent_cursor - 1);
+                    let end = char_boundary(&self.agent_input, self.agent_cursor);
+                    self.agent_input.replace_range(start..end, "");
+                    self.agent_cursor -= 1;
+                }
+                true
+            }
+            KeyCode::Delete => {
+                if self.agent_cursor < char_count {
+                    let start = char_boundary(&self.agent_input, self.agent_cursor);
+                    let end = char_boundary(&self.agent_input, self.agent_cursor + 1);
+                    self.agent_input.replace_range(start..end, "");
+                }
+                true
+            }
+            KeyCode::Left => {
+                self.agent_cursor = self.agent_cursor.saturating_sub(1);
+                true
+            }
+            KeyCode::Right => {
+                self.agent_cursor = (self.agent_cursor + 1).min(char_count);
+                true
+            }
+            KeyCode::Home => {
+                self.agent_cursor = 0;
+                true
+            }
+            KeyCode::End => {
+                self.agent_cursor = char_count;
                 true
             }
             _ => false,
@@ -855,6 +903,10 @@ impl App {
             self.backend = self.backend.toggled();
         } else if k.is(&key, Action::AgentToggleEditMode) {
             self.edit_mode = !self.edit_mode;
+        } else if k.is(&key, Action::AgentScrollUp) {
+            self.agent_scroll = self.agent_scroll.saturating_add(PAGE_SIZE);
+        } else if k.is(&key, Action::AgentScrollDown) {
+            self.agent_scroll = self.agent_scroll.saturating_sub(PAGE_SIZE);
         }
     }
 
@@ -1385,6 +1437,140 @@ mod tests {
         app.on_key(key(KeyCode::Esc));
         assert!(app.overlay == Overlay::None);
         assert_eq!(app.nav_file, original_file);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn char_boundary_handles_multibyte_characters() {
+        // "café" — the é is 2 bytes, so the boundary for index 4 (past all
+        // 4 chars) must land after it, at byte offset 5, not split it.
+        let s = "caf\u{e9}"; // "café"
+        assert_eq!(char_boundary(s, 0), 0);
+        assert_eq!(char_boundary(s, 3), 3); // right before é
+        assert_eq!(char_boundary(s, 4), s.len()); // past the end
+        assert_eq!(s.len(), 5); // 3 ascii + 2-byte é
+    }
+
+    #[test]
+    fn agent_input_types_at_cursor_not_just_appends() {
+        let dir = scratch_repo("agent-cursor");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Agent;
+
+        for c in "ac".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.agent_input, "ac");
+        assert_eq!(app.agent_cursor, 2);
+
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.agent_cursor, 1);
+        app.on_key(key(KeyCode::Char('b')));
+        assert_eq!(app.agent_input, "abc", "should insert at the cursor, not append");
+        assert_eq!(app.agent_cursor, 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_input_backspace_and_delete() {
+        let dir = scratch_repo("agent-bs-del");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Agent;
+        for c in "abc".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Left)); // cursor between b and c
+
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.agent_input, "ac", "backspace removes the char before the cursor");
+        assert_eq!(app.agent_cursor, 1);
+
+        app.on_key(key(KeyCode::Delete));
+        assert_eq!(app.agent_input, "a", "delete removes the char at the cursor");
+        assert_eq!(app.agent_cursor, 1, "delete shouldn't move the cursor");
+
+        // Backspace/Delete at the boundaries are no-ops, not panics.
+        app.on_key(key(KeyCode::Delete));
+        assert_eq!(app.agent_input, "a");
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.agent_input, "a");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_input_home_end_and_arrow_clamping() {
+        let dir = scratch_repo("agent-home-end");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Agent;
+        for c in "hello".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.agent_cursor, 5);
+
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.agent_cursor, 5, "Right shouldn't overshoot the end");
+
+        app.on_key(key(KeyCode::Home));
+        assert_eq!(app.agent_cursor, 0);
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.agent_cursor, 0, "Left shouldn't underflow past the start");
+
+        app.on_key(key(KeyCode::End));
+        assert_eq!(app.agent_cursor, 5);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_input_editing_is_utf8_safe() {
+        let dir = scratch_repo("agent-utf8");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Agent;
+        for c in "caf\u{e9}".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.agent_input, "caf\u{e9}");
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.agent_input, "caf", "should remove the whole é, not split its bytes");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_send_clears_input_and_resets_cursor() {
+        let dir = scratch_repo("agent-send-reset");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Agent;
+        for c in "hello".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.agent_input, "");
+        assert_eq!(app.agent_cursor, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_transcript_scroll_up_and_down() {
+        // Sending a real turn (which also resets scroll to 0) is
+        // deliberately not exercised here, same as elsewhere in this file —
+        // it would spawn a real, un-cleaned-up `pi` subprocess.
+        let dir = scratch_repo("agent-scroll");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Agent;
+
+        assert_eq!(app.agent_scroll, 0);
+        app.on_key(key(KeyCode::PageUp));
+        assert_eq!(app.agent_scroll, PAGE_SIZE);
+        app.on_key(key(KeyCode::PageUp));
+        assert_eq!(app.agent_scroll, PAGE_SIZE * 2);
+        app.on_key(key(KeyCode::PageDown));
+        assert_eq!(app.agent_scroll, PAGE_SIZE);
 
         let _ = fs::remove_dir_all(&dir);
     }

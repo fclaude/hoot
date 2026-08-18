@@ -315,6 +315,51 @@ mod tests {
     }
 
     #[test]
+    fn agent_input_line_stays_visible_with_a_long_transcript() {
+        use crate::data::{AgentLine, AgentLineKind};
+
+        let dir = scratch_repo("agent-long");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        app.demo_transcript = false;
+        app.transcript = (1..=100)
+            .map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") })
+            .collect();
+        for c in "MY_TYPED_PROMPT".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("MY_TYPED_PROMPT"), "the input line should stay on screen, not scroll off: {screen}");
+        assert!(screen.contains("TRANSCRIPT_LINE_100"), "the latest transcript content should be visible: {screen}");
+        assert!(!screen.contains("TRANSCRIPT_LINE_1\n") && !screen.contains("TRANSCRIPT_LINE_1 "), "early history shouldn't fit: {screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_page_up_reveals_earlier_transcript_history() {
+        use crate::data::{AgentLine, AgentLineKind};
+
+        let dir = scratch_repo("agent-scrollback");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        app.demo_transcript = false;
+        app.transcript = (1..=100)
+            .map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") })
+            .collect();
+
+        for _ in 0..8 {
+            app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        }
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("TRANSCRIPT_LINE_1\n") || screen.contains("TRANSCRIPT_LINE_1 "), "scrolling up should reach the start: {screen}");
+        assert!(screen.contains("scrolled up"), "should indicate we're not pinned to the bottom: {screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn agent_edit_mode_toggle_is_reflected_on_screen() {
         let dir = scratch_repo("agent-edit");
         let mut app = App::new(dir.clone(), Keymap::defaults());

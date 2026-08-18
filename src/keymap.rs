@@ -68,6 +68,8 @@ pub enum Action {
     AgentReject,
     AgentSwitchBackend,
     AgentToggleEditMode,
+    AgentScrollUp,
+    AgentScrollDown,
 
     PermCycle,
     PermConfirm,
@@ -148,6 +150,8 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::AgentReject, "agent_reject", "Reject", "Agent", "ctrl+r", "Discard the sandbox's changes"),
     b!(Action::AgentSwitchBackend, "agent_switch_backend", "Switch backend", "Agent", "ctrl+b", "Toggle pi \u{2194} pi/openai-codex"),
     b!(Action::AgentToggleEditMode, "agent_toggle_edit_mode", "Toggle edit mode", "Agent", "ctrl+e", "Chat (read-only) \u{2194} Edit (sandboxed writes)"),
+    b!(Action::AgentScrollUp, "agent_scroll_up", "Scroll up", "Agent", "pageup", "Scroll the transcript up to review history"),
+    b!(Action::AgentScrollDown, "agent_scroll_down", "Scroll down", "Agent", "pagedown", "Scroll the transcript back down toward the latest"),
 
     b!(Action::PermCycle, "perm_cycle", "Cycle option", "Permission", "tab", "Cycle the focused option"),
     b!(Action::PermConfirm, "perm_confirm", "Confirm", "Permission", "enter", "Confirm the focused option"),
