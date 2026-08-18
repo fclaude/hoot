@@ -95,14 +95,29 @@ fn draw_source(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let title = format!("{name} \u{2014} {} lines", app.source.len());
+    let hints = vec![super::key_hints(&[
+        ("j/k", "Move"),
+        ("Enter", "Open"),
+        ("[/]", "Cursor"),
+        ("h", "Toggle hover"),
+        ("/", "Symbol jump"),
+    ])];
     let block = super::panel_block(&title);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    f.render_widget(Paragraph::new(lines), inner);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Length(hints.len() as u16)])
+        .split(inner);
+    f.render_widget(Paragraph::new(lines), rows[0]);
+    let divider = "\u{2500}".repeat(rows[1].width as usize);
+    f.render_widget(Paragraph::new(divider).style(Style::default().fg(theme::DIM)), rows[1]);
+    f.render_widget(Paragraph::new(hints), rows[2]);
 
     if app.show_hover {
         if let Some(hover) = &app.hover {
-            draw_hover(f, hover, app.nav_line, inner);
+            draw_hover(f, hover, app.nav_line, rows[0]);
         }
     }
 }

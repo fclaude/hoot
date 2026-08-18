@@ -603,9 +603,11 @@ impl App {
     fn on_key_navigate(&mut self, key: KeyEvent) {
         let n = self.tree.len();
         let k = &self.keymap;
-        if k.is(&key, Action::NavUp) {
+        // j/k always move the tree too, regardless of NavUp/NavDown's
+        // configured chord — vim muscle memory shouldn't require a remap.
+        if k.is(&key, Action::NavUp) || key.code == KeyCode::Char('k') {
             self.tree_index = self.tree_index.saturating_sub(1);
-        } else if k.is(&key, Action::NavDown) {
+        } else if k.is(&key, Action::NavDown) || key.code == KeyCode::Char('j') {
             self.tree_index = (self.tree_index + 1).min(n.saturating_sub(1));
         } else if k.is(&key, Action::NavOpen) {
             if let Some(entry) = self.tree.get(self.tree_index) {
@@ -908,16 +910,35 @@ mod tests {
     }
 
     #[test]
-    fn navigate_tree_and_cursor_movement() {
-        let dir = scratch_repo("navigate");
+    fn navigate_tree_movement_via_arrows_and_vim_keys() {
+        let dir = scratch_repo("navigate-tree");
+        commit_file(&dir, "a.rs", "fn a() {}\n");
+        commit_file(&dir, "b.rs", "fn b() {}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Navigate;
+
+        assert_eq!(app.tree_index, 0);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.tree_index, 1, "arrow keys move the tree");
+        app.on_key(key(KeyCode::Char('k')));
+        assert_eq!(app.tree_index, 0, "k moves the tree too, not just Up");
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.tree_index, 1, "j moves the tree too, not just Down");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_source_cursor_movement_and_hover_toggle() {
+        let dir = scratch_repo("navigate-cursor");
         commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n    let y = 2;\n}\n");
         let mut app = App::new(dir.clone(), Keymap::defaults());
         app.mode = Mode::Navigate;
 
         let start_line = app.nav_line;
-        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Char(']')));
         assert_eq!(app.nav_line, start_line + 1);
-        app.on_key(key(KeyCode::Char('k')));
+        app.on_key(key(KeyCode::Char('[')));
         assert_eq!(app.nav_line, start_line);
 
         let show = app.show_hover;

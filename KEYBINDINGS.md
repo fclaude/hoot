@@ -47,11 +47,11 @@ Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) 
 
 | Binding name | Action | Default | Current | Description |
 |---|---|---|---|---|
-| `nav_up` | Move up | `↑` |  | Move the tree selection up |
-| `nav_down` | Move down | `↓` |  | Move the tree selection down |
+| `nav_up` | Move up | `↑` |  | Move the tree selection up (k also always works) |
+| `nav_down` | Move down | `↓` |  | Move the tree selection down (j also always works) |
 | `nav_open` | Open file | `Enter` |  | Open the selected file |
-| `nav_cursor_down` | Cursor down | `j` |  | Move the source cursor down a line |
-| `nav_cursor_up` | Cursor up | `k` |  | Move the source cursor up a line |
+| `nav_cursor_down` | Cursor down | `]` |  | Move the source cursor down a line (for hover) |
+| `nav_cursor_up` | Cursor up | `[` |  | Move the source cursor up a line (for hover) |
 | `nav_toggle_hover` | Toggle hover | `h` |  | Show/hide symbol info for the current line |
 | `nav_open_symbol_jump` | Open symbol jump | `/` |  | Open the fuzzy symbol-jump overlay |
 

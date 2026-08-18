@@ -107,11 +107,11 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::SteerUnifiedView, "steer_unified_view", "Unified view", "Steer", "u", "Switch the diff panel back to unified"),
     b!(Action::SteerIterate, "steer_iterate", "Iterate", "Steer", "ctrl+enter", "Send queued notes to the real pi agent"),
 
-    b!(Action::NavUp, "nav_up", "Move up", "Navigate", "up", "Move the tree selection up"),
-    b!(Action::NavDown, "nav_down", "Move down", "Navigate", "down", "Move the tree selection down"),
+    b!(Action::NavUp, "nav_up", "Move up", "Navigate", "up", "Move the tree selection up (k also always works)"),
+    b!(Action::NavDown, "nav_down", "Move down", "Navigate", "down", "Move the tree selection down (j also always works)"),
     b!(Action::NavOpen, "nav_open", "Open file", "Navigate", "enter", "Open the selected file"),
-    b!(Action::NavCursorDown, "nav_cursor_down", "Cursor down", "Navigate", "j", "Move the source cursor down a line"),
-    b!(Action::NavCursorUp, "nav_cursor_up", "Cursor up", "Navigate", "k", "Move the source cursor up a line"),
+    b!(Action::NavCursorDown, "nav_cursor_down", "Cursor down", "Navigate", "]", "Move the source cursor down a line (for hover)"),
+    b!(Action::NavCursorUp, "nav_cursor_up", "Cursor up", "Navigate", "[", "Move the source cursor up a line (for hover)"),
     b!(Action::NavToggleHover, "nav_toggle_hover", "Toggle hover", "Navigate", "h", "Show/hide symbol info for the current line"),
     b!(Action::NavOpenSymbolJump, "nav_open_symbol_jump", "Open symbol jump", "Navigate", "/", "Open the fuzzy symbol-jump overlay"),
 
