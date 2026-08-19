@@ -6,7 +6,6 @@ mod gitcommit;
 mod gitreview;
 mod keymap;
 mod pi_client;
-mod sandbox;
 mod syntax;
 mod theme;
 mod ui;

@@ -130,8 +130,7 @@ fn build_transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
 pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
     let status = if app.agent_running { "running\u{2026}" } else { "idle" };
     let status_color = if app.agent_running { theme::ORANGE } else { theme::DIM };
-    let (mode_label, mode_color) =
-        if app.edit_mode { ("Edit (sandboxed writes)", theme::ORANGE) } else { ("Chat (read-only)", theme::CYAN) };
+    let (mode_label, mode_color) = if app.edit_mode { ("Edit (writes to the repo)", theme::ORANGE) } else { ("Chat (read-only)", theme::CYAN) };
 
     let header = vec![
         Line::from(vec![
@@ -158,9 +157,6 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
 
     let hints = vec![super::key_hints(&[
         ("Ctrl+E", "Edit mode"),
-        ("Ctrl+A", "Accept"),
-        ("Ctrl+M", "Modify"),
-        ("Ctrl+R", "Reject"),
         ("Ctrl+B", "Backend"),
         ("PgUp/PgDn", "Scroll"),
         ("Enter", "Send"),

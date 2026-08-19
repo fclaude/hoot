@@ -3,7 +3,6 @@ mod curation;
 mod file_finder;
 mod navigate;
 mod note_input;
-mod permission;
 mod steer;
 mod symbol_jump;
 
@@ -41,7 +40,6 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     match app.overlay {
         Overlay::SymbolJump => symbol_jump::draw(f, app, area),
-        Overlay::Permission => permission::draw(f, app, area),
         Overlay::FileFinder => file_finder::draw(f, app, area),
         Overlay::NoteInput => note_input::draw(f, app, area),
         Overlay::None => {}
@@ -362,7 +360,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         let screen = render(&app, 120, 30);
-        assert!(screen.contains("Edit (sandboxed writes)"), "{screen}");
+        assert!(screen.contains("Edit (writes to the repo)"), "{screen}");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -434,18 +432,6 @@ mod tests {
         assert!(screen.contains("main.rs"), "{screen}");
         assert!(screen.contains("finder preview"), "live preview should show the file's real content: {screen}");
         assert!(!screen.contains("unrelated"), "readme.md shouldn't match \"mnrs\": {screen}");
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn permission_overlay_demo_via_ctrl_p() {
-        let dir = scratch_repo("perm");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        let screen = render(&app, 150, 30);
-        assert!(screen.contains("wants to apply"), "{screen}");
-        assert!(screen.contains("Approve all"), "{screen}");
 
         let _ = fs::remove_dir_all(&dir);
     }

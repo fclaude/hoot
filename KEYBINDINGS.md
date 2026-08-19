@@ -28,7 +28,6 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | `switch_agent` | Switch: Agent | `F3` |  | Jump to the Agent screen |
 | `switch_curate` | Switch: Curate | `F4` |  | Jump to the Curation screen |
 | `open_symbol_jump` | Open Symbol Jump | `Ctrl+k` |  | Open the fuzzy symbol-jump overlay from anywhere |
-| `open_permission_demo` | Open Permission Prompt (demo) | `Ctrl+p` |  | Open the permission-prompt overlay |
 | `open_file_finder` | Open File Finder | `Ctrl+f` |  | Open the fuzzy file finder (with live preview) from anywhere |
 
 ## Steer
@@ -94,21 +93,10 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | Binding name | Action | Default | Current | Description |
 |---|---|---|---|---|
 | `agent_send` | Send prompt | `Enter` |  | Send the typed prompt to the real pi agent |
-| `agent_accept_all` | Accept all | `Ctrl+a` |  | Open the real diff from Edit mode for approval |
-| `agent_modify` | Modify | `Ctrl+m` |  | Keep revising in the same sandbox before re-approving |
-| `agent_reject` | Reject | `Ctrl+r` |  | Discard the sandbox's changes |
 | `agent_switch_backend` | Switch backend | `Ctrl+b` |  | Toggle pi ↔ pi/openai-codex |
-| `agent_toggle_edit_mode` | Toggle edit mode | `Ctrl+e` |  | Chat (read-only) ↔ Edit (sandboxed writes) |
+| `agent_toggle_edit_mode` | Toggle edit mode | `Ctrl+e` |  | Chat (read-only) ↔ Edit (writes straight to the repo) |
 | `agent_scroll_up` | Scroll up | `PgUp` |  | Scroll the transcript up to review history |
 | `agent_scroll_down` | Scroll down | `PgDn` |  | Scroll the transcript back down toward the latest |
-
-## Permission
-
-| Binding name | Action | Default | Current | Description |
-|---|---|---|---|---|
-| `perm_cycle` | Cycle option | `Tab` |  | Cycle the focused option |
-| `perm_confirm` | Confirm | `Enter` |  | Confirm the focused option |
-| `perm_cancel` | Cancel | `Esc` |  | Close without confirming |
 
 ## Curate
 

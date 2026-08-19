@@ -4,10 +4,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::data::{
-    self, AgentLine, AgentLineKind, CurationFile, FileEntry, FileWrite, HoverInfo, Note, Project,
-    SymbolResult, TreeEntry,
-};
+use crate::data::{self, AgentLine, AgentLineKind, CurationFile, HoverInfo, Note, Project, SymbolResult, TreeEntry};
 use crate::fsnav;
 use crate::keymap::{Action, Keymap};
 use crate::pi_client::{self, AgentEvent, Backend, PiSession, ToolProfile};
@@ -24,7 +21,6 @@ pub enum Mode {
 pub enum Overlay {
     None,
     SymbolJump,
-    Permission,
     FileFinder,
     NoteInput,
 }
@@ -36,17 +32,9 @@ pub enum NavFocus {
     Source,
 }
 
-/// What the Permission overlay is currently showing: the static Ctrl+P demo
-/// data, or a real sandboxed diff pending approval.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PermTarget {
-    Demo,
-    SandboxApply,
-}
-
 /// What an in-flight `pi` turn is for. `Chat` (the normal Agent-pane
-/// conversation, in either read-only or sandboxed-edit mode) streams into
-/// the visible transcript as usual. `CommitMessage` is a silent background
+/// conversation, in either read-only or edit mode) streams into the
+/// visible transcript as usual. `CommitMessage` is a silent background
 /// turn — its result goes straight to `commit_message`, never the
 /// transcript, and completing it opens `$EDITOR` for a last pass.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -101,11 +89,12 @@ pub struct App {
     pub target_dir: PathBuf,
     /// Explicit path to `pi`'s session file for this run — not just a bare
     /// session id. `pi` scopes `--session-id` lookups by (cwd, id), so a
-    /// bare id would silently lose memory whenever a turn's cwd changes
-    /// (e.g. Chat mode in the real repo vs. sandboxed Edit mode in a
-    /// worktree). Passing this exact file via `--session` instead sidesteps
-    /// that: `pi` creates it on first use and resumes it on every call
-    /// after, regardless of cwd. See `pi_client::spawn`.
+    /// bare id would silently lose memory the moment a turn ran from a
+    /// different cwd than the one that created it. Every turn here runs in
+    /// `target_dir`, so that's moot today, but passing this exact file via
+    /// `--session` instead sidesteps the cwd-scoping question entirely — it
+    /// creates the file on first use and resumes it on every call after,
+    /// regardless of cwd. See `pi_client::spawn`.
     pub session_file: PathBuf,
     pub transcript: Vec<AgentLine>,
     pub agent_input: String,
@@ -120,16 +109,10 @@ pub struct App {
     pub demo_transcript: bool,
     pi_session: Option<PiSession>,
     agent_purpose: TurnPurpose,
-    /// Chat (read-only) vs Edit (sandboxed writes) — see `sandbox.rs`.
+    /// Chat (read-only) vs Edit (writes go straight to `target_dir`, since
+    /// it's already a real git repo — Steer's diff view plus `git` itself
+    /// are the review/undo mechanism, same as any other change to the repo).
     pub edit_mode: bool,
-    sandbox: Option<PathBuf>,
-    pub pending_changes: Vec<FileEntry>,
-
-    // PERMISSION (overlay)
-    pub perm_writes: Vec<FileWrite>,
-    pub perm_commands: Vec<&'static str>,
-    pub perm_focus: usize,
-    perm_target: PermTarget,
 
     // CURATION
     pub curation_files: Vec<CurationFile>,
@@ -142,8 +125,6 @@ pub struct App {
     pub open_editor_requested: bool,
     pub last_commit: Option<Result<String, String>>,
 }
-
-const PERM_OPTIONS: [&str; 4] = ["Review files", "Approve all", "Modify", "Reject"];
 
 /// How often `sync_from_disk` re-reads the repo to pick up changes made
 /// outside steer (an external `pi` run, an editor, `git` on the command
@@ -232,13 +213,6 @@ impl App {
             pi_session: None,
             agent_purpose: TurnPurpose::Chat,
             edit_mode: false,
-            sandbox: None,
-            pending_changes: Vec::new(),
-
-            perm_writes: data::mock_permission_writes(),
-            perm_commands: data::mock_permission_commands(),
-            perm_focus: 1,
-            perm_target: PermTarget::Demo,
 
             curation_files: review.curation_files,
             curation_index: 0,
@@ -371,38 +345,21 @@ impl App {
         self.project.files.iter().filter(|f| f.selected).count()
     }
 
-    /// Sends `prompt` to `pi`. In Chat mode this is a real, read-only turn
-    /// against `self.target_dir`. In Edit mode it runs read+write against a
-    /// disposable sandbox worktree instead (creating one on first use) —
-    /// never the real target directory directly.
+    /// Sends `prompt` to `pi` against `self.target_dir`. Chat mode grants
+    /// only the `read` tool (a read-only sounding board); Edit mode grants
+    /// `read,write` too, and writes land directly in the real repo — it's
+    /// already a real git repo (required to even start), so Steer's diff
+    /// view and plain `git` are the review/undo mechanism, same as any
+    /// other change made to it.
     pub fn start_agent_turn(&mut self, prompt: String) {
-        if !self.edit_mode {
-            let target_dir = self.target_dir.clone();
-            self.spawn_turn(prompt, target_dir, ToolProfile::ReadOnly, TurnPurpose::Chat);
-            return;
-        }
-
-        let sandbox = match &self.sandbox {
-            Some(s) => s.clone(),
-            None => match crate::sandbox::create(&self.target_dir) {
-                Ok(s) => {
-                    self.sandbox = Some(s.clone());
-                    s
-                }
-                Err(e) => {
-                    self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("Error: {e}") });
-                    return;
-                }
-            },
-        };
-        self.spawn_turn(prompt, sandbox, ToolProfile::ReadWrite, TurnPurpose::Chat);
+        let tools = if self.edit_mode { ToolProfile::ReadWrite } else { ToolProfile::ReadOnly };
+        let target_dir = self.target_dir.clone();
+        self.spawn_turn(prompt, target_dir, tools, TurnPurpose::Chat);
     }
 
     /// Spawns a `pi` turn in `cwd` with the given tool profile. Reuses
-    /// `self.session_file` across every call in this run — including calls
-    /// with a different `cwd` (Chat mode vs. sandboxed Edit mode) — so pi
-    /// has real cross-turn memory regardless of which directory a given
-    /// turn runs in. For `TurnPurpose::Chat` the visible transcript is
+    /// `self.session_file` across every call in this run, so pi has real
+    /// cross-turn memory. For `TurnPurpose::Chat` the visible transcript is
     /// cleared only once (to drop the initial demo content) and then
     /// appended to on every call; `CommitMessage` turns never touch the
     /// transcript at all — see `apply_agent_event`.
@@ -544,91 +501,27 @@ impl App {
             AgentEnd => {
                 self.agent_running = false;
                 self.pi_session = None;
-                if let Some(sandbox) = self.sandbox.clone() {
-                    self.pending_changes = crate::sandbox::diff(&sandbox);
-                    let n = self.pending_changes.len();
+                if self.edit_mode {
+                    // Edit-mode writes land directly in target_dir, so
+                    // whatever's uncommitted there now is exactly what this
+                    // turn (and anything else outstanding) changed — pull
+                    // Steer/Navigate's view of it forward immediately
+                    // rather than waiting for the next background poll.
+                    let n = crate::gitreview::diff_files(&self.target_dir).len();
                     let text = if n == 0 {
-                        "  (no file changes in the sandbox yet)".to_string()
+                        "  (no file changes)".to_string()
                     } else {
-                        format!(
-                            "{n} file{} changed in the sandbox \u{2014} Ctrl+A to review & apply, Ctrl+R to discard",
-                            if n == 1 { "" } else { "s" }
-                        )
+                        format!("{n} file{} changed \u{2014} see Steer (F1) for the diff", if n == 1 { "" } else { "s" })
                     };
                     self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
+                    self.sync_review_from_disk();
+                    self.sync_navigate_from_disk();
                 }
             }
             Error(e) => {
                 self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("stderr: {e}") })
             }
         }
-    }
-
-    /// Ctrl+A: open the real sandboxed diff for approval, if there is one.
-    fn review_pending_changes(&mut self) {
-        if self.pending_changes.is_empty() {
-            return;
-        }
-        self.perm_writes = self
-            .pending_changes
-            .iter()
-            .map(|f| {
-                let (plus, minus) = f.diff_stat();
-                FileWrite { path: f.path.clone(), kind: "modify", plus, minus }
-            })
-            .collect();
-        self.perm_commands = Vec::new();
-        self.perm_focus = 1; // "Approve all"
-        self.perm_target = PermTarget::SandboxApply;
-        self.overlay = Overlay::Permission;
-    }
-
-    /// Applies the sandbox's diff to the real target directory.
-    fn apply_sandbox(&mut self) {
-        let Some(sandbox) = self.sandbox.clone() else {
-            self.overlay = Overlay::None;
-            return;
-        };
-        match crate::sandbox::apply(&sandbox, &self.target_dir) {
-            Ok(()) => {
-                crate::sandbox::discard(&self.target_dir, &sandbox);
-                self.sandbox = None;
-                let n = self.pending_changes.len();
-                self.pending_changes.clear();
-                self.transcript.push(AgentLine {
-                    kind: AgentLineKind::Done,
-                    text: format!("Applied {n} file{} to the real project.", if n == 1 { "" } else { "s" }),
-                });
-                self.refresh_review();
-            }
-            Err(e) => {
-                self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("Error applying changes: {e}") });
-            }
-        }
-        self.overlay = Overlay::None;
-    }
-
-    /// Ctrl+R: discard the sandbox and its changes entirely.
-    fn reject_sandbox(&mut self) {
-        if let Some(sandbox) = self.sandbox.take() {
-            crate::sandbox::discard(&self.target_dir, &sandbox);
-        }
-        self.pending_changes.clear();
-        self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: "\u{2717} Sandbox changes discarded.".to_string() });
-        self.overlay = Overlay::None;
-    }
-
-    /// Ctrl+M: keep the sandbox alive for a follow-up prompt instead of
-    /// approving or discarding yet.
-    fn modify_sandbox(&mut self) {
-        if self.sandbox.is_none() {
-            return;
-        }
-        self.pending_changes.clear();
-        self.transcript.push(AgentLine {
-            kind: AgentLineKind::Text,
-            text: "\u{270e} Keep typing to revise in the same sandbox, then Ctrl+A when ready.".to_string(),
-        });
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -640,7 +533,6 @@ impl App {
 
         match self.overlay {
             Overlay::SymbolJump => return self.on_key_symbol_jump(key),
-            Overlay::Permission => return self.on_key_permission(key),
             Overlay::FileFinder => return self.on_key_file_finder(key),
             Overlay::NoteInput => return self.on_key_note_input(key),
             Overlay::None => {}
@@ -681,14 +573,6 @@ impl App {
             self.overlay = Overlay::FileFinder;
             self.file_finder_filter.clear();
             self.file_finder_index = 0;
-            return;
-        }
-        if self.keymap.is(&key, Action::OpenPermissionDemo) {
-            self.perm_writes = data::mock_permission_writes();
-            self.perm_commands = data::mock_permission_commands();
-            self.perm_focus = 1;
-            self.perm_target = PermTarget::Demo;
-            self.overlay = Overlay::Permission;
             return;
         }
         if self.keymap.is(&key, Action::Quit) {
@@ -739,7 +623,7 @@ impl App {
             self.mode = Mode::Agent;
             // Notes ask the agent to change things — iterating through
             // read-only Chat mode would let it see the request but never
-            // act on it, so switch to sandboxed Edit mode first.
+            // act on it, so switch to Edit mode first.
             self.edit_mode = true;
             self.start_agent_turn(prompt);
         }
@@ -1095,13 +979,7 @@ impl App {
 
     fn on_key_agent(&mut self, key: KeyEvent) {
         let k = &self.keymap;
-        if k.is(&key, Action::AgentAcceptAll) {
-            self.review_pending_changes();
-        } else if k.is(&key, Action::AgentReject) {
-            self.reject_sandbox();
-        } else if k.is(&key, Action::AgentModify) {
-            self.modify_sandbox();
-        } else if k.is(&key, Action::AgentSwitchBackend) {
+        if k.is(&key, Action::AgentSwitchBackend) {
             self.backend = self.backend.toggled();
         } else if k.is(&key, Action::AgentToggleEditMode) {
             self.edit_mode = !self.edit_mode;
@@ -1110,31 +988,6 @@ impl App {
         } else if k.is(&key, Action::AgentScrollDown) {
             self.agent_scroll = self.agent_scroll.saturating_sub(PAGE_SIZE);
         }
-    }
-
-    // -------------------------------------------------------------
-    // PERMISSION
-    // -------------------------------------------------------------
-    fn on_key_permission(&mut self, key: KeyEvent) {
-        let k = &self.keymap;
-        if k.is(&key, Action::PermCycle) {
-            self.perm_focus = (self.perm_focus + 1) % PERM_OPTIONS.len();
-        } else if k.is(&key, Action::PermCancel) {
-            self.overlay = Overlay::None;
-        } else if k.is(&key, Action::PermConfirm) {
-            match self.perm_target {
-                PermTarget::Demo => self.overlay = Overlay::None,
-                PermTarget::SandboxApply => match self.perm_focus {
-                    1 => self.apply_sandbox(),
-                    3 => self.reject_sandbox(),
-                    _ => self.overlay = Overlay::None, // "Review files" / "Modify": just close
-                },
-            }
-        }
-    }
-
-    pub fn perm_options() -> [&'static str; 4] {
-        PERM_OPTIONS
     }
 
     // -------------------------------------------------------------
@@ -1596,21 +1449,6 @@ mod tests {
     }
 
     #[test]
-    fn permission_demo_cycle_and_cancel() {
-        let dir = scratch_repo("perm-cycle");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.on_key(ctrl('p'));
-        assert!(app.overlay == Overlay::Permission);
-        assert_eq!(app.perm_focus, 1);
-        app.on_key(key(KeyCode::Tab));
-        assert_eq!(app.perm_focus, 2);
-        app.on_key(key(KeyCode::Esc));
-        assert!(app.overlay == Overlay::None);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn symbol_jump_close_discards_filter_state_choice() {
         let dir = scratch_repo("symjump-close");
         commit_file(&dir, "lib.rs", "fn foo() {}\n");
@@ -1723,6 +1561,42 @@ mod tests {
         app.sync_review_from_disk();
 
         assert!(!app.curation_files[0].hunk_selected[0], "an unchanged diff shouldn't reset curation toggles");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_end_in_edit_mode_refreshes_review_immediately_no_approval_needed() {
+        let (mut app, dir) = two_file_app("agent-end-edit-mode");
+        app.mode = Mode::Agent;
+        app.edit_mode = true;
+
+        // Edit mode writes straight to target_dir (no sandbox, no separate
+        // accept step) — simulate that by editing the file directly, the
+        // same as what a real `pi` write tool call would have just done.
+        fs::write(dir.join("a.txt"), "a1-changed\na2\na3-written-by-the-agent\n").unwrap();
+        let before = app.project.files[0].hunks[0].lines.len();
+
+        app.apply_agent_event(AgentEvent::AgentEnd);
+
+        assert!(!app.agent_running);
+        assert!(app.project.files[0].hunks[0].lines.len() > before, "Steer should already reflect the write, no Ctrl+A needed");
+        assert!(app.transcript.iter().any(|l| l.text.contains("file") && l.text.contains("changed")), "{:?}", app.transcript.iter().map(|l| &l.text).collect::<Vec<_>>());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_end_in_chat_mode_does_not_touch_review_state() {
+        let (mut app, dir) = two_file_app("agent-end-chat-mode");
+        app.mode = Mode::Agent;
+        assert!(!app.edit_mode);
+        let before = app.project.files[0].hunks[0].lines.len();
+
+        fs::write(dir.join("a.txt"), "a1-changed\na2\na3-should-not-be-picked-up-yet\n").unwrap();
+        app.apply_agent_event(AgentEvent::AgentEnd);
+
+        assert_eq!(app.project.files[0].hunks[0].lines.len(), before, "Chat mode shouldn't force a review refresh");
 
         let _ = fs::remove_dir_all(&dir);
     }

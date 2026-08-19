@@ -60,13 +60,13 @@ pub struct PiSession {
 /// Which tools a spawned turn is allowed to use.
 ///
 /// `ReadOnly` is for normal chat/Q&A in the Agent pane — pi can inspect the
-/// real target directory but never write to it. `ReadWrite` is only ever
-/// used against a disposable sandbox worktree (see `sandbox.rs`), never the
-/// real target directory directly: pi has no native "pause and wait for
-/// external approval before writing" hook (confirmed by testing — `write`
-/// executes as soon as the model calls it, `--approve` or not), so the
-/// approval step has to happen at the filesystem level, before any real
-/// files are touched.
+/// real target directory but never write to it. `ReadWrite` (Edit mode)
+/// writes straight to the real target directory: pi has no native "pause
+/// and wait for external approval before writing" hook (confirmed by
+/// testing — `write` executes as soon as the model calls it, `--approve`
+/// or not), so there's no filesystem-level gate to stage changes through
+/// either way. Steer's diff view and plain `git` are the review/undo
+/// mechanism instead, same as any other change made to the repo.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolProfile {
     ReadOnly,

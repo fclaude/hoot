@@ -25,7 +25,6 @@ pub enum Action {
     SwitchAgent,
     SwitchCurate,
     OpenSymbolJump,
-    OpenPermissionDemo,
     OpenFileFinder,
 
     SteerUp,
@@ -67,17 +66,10 @@ pub enum Action {
     NoteCancel,
 
     AgentSend,
-    AgentAcceptAll,
-    AgentModify,
-    AgentReject,
     AgentSwitchBackend,
     AgentToggleEditMode,
     AgentScrollUp,
     AgentScrollDown,
-
-    PermCycle,
-    PermConfirm,
-    PermCancel,
 
     CurateUp,
     CurateDown,
@@ -111,7 +103,6 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::SwitchAgent, "switch_agent", "Switch: Agent", "Global", "f3", "Jump to the Agent screen"),
     b!(Action::SwitchCurate, "switch_curate", "Switch: Curate", "Global", "f4", "Jump to the Curation screen"),
     b!(Action::OpenSymbolJump, "open_symbol_jump", "Open Symbol Jump", "Global", "ctrl+k", "Open the fuzzy symbol-jump overlay from anywhere"),
-    b!(Action::OpenPermissionDemo, "open_permission_demo", "Open Permission Prompt (demo)", "Global", "ctrl+p", "Open the permission-prompt overlay"),
     b!(Action::OpenFileFinder, "open_file_finder", "Open File Finder", "Global", "ctrl+f", "Open the fuzzy file finder (with live preview) from anywhere"),
 
     b!(Action::SteerUp, "steer_up", "Move up", "Steer", "up", "Select the previous file"),
@@ -158,17 +149,10 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::NoteCancel, "note_cancel", "Cancel", "Note", "esc", "Discard and close without saving"),
 
     b!(Action::AgentSend, "agent_send", "Send prompt", "Agent", "enter", "Send the typed prompt to the real pi agent"),
-    b!(Action::AgentAcceptAll, "agent_accept_all", "Accept all", "Agent", "ctrl+a", "Open the real diff from Edit mode for approval"),
-    b!(Action::AgentModify, "agent_modify", "Modify", "Agent", "ctrl+m", "Keep revising in the same sandbox before re-approving"),
-    b!(Action::AgentReject, "agent_reject", "Reject", "Agent", "ctrl+r", "Discard the sandbox's changes"),
     b!(Action::AgentSwitchBackend, "agent_switch_backend", "Switch backend", "Agent", "ctrl+b", "Toggle pi \u{2194} pi/openai-codex"),
-    b!(Action::AgentToggleEditMode, "agent_toggle_edit_mode", "Toggle edit mode", "Agent", "ctrl+e", "Chat (read-only) \u{2194} Edit (sandboxed writes)"),
+    b!(Action::AgentToggleEditMode, "agent_toggle_edit_mode", "Toggle edit mode", "Agent", "ctrl+e", "Chat (read-only) \u{2194} Edit (writes straight to the repo)"),
     b!(Action::AgentScrollUp, "agent_scroll_up", "Scroll up", "Agent", "pageup", "Scroll the transcript up to review history"),
     b!(Action::AgentScrollDown, "agent_scroll_down", "Scroll down", "Agent", "pagedown", "Scroll the transcript back down toward the latest"),
-
-    b!(Action::PermCycle, "perm_cycle", "Cycle option", "Permission", "tab", "Cycle the focused option"),
-    b!(Action::PermConfirm, "perm_confirm", "Confirm", "Permission", "enter", "Confirm the focused option"),
-    b!(Action::PermCancel, "perm_cancel", "Cancel", "Permission", "esc", "Close without confirming"),
 
     b!(Action::CurateUp, "curate_up", "Move up", "Curate", "up", "Select the previous file"),
     b!(Action::CurateDown, "curate_down", "Move down", "Curate", "down", "Select the next file"),

@@ -48,22 +48,6 @@ pub struct FileEntry {
     pub hunks: Vec<Hunk>,
 }
 
-impl FileEntry {
-    /// (added lines, removed lines) across every hunk.
-    pub fn diff_stat(&self) -> (u32, u32) {
-        let mut plus = 0;
-        let mut minus = 0;
-        for line in self.hunks.iter().flat_map(|h| &h.lines) {
-            match line.kind {
-                DiffLineKind::Added => plus += 1,
-                DiffLineKind::Removed => minus += 1,
-                _ => {}
-            }
-        }
-        (plus, minus)
-    }
-}
-
 pub struct Project {
     pub name: String,
     pub root: String,
@@ -258,29 +242,6 @@ pub fn mock_transcript() -> Vec<AgentLine> {
         al(Blank, ""),
         al(Proposal, "Proposing changes to 3 files:"),
     ]
-}
-
-// ---------------------------------------------------------------------
-// PERMISSION PROMPT
-// ---------------------------------------------------------------------
-
-pub struct FileWrite {
-    pub path: String,
-    pub kind: &'static str,
-    pub plus: u32,
-    pub minus: u32,
-}
-
-pub fn mock_permission_writes() -> Vec<FileWrite> {
-    vec![
-        FileWrite { path: "src/index/postings.rs".to_string(), kind: "modify", plus: 47, minus: 8 },
-        FileWrite { path: "src/query/parser.rs".to_string(), kind: "modify", plus: 15, minus: 3 },
-        FileWrite { path: "tests/integration_test.rs".to_string(), kind: "modify", plus: 23, minus: 0 },
-    ]
-}
-
-pub fn mock_permission_commands() -> Vec<&'static str> {
-    vec!["cargo test --lib"]
 }
 
 // ---------------------------------------------------------------------

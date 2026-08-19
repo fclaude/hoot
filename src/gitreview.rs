@@ -38,7 +38,7 @@ pub fn load(root: &Path) -> ReviewData {
 }
 
 /// The parsed working-tree diff for `root`: empty if it's not a git repo or
-/// has no changes. Also used by `sandbox.rs` to diff a disposable worktree.
+/// has no changes.
 pub fn diff_files(root: &Path) -> Vec<FileEntry> {
     let diff_text = run_git_diff(root);
     parse_unified_diff(&diff_text)
@@ -54,11 +54,33 @@ fn is_git_repo(root: &Path) -> bool {
 
 /// Diffs against HEAD (staged + unstaged) when a commit exists; otherwise
 /// falls back to a plain working-tree diff (e.g. a repo with zero commits).
+/// Appends untracked files too — plain `git diff` never shows those (they
+/// aren't in the index at all), which would otherwise make a file the
+/// agent just created invisible to Steer until it's staged.
 fn run_git_diff(root: &Path) -> String {
     let has_head = git(root, &["rev-parse", "--verify", "-q", "HEAD"]).map(|o| o.status.success()).unwrap_or(false);
     let args: &[&str] =
         if has_head { &["diff", "HEAD", "--no-color", "-U3"] } else { &["diff", "--no-color", "-U3"] };
-    git(root, args).map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+    let mut diff = git(root, args).map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    diff.push_str(&untracked_files_diff(root));
+    diff
+}
+
+/// Diffs each untracked, non-ignored file against `/dev/null` individually
+/// and concatenates the results — real unified-diff text in exactly the
+/// same format `parse_unified_diff` already handles, so no separate
+/// "new file" code path is needed on the parsing side.
+fn untracked_files_diff(root: &Path) -> String {
+    let Some(listing) = git(root, &["ls-files", "--others", "--exclude-standard"]) else {
+        return String::new();
+    };
+    let mut diff = String::new();
+    for path in String::from_utf8_lossy(&listing.stdout).lines().filter(|l| !l.is_empty()) {
+        if let Some(out) = git(root, &["diff", "--no-color", "-U3", "--no-index", "/dev/null", path]) {
+            diff.push_str(&String::from_utf8_lossy(&out.stdout));
+        }
+    }
+    diff
 }
 
 fn parse_unified_diff(diff: &str) -> Vec<FileEntry> {
@@ -273,6 +295,50 @@ index 111..222 100644
         assert_eq!(review.curation_files.len(), 1);
         assert_eq!(review.curation_files[0].total(), 1);
         assert_eq!(review.curation_files[0].selected(), 1); // starts fully selected
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_includes_untracked_files_not_just_tracked_changes() {
+        // Plain `git diff` never shows untracked files (they're not in the
+        // index at all) — without special-casing them, a file the agent
+        // just created via `write` would be invisible here until staged.
+        let dir = scratch_repo("untracked");
+        run(&dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        fs::write(dir.join("new.txt"), "hello\nworld\n").unwrap();
+
+        let review = load(&dir);
+        assert_eq!(review.project.files.len(), 1, "should pick up the untracked file");
+        assert_eq!(review.project.files[0].path, "new.txt");
+        let (added, removed) = review.project.files[0]
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .fold((0, 0), |(a, r), l| match l.kind {
+                DiffLineKind::Added => (a + 1, r),
+                DiffLineKind::Removed => (r, r + 1),
+                _ => (a, r),
+            });
+        assert_eq!(added, 2, "both lines of a brand-new file should show as added");
+        assert_eq!(removed, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_mixes_tracked_changes_and_untracked_files_together() {
+        let dir = scratch_repo("mixed");
+        fs::write(dir.join("tracked.txt"), "a\n").unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "init"]);
+        fs::write(dir.join("tracked.txt"), "a-changed\n").unwrap();
+        fs::write(dir.join("untracked.txt"), "b\n").unwrap();
+
+        let review = load(&dir);
+        let mut paths: Vec<&str> = review.project.files.iter().map(|f| f.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["tracked.txt", "untracked.txt"]);
 
         let _ = fs::remove_dir_all(&dir);
     }
