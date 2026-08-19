@@ -20,10 +20,38 @@ fn transcript_scroll_start(total: usize, visible: usize, scroll_from_bottom: usi
     max_scroll - effective
 }
 
+/// Greedily word-wraps `text` to `width` columns. Pre-wrapping into
+/// separate `Line`s (rather than relying on `Paragraph`'s own wrap) keeps
+/// each transcript entry's row count known ahead of render, so the
+/// bottom-anchored scroll math above stays exact. A single word longer
+/// than `width` is left on its own (slightly overflowing) line rather than
+/// hard-split — simpler, and rare for natural-language transcript text.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width < 4 {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let would_be = if current.is_empty() { word.chars().count() } else { current.chars().count() + 1 + word.chars().count() };
+        if would_be > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 /// Renders `text` with a visible block cursor at char index `cursor` —
 /// highlights the character under the cursor, or shows a trailing block if
 /// the cursor is past the end (the common case, right after typing).
-fn input_spans(text: &str, cursor: usize) -> Vec<Span<'static>> {
+pub(crate) fn input_spans(text: &str, cursor: usize) -> Vec<Span<'static>> {
     let chars: Vec<char> = text.chars().collect();
     let before: String = chars.iter().take(cursor).collect();
     let mut spans = vec![Span::styled(before, Style::default().fg(theme::FG))];
@@ -38,6 +66,65 @@ fn input_spans(text: &str, cursor: usize) -> Vec<Span<'static>> {
         spans.push(Span::styled("\u{2588}", Style::default().fg(theme::CYAN)));
     }
     spans
+}
+
+/// Builds the full scrollable transcript, word-wrapped to `width` so
+/// nothing is silently clipped — each returned `Line` is exactly one
+/// rendered row, keeping the caller's scroll math exact.
+fn build_transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    fn wrapped(prefix: &str, prefix_color: ratatui::style::Color, text: &str, style: Style, width: usize) -> Vec<Line<'static>> {
+        let indent = " ".repeat(prefix.chars().count());
+        let chunks = wrap_text(text, width.saturating_sub(prefix.chars().count()).max(4));
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                if i == 0 {
+                    Line::from(vec![Span::styled(prefix.to_string(), Style::default().fg(prefix_color)), Span::styled(chunk, style)])
+                } else {
+                    Line::from(vec![Span::raw(indent.clone()), Span::styled(chunk, style)])
+                }
+            })
+            .collect()
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for tl in &app.transcript {
+        let fg = Style::default().fg(theme::FG);
+        let mut wrapped_lines = match tl.kind {
+            AgentLineKind::Done => wrapped("\u{2714} ", theme::GREEN, &tl.text, fg, width),
+            AgentLineKind::InProgress => wrapped("\u{21bb} ", theme::ORANGE, &tl.text, fg, width),
+            AgentLineKind::ToolCall => wrapped("\u{29d6} ", theme::ORANGE, &tl.text, fg, width),
+            AgentLineKind::Proposal => {
+                wrapped("\u{1f4dd} ", theme::FG, &tl.text, fg.add_modifier(Modifier::BOLD), width)
+            }
+            AgentLineKind::Text | AgentLineKind::Blank => {
+                if tl.text.is_empty() {
+                    vec![Line::raw("")]
+                } else {
+                    wrap_text(&tl.text, width.max(4)).into_iter().map(|c| Line::from(Span::styled(c, fg))).collect()
+                }
+            }
+        };
+        lines.append(&mut wrapped_lines);
+    }
+    if app.demo_transcript {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled("  \u{25b6} ", Style::default().fg(theme::DIM)),
+            Span::styled("src/query/parser.rs (1 hunk)", Style::default().fg(theme::FG)),
+            Span::styled("  [demo only]", Style::default().fg(theme::DIM)),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "      -   for &doc_id in phrase.docs() {",
+            Style::default().fg(theme::RED),
+        )));
+        lines.push(Line::from(Span::styled(
+            "      +   for &doc_id in phrase.docs().iter() {",
+            Style::default().fg(theme::GREEN),
+        )));
+    }
+    lines
 }
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
@@ -69,48 +156,6 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
         ]),
     ];
 
-    let mut transcript: Vec<Line<'static>> = Vec::new();
-    for tl in &app.transcript {
-        let line = match tl.kind {
-            AgentLineKind::Done => Line::from(vec![
-                Span::styled("\u{2714} ", Style::default().fg(theme::GREEN)),
-                Span::styled(tl.text.clone(), Style::default().fg(theme::FG)),
-            ]),
-            AgentLineKind::InProgress => Line::from(vec![
-                Span::styled("\u{21bb} ", Style::default().fg(theme::ORANGE)),
-                Span::styled(tl.text.clone(), Style::default().fg(theme::FG)),
-            ]),
-            AgentLineKind::ToolCall => Line::from(vec![
-                Span::styled("\u{29d6} ", Style::default().fg(theme::ORANGE)),
-                Span::styled(tl.text.clone(), Style::default().fg(theme::FG)),
-            ]),
-            AgentLineKind::Proposal => Line::from(Span::styled(
-                format!("\u{1f4dd} {}", tl.text),
-                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
-            )),
-            AgentLineKind::Text | AgentLineKind::Blank => {
-                Line::from(Span::styled(tl.text.clone(), Style::default().fg(theme::FG)))
-            }
-        };
-        transcript.push(line);
-    }
-    if app.demo_transcript {
-        transcript.push(Line::raw(""));
-        transcript.push(Line::from(vec![
-            Span::styled("  \u{25b6} ", Style::default().fg(theme::DIM)),
-            Span::styled("src/query/parser.rs (1 hunk)", Style::default().fg(theme::FG)),
-            Span::styled("  [demo only]", Style::default().fg(theme::DIM)),
-        ]));
-        transcript.push(Line::from(Span::styled(
-            "      -   for &doc_id in phrase.docs() {",
-            Style::default().fg(theme::RED),
-        )));
-        transcript.push(Line::from(Span::styled(
-            "      +   for &doc_id in phrase.docs().iter() {",
-            Style::default().fg(theme::GREEN),
-        )));
-    }
-
     let hints = vec![super::key_hints(&[
         ("Ctrl+E", "Edit mode"),
         ("Ctrl+A", "Accept"),
@@ -141,6 +186,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
 
     f.render_widget(Paragraph::new(header), rows[0]);
 
+    let transcript = build_transcript_lines(app, rows[2].width as usize);
     let visible = rows[2].height as usize;
     let total = transcript.len();
     let start = transcript_scroll_start(total, visible, app.agent_scroll);
@@ -169,4 +215,51 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
     let divider2 = "\u{2500}".repeat(rows[5].width as usize);
     f.render_widget(Paragraph::new(divider2).style(Style::default().fg(theme::DIM)), rows[5]);
     f.render_widget(Paragraph::new(hints), rows[6]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_text_breaks_at_word_boundaries_within_width() {
+        let lines = wrap_text("the quick brown fox jumps", 11);
+        for l in &lines {
+            assert!(l.chars().count() <= 11, "{l:?} exceeds width");
+        }
+        assert_eq!(lines.join(" "), "the quick brown fox jumps");
+    }
+
+    #[test]
+    fn wrap_text_leaves_an_overlong_word_on_its_own_line() {
+        let lines = wrap_text("supercalifragilisticexpialidocious short", 10);
+        assert_eq!(lines[0], "supercalifragilisticexpialidocious");
+        assert_eq!(lines[1], "short");
+    }
+
+    #[test]
+    fn wrap_text_empty_input_yields_one_empty_line() {
+        assert_eq!(wrap_text("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_text_short_text_is_a_single_line() {
+        assert_eq!(wrap_text("hi", 80), vec!["hi"]);
+    }
+
+    #[test]
+    fn transcript_scroll_start_pins_to_bottom_by_default() {
+        assert_eq!(transcript_scroll_start(100, 20, 0), 80);
+    }
+
+    #[test]
+    fn transcript_scroll_start_reaches_the_top_when_fully_scrolled() {
+        assert_eq!(transcript_scroll_start(100, 20, 80), 0);
+        assert_eq!(transcript_scroll_start(100, 20, 9999), 0, "should clamp, not go negative");
+    }
+
+    #[test]
+    fn transcript_scroll_start_is_zero_when_content_fits() {
+        assert_eq!(transcript_scroll_start(5, 20, 0), 0);
+    }
 }

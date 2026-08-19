@@ -8,13 +8,15 @@ Create `~/.steer.toml` and set any binding name below to a new chord, e.g.:
 
 ```toml
 quit = "ctrl+q"
-steer_iterate = "ctrl+enter"
+steer_comment = "ctrl+enter"
 nav_toggle_hover = "shift+h"
 ```
 
 Chords are `mod+mod+key`, e.g. `ctrl+enter`, `shift+tab`, `f1`, `space`, `/`, `g`. Modifiers: `ctrl`, `shift`, `alt`. Unknown binding names or unparsable chords are reported as warnings on startup and otherwise ignored — they never prevent steer from starting.
 
 Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) in the agent prompt, symbol filter, and commit message editor.
+
+Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don't work in most terminals — the terminal collapses them to the same byte sequence as the bare key, so no modifier survives for steer to see. Prefer a plain letter or `ctrl+<letter>` chord instead.
 
 ## Global
 
@@ -42,7 +44,7 @@ Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) 
 | `steer_comment` | Comment | `c` |  | Queue a review note on this file |
 | `steer_split_view` | Split view | `s` |  | Switch the diff panel to before/after columns |
 | `steer_unified_view` | Unified view | `u` |  | Switch the diff panel back to unified |
-| `steer_iterate` | Iterate | `Ctrl+Enter` |  | Send queued notes to the real pi agent |
+| `steer_iterate` | Iterate | `Enter` |  | Send queued notes to the real pi agent |
 
 ## Navigate
 
@@ -60,6 +62,7 @@ Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) 
 | `nav_scroll_right` | Scroll right | `→` |  | Scroll the source pane right (only while it's focused) |
 | `nav_toggle_hover` | Toggle hover | `h` |  | Show/hide symbol info for the current line |
 | `nav_open_symbol_jump` | Open symbol jump | `/` |  | Open the fuzzy symbol-jump overlay |
+| `nav_comment` | Comment | `c` |  | Leave a real note on the current line, for the next iterate |
 
 ## Symbol Jump
 
@@ -78,6 +81,13 @@ Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) 
 | `finder_down` | Move down | `↓` |  | Move the result selection down |
 | `finder_open` | Open | `Enter` |  | Open the selected file |
 | `finder_close` | Close | `Esc` |  | Close the overlay without opening |
+
+## Note
+
+| Binding name | Action | Default | Current | Description |
+|---|---|---|---|---|
+| `note_confirm` | Save note | `Enter` |  | Save the note and close the overlay |
+| `note_cancel` | Cancel | `Esc` |  | Discard and close without saving |
 
 ## Agent
 

@@ -2,6 +2,7 @@ mod agent;
 mod curation;
 mod file_finder;
 mod navigate;
+mod note_input;
 mod permission;
 mod steer;
 mod symbol_jump;
@@ -42,6 +43,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::SymbolJump => symbol_jump::draw(f, app, area),
         Overlay::Permission => permission::draw(f, app, area),
         Overlay::FileFinder => file_finder::draw(f, app, area),
+        Overlay::NoteInput => note_input::draw(f, app, area),
         Overlay::None => {}
     }
 }
@@ -83,13 +85,7 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     };
 
     let right = match app.mode {
-        Mode::Steer => {
-            if narrow {
-                "^Enter iterate".to_string()
-            } else {
-                "Ctrl+Enter iterate".to_string()
-            }
-        }
+        Mode::Steer => "Enter iterate".to_string(),
         Mode::Navigate => format!("{} symbols scanned", app.symbols.len()),
         _ => String::new(),
     };
@@ -455,12 +451,33 @@ mod tests {
     }
 
     #[test]
+    fn note_input_overlay_shows_target_and_typed_text() {
+        let dir = scratch_repo("note-overlay");
+        commit_file(&dir, "a.rs", "a1\na2\n");
+        fs::write(dir.join("a.rs"), "a1-changed\na2\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        for c in "extract this".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let screen = render(&app, 150, 30);
+        assert!(screen.contains("a.rs"), "{screen}");
+        assert!(screen.contains("extract this"), "{screen}");
+        assert!(screen.contains("Save"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn narrow_terminal_uses_compact_steer_header() {
         let dir = scratch_repo("narrow");
         let app = App::new(dir.clone(), Keymap::defaults());
         let screen = render(&app, 80, 30);
-        // Narrow layout abbreviates "Ctrl+Enter" to "^Enter" in the header.
-        assert!(screen.contains("^Enter"), "{screen}");
+        // Narrow layout abbreviates "N notes queued · N files selected" to "N/N sel".
+        assert!(screen.contains("sel"), "{screen}");
+        assert!(!screen.contains("notes queued"), "{screen}");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -470,7 +487,8 @@ mod tests {
         let dir = scratch_repo("wide");
         let app = App::new(dir.clone(), Keymap::defaults());
         let screen = render(&app, 150, 30);
-        assert!(screen.contains("Ctrl+Enter iterate"), "{screen}");
+        assert!(screen.contains("notes queued"), "{screen}");
+        assert!(screen.contains("Enter iterate"), "{screen}");
 
         let _ = fs::remove_dir_all(&dir);
     }

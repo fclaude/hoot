@@ -181,6 +181,15 @@ pub struct TreeEntry {
     pub path: std::path::PathBuf,
 }
 
+/// A real, free-text review note — from Steer (file-level, `line: None`) or
+/// Navigate (a specific line while browsing). Feeds into the real prompt
+/// Steer's "iterate" sends to `pi`.
+pub struct Note {
+    pub path: String,
+    pub line: Option<usize>,
+    pub text: String,
+}
+
 pub struct HoverInfo {
     pub signature: String,
     pub location: String,

@@ -4,7 +4,7 @@ use std::sync::mpsc::TryRecvError;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::data::{
-    self, AgentLine, AgentLineKind, CurationFile, FileEntry, FileWrite, HoverInfo, Project,
+    self, AgentLine, AgentLineKind, CurationFile, FileEntry, FileWrite, HoverInfo, Note, Project,
     SymbolResult, TreeEntry,
 };
 use crate::fsnav;
@@ -19,12 +19,13 @@ pub enum Mode {
     Curation,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Overlay {
     None,
     SymbolJump,
     Permission,
     FileFinder,
+    NoteInput,
 }
 
 /// Which Navigate pane arrow keys currently move.
@@ -84,6 +85,12 @@ pub struct App {
     // FILE FINDER (overlay)
     pub file_finder_filter: String,
     pub file_finder_index: usize,
+
+    // NOTES (real free-text review notes, from Steer or Navigate)
+    pub notes: Vec<Note>,
+    pub(crate) note_target: Option<(String, Option<usize>)>,
+    pub note_input: String,
+    pub note_cursor: usize,
 
     // AGENT
     pub target_dir: PathBuf,
@@ -185,6 +192,11 @@ impl App {
 
             file_finder_filter: String::new(),
             file_finder_index: 0,
+
+            notes: Vec::new(),
+            note_target: None,
+            note_input: String::new(),
+            note_cursor: 0,
 
             target_dir,
             session_id: format!("steer-{}", std::process::id()),
@@ -422,7 +434,14 @@ impl App {
 
         match event {
             Model(m) => self.agent_model_live = Some(m),
-            Thinking(t) => self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("  {t}") }),
+            Thinking(t) => {
+                // Always followed by a blank line: thinking prose and
+                // whatever comes next (a tool call or the final answer)
+                // share the same line kind, so without an explicit
+                // separator they visually run together.
+                self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("  {t}") });
+                self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() });
+            }
             Text(t) => self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: t }),
             ToolCall { name, args } => self.transcript.push(AgentLine {
                 kind: AgentLineKind::ToolCall,
@@ -534,6 +553,7 @@ impl App {
             Overlay::SymbolJump => return self.on_key_symbol_jump(key),
             Overlay::Permission => return self.on_key_permission(key),
             Overlay::FileFinder => return self.on_key_file_finder(key),
+            Overlay::NoteInput => return self.on_key_note_input(key),
             Overlay::None => {}
         }
 
@@ -611,13 +631,16 @@ impl App {
         } else if k.is(&key, Action::SteerToggleSelect) {
             self.project.files[self.steer_selected].selected ^= true;
         } else if k.is(&key, Action::SteerMarkGood) {
+            let path = self.project.files[self.steer_selected].path.clone();
             let f = &mut self.project.files[self.steer_selected];
             f.flagged = false;
             f.notes = 0;
+            self.notes.retain(|n| n.path != path);
         } else if k.is(&key, Action::SteerFlagRework) {
             self.project.files[self.steer_selected].flagged = true;
         } else if k.is(&key, Action::SteerComment) {
-            self.project.files[self.steer_selected].notes += 1;
+            let path = self.project.files[self.steer_selected].path.clone();
+            self.open_note_input(path, None);
         } else if k.is(&key, Action::SteerSplitView) {
             self.steer_split = true;
         } else if k.is(&key, Action::SteerUnifiedView) {
@@ -625,29 +648,51 @@ impl App {
         } else if k.is(&key, Action::SteerIterate) {
             let prompt = self.build_iterate_prompt();
             self.mode = Mode::Agent;
+            // Notes ask the agent to change things — iterating through
+            // read-only Chat mode would let it see the request but never
+            // act on it, so switch to sandboxed Edit mode first.
+            self.edit_mode = true;
             self.start_agent_turn(prompt);
         }
     }
 
-    /// Turns the queued review notes into a real prompt for `pi`.
+    /// Turns the queued review notes into a real prompt for `pi`, pulling
+    /// from `self.notes` (the real free-text notes left in Steer/Navigate)
+    /// rather than the unused mock-only `Hunk::note` field. Notes are
+    /// grouped under their file, with an explicit line annotation, so the
+    /// agent can't confuse which file (or line) a piece of feedback is
+    /// actually about.
     fn build_iterate_prompt(&self) -> String {
         let mut prompt = String::from(
-            "You're iterating on review feedback for this repo. Please address the following notes:\n\n",
+            "You're iterating on review feedback for this repo. Each note below is attached to a \
+             specific file, and a specific line when one is given — address them there, not elsewhere:\n\n",
         );
         let mut any = false;
-        for file in &self.project.files {
-            if !file.selected {
+        let selected_paths: std::collections::HashSet<&str> =
+            self.project.files.iter().filter(|f| f.selected).map(|f| f.path.as_str()).collect();
+
+        let mut order: Vec<&str> = Vec::new();
+        let mut grouped: std::collections::HashMap<&str, Vec<&Note>> = std::collections::HashMap::new();
+        for note in &self.notes {
+            if !selected_paths.contains(note.path.as_str()) {
                 continue;
             }
-            for hunk in &file.hunks {
-                if let Some(note) = &hunk.note {
-                    any = true;
-                    prompt.push_str(&format!("- {}: {}\n", file.path, note));
+            grouped.entry(note.path.as_str()).or_insert_with(|| { order.push(note.path.as_str()); Vec::new() }).push(note);
+        }
+        for path in &order {
+            any = true;
+            prompt.push_str(&format!("File: {path}\n"));
+            for note in &grouped[path] {
+                match note.line {
+                    Some(line) => prompt.push_str(&format!("  - Line {line}: {}\n", note.text)),
+                    None => prompt.push_str(&format!("  - {}\n", note.text)),
                 }
             }
-            if file.flagged {
+        }
+        for file in &self.project.files {
+            if file.selected && file.flagged {
                 any = true;
-                prompt.push_str(&format!("- {}: flagged for rework, please redo this file's change.\n", file.path));
+                prompt.push_str(&format!("File: {}\n  - Flagged for rework: please redo this file's change.\n", file.path));
             }
         }
         if !any {
@@ -736,6 +781,11 @@ impl App {
             }
         } else if k.is(&key, Action::NavOpenSymbolJump) {
             self.overlay = Overlay::SymbolJump;
+        } else if k.is(&key, Action::NavComment) {
+            if !self.source.is_empty() {
+                let rel = self.nav_file.strip_prefix(&self.target_dir).unwrap_or(&self.nav_file).display().to_string();
+                self.open_note_input(rel, Some(self.nav_line + 1));
+            }
         }
     }
 
@@ -832,6 +882,69 @@ impl App {
             self.file_finder_filter.push(c);
             self.file_finder_index = 0;
         }
+    }
+
+    // -------------------------------------------------------------
+    // NOTES
+    // -------------------------------------------------------------
+    fn open_note_input(&mut self, path: String, line: Option<usize>) {
+        self.note_target = Some((path, line));
+        self.note_input.clear();
+        self.note_cursor = 0;
+        self.overlay = Overlay::NoteInput;
+    }
+
+    fn on_key_note_input(&mut self, key: KeyEvent) {
+        if self.keymap.is(&key, Action::NoteCancel) {
+            self.overlay = Overlay::None;
+            self.note_target = None;
+            return;
+        }
+        if self.keymap.is(&key, Action::NoteConfirm) {
+            self.confirm_note();
+            return;
+        }
+        let char_count = self.note_input.chars().count();
+        match key.code {
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let byte = char_boundary(&self.note_input, self.note_cursor);
+                self.note_input.insert(byte, c);
+                self.note_cursor += 1;
+            }
+            KeyCode::Backspace => {
+                if self.note_cursor > 0 {
+                    let start = char_boundary(&self.note_input, self.note_cursor - 1);
+                    let end = char_boundary(&self.note_input, self.note_cursor);
+                    self.note_input.replace_range(start..end, "");
+                    self.note_cursor -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                if self.note_cursor < char_count {
+                    let start = char_boundary(&self.note_input, self.note_cursor);
+                    let end = char_boundary(&self.note_input, self.note_cursor + 1);
+                    self.note_input.replace_range(start..end, "");
+                }
+            }
+            KeyCode::Left => self.note_cursor = self.note_cursor.saturating_sub(1),
+            KeyCode::Right => self.note_cursor = (self.note_cursor + 1).min(char_count),
+            KeyCode::Home => self.note_cursor = 0,
+            KeyCode::End => self.note_cursor = char_count,
+            _ => {}
+        }
+    }
+
+    fn confirm_note(&mut self) {
+        let text = self.note_input.trim().to_string();
+        if let Some((path, line)) = self.note_target.take() {
+            if !text.is_empty() {
+                self.notes.push(Note { path: path.clone(), line, text });
+                if let Some(f) = self.project.files.iter_mut().find(|f| f.path == path) {
+                    f.notes += 1;
+                }
+            }
+        }
+        self.overlay = Overlay::None;
     }
 
     // -------------------------------------------------------------
@@ -1082,7 +1195,15 @@ mod tests {
         app.on_key(key(KeyCode::Char('x')));
         assert!(app.project.files[0].flagged);
         app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(app.overlay, Overlay::NoteInput);
+        for c in "please fix this".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.overlay, Overlay::None);
         assert_eq!(app.project.files[0].notes, 1);
+        assert_eq!(app.notes.len(), 1);
+        assert_eq!(app.notes[0].text, "please fix this");
         app.on_key(key(KeyCode::Char('g')));
         assert!(!app.project.files[0].flagged);
         assert_eq!(app.project.files[0].notes, 0);
@@ -1140,6 +1261,88 @@ mod tests {
         let show = app.show_hover;
         app.on_key(key(KeyCode::Char('h')));
         assert_eq!(app.show_hover, !show);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_comment_opens_note_input_targeting_the_current_line() {
+        let dir = scratch_repo("navigate-comment");
+        commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n    let y = 2;\n}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Navigate;
+        app.on_key(key(KeyCode::Tab)); // focus source
+        app.on_key(key(KeyCode::Down)); // nav_line == 1
+
+        app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(app.overlay, Overlay::NoteInput);
+        assert_eq!(app.note_target, Some(("main.rs".to_string(), Some(2))));
+
+        for c in "extract this".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.notes.len(), 1);
+        assert_eq!(app.notes[0].path, "main.rs");
+        assert_eq!(app.notes[0].line, Some(2));
+        assert_eq!(app.notes[0].text, "extract this");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn note_input_esc_discards_without_saving() {
+        let dir = scratch_repo("note-cancel");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Steer;
+        app.project.files.push(crate::data::FileEntry {
+            path: "x.rs".to_string(),
+            hunk_count: 0,
+            notes: 0,
+            selected: false,
+            flagged: false,
+            hunks: vec![],
+        });
+        app.steer_selected = 0;
+
+        app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(app.overlay, Overlay::NoteInput);
+        app.on_key(key(KeyCode::Char('x')));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.notes.is_empty());
+        assert_eq!(app.note_target, None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn note_input_editing_supports_cursor_movement_and_backspace() {
+        let dir = scratch_repo("note-edit");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Steer;
+        app.project.files.push(crate::data::FileEntry {
+            path: "x.rs".to_string(),
+            hunk_count: 0,
+            notes: 0,
+            selected: false,
+            flagged: false,
+            hunks: vec![],
+        });
+        app.steer_selected = 0;
+        app.on_key(key(KeyCode::Char('c')));
+        for c in "helo".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        // cursor is after "helo"; move left once and insert 'l' -> "hello"
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Char('l')));
+        assert_eq!(app.note_input, "hello");
+
+        app.on_key(key(KeyCode::End));
+        app.on_key(key(KeyCode::Backspace));
+        assert_eq!(app.note_input, "hell");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1359,6 +1562,46 @@ mod tests {
         assert!(text.contains("a.txt"), "{text}");
         assert!(text.contains("a1-changed"), "{text}");
         assert!(!text.contains("b1-changed"), "{text}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn iterate_prompt_groups_notes_by_file_with_line_annotations() {
+        let (mut app, dir) = two_file_app("iterate-prompt");
+        // a.txt selected (default from two_file_app); b.txt is not.
+        app.project.files[1].selected = false;
+
+        app.notes.push(Note { path: "a.txt".to_string(), line: Some(2), text: "tighten this up".to_string() });
+        app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "consider a rename".to_string() });
+        // Excluded: not a selected file.
+        app.notes.push(Note { path: "b.txt".to_string(), line: Some(1), text: "should not appear".to_string() });
+
+        let prompt = app.build_iterate_prompt();
+        assert!(prompt.contains("File: a.txt"), "{prompt}");
+        assert!(prompt.contains("Line 2: tighten this up"), "{prompt}");
+        assert!(prompt.contains("consider a rename"), "{prompt}");
+        assert!(!prompt.contains("b.txt"), "{prompt}");
+        assert!(!prompt.contains("should not appear"), "{prompt}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn iterate_prompt_includes_flagged_selected_files_and_honest_empty_state() {
+        let (mut app, dir) = two_file_app("iterate-prompt-flagged");
+        app.project.files[0].flagged = true;
+        app.project.files[1].selected = false; // no notes, no flag, excluded
+
+        let prompt = app.build_iterate_prompt();
+        assert!(prompt.contains("File: a.txt"), "{prompt}");
+        assert!(prompt.contains("Flagged for rework"), "{prompt}");
+        assert!(!prompt.contains("b.txt"), "{prompt}");
+
+        app.project.files[0].flagged = false;
+        app.project.files[1].selected = false;
+        let empty_prompt = app.build_iterate_prompt();
+        assert!(empty_prompt.contains("No specific notes were left"), "{empty_prompt}");
 
         let _ = fs::remove_dir_all(&dir);
     }

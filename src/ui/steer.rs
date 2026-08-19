@@ -175,7 +175,7 @@ fn draw_diff_unified(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let content_width = area.width.saturating_sub(2) as usize;
     let body = Paragraph::new(hunk_lines(app, content_width));
     let hints = if narrow {
-        vec![super::key_hints(&[("Space", "Sel"), ("c", "Comment")]), super::key_hints(&[("^Enter", "Iterate")])]
+        vec![super::key_hints(&[("Space", "Sel"), ("c", "Comment")]), super::key_hints(&[("Enter", "Iterate")])]
     } else {
         vec![
             super::key_hints(&[
@@ -186,7 +186,7 @@ fn draw_diff_unified(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
                 ("\u{2191}\u{2193}", "Navigate"),
             ]),
             super::key_hints(&[
-                ("Ctrl+Enter", &format!("Send {} notes \u{2192} iterate with agent", app.notes_queued())),
+                ("Enter", &format!("Send {} notes \u{2192} iterate with agent", app.notes_queued())),
                 ("Tab", "Next file"),
             ]),
         ]
@@ -277,7 +277,7 @@ fn draw_diff_split(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
             ("s", "Split"),
             ("u", "Unified"),
         ]),
-        super::key_hints(&[("Ctrl+Enter", "Send notes \u{2192} iterate with agent")]),
+        super::key_hints(&[("Enter", "Send notes \u{2192} iterate with agent")]),
     ];
     f.render_widget(Paragraph::new(hints), rows[2]);
 }

@@ -80,6 +80,13 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::raw(" "));
             spans.push(Span::styled("\u{25cf}", Style::default().fg(theme::CYAN)));
         }
+        if !entry.is_dir {
+            let rel = entry.path.strip_prefix(&app.target_dir).unwrap_or(&entry.path).display().to_string();
+            if app.notes.iter().any(|n| n.path == rel) {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("\u{1f4cc}", Style::default().fg(theme::PINK)));
+            }
+        }
         let style = if i == app.tree_index { Style::default().bg(theme::BG_SELECTION) } else { Style::default() };
         lines.push(Line::from(spans).style(style));
     }
@@ -132,7 +139,12 @@ fn draw_source(f: &mut Frame, app: &App, area: Rect) {
     for (i, src_line) in app.source.iter().enumerate().skip(scroll_y).take(visible_height) {
         let bg = if i == app.nav_line { Some(theme::BG_SELECTION) } else { None };
         let visible_line: String = src_line.chars().skip(scroll_x).collect();
-        lines.push(highlighted_line(&ext, &visible_line, bg));
+        let mut line = highlighted_line(&ext, &visible_line, bg);
+        if app.notes.iter().any(|n| n.path == name && n.line == Some(i + 1)) {
+            let marker_bg = bg.unwrap_or(theme::BG_PANEL);
+            line.spans.insert(0, Span::styled("\u{1f4cc}", Style::default().fg(theme::PINK).bg(marker_bg)));
+        }
+        lines.push(line);
     }
     if app.source.is_empty() {
         lines.push(Line::from(Span::styled("(select a file and press Enter)", Style::default().fg(theme::DIM))));

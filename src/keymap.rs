@@ -51,6 +51,7 @@ pub enum Action {
     NavScrollRight,
     NavToggleHover,
     NavOpenSymbolJump,
+    NavComment,
 
     SymbolUp,
     SymbolDown,
@@ -61,6 +62,9 @@ pub enum Action {
     FinderDown,
     FinderOpen,
     FinderClose,
+
+    NoteConfirm,
+    NoteCancel,
 
     AgentSend,
     AgentAcceptAll,
@@ -119,7 +123,12 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::SteerComment, "steer_comment", "Comment", "Steer", "c", "Queue a review note on this file"),
     b!(Action::SteerSplitView, "steer_split_view", "Split view", "Steer", "s", "Switch the diff panel to before/after columns"),
     b!(Action::SteerUnifiedView, "steer_unified_view", "Unified view", "Steer", "u", "Switch the diff panel back to unified"),
-    b!(Action::SteerIterate, "steer_iterate", "Iterate", "Steer", "ctrl+enter", "Send queued notes to the real pi agent"),
+    // Plain Enter, not Ctrl+Enter: most terminals collapse Ctrl+Enter to the
+    // same bare CR byte as Enter (no modifier bit survives), so a chord that
+    // requires the Ctrl modifier silently never matches outside terminals
+    // with the Kitty keyboard protocol enabled. Steer has no other use for
+    // bare Enter, so it's free to mean "iterate" here.
+    b!(Action::SteerIterate, "steer_iterate", "Iterate", "Steer", "enter", "Send queued notes to the real pi agent"),
 
     b!(Action::NavUp, "nav_up", "Move up", "Navigate", "up", "Move up in whichever pane is focused (k also always works)"),
     b!(Action::NavDown, "nav_down", "Move down", "Navigate", "down", "Move down in whichever pane is focused (j also always works)"),
@@ -133,6 +142,7 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::NavScrollRight, "nav_scroll_right", "Scroll right", "Navigate", "right", "Scroll the source pane right (only while it's focused)"),
     b!(Action::NavToggleHover, "nav_toggle_hover", "Toggle hover", "Navigate", "h", "Show/hide symbol info for the current line"),
     b!(Action::NavOpenSymbolJump, "nav_open_symbol_jump", "Open symbol jump", "Navigate", "/", "Open the fuzzy symbol-jump overlay"),
+    b!(Action::NavComment, "nav_comment", "Comment", "Navigate", "c", "Leave a real note on the current line, for the next iterate"),
 
     b!(Action::SymbolUp, "symbol_up", "Move up", "Symbol Jump", "up", "Move the result selection up"),
     b!(Action::SymbolDown, "symbol_down", "Move down", "Symbol Jump", "down", "Move the result selection down"),
@@ -143,6 +153,9 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::FinderDown, "finder_down", "Move down", "File Finder", "down", "Move the result selection down"),
     b!(Action::FinderOpen, "finder_open", "Open", "File Finder", "enter", "Open the selected file"),
     b!(Action::FinderClose, "finder_close", "Close", "File Finder", "esc", "Close the overlay without opening"),
+
+    b!(Action::NoteConfirm, "note_confirm", "Save note", "Note", "enter", "Save the note and close the overlay"),
+    b!(Action::NoteCancel, "note_cancel", "Cancel", "Note", "esc", "Discard and close without saving"),
 
     b!(Action::AgentSend, "agent_send", "Send prompt", "Agent", "enter", "Send the typed prompt to the real pi agent"),
     b!(Action::AgentAcceptAll, "agent_accept_all", "Accept all", "Agent", "ctrl+a", "Open the real diff from Edit mode for approval"),
@@ -336,7 +349,7 @@ pub fn generate_markdown(keymap: &Keymap) -> String {
          Create `~/.steer.toml` and set any binding name below to a new chord, e.g.:\n\n\
          ```toml\n\
          quit = \"ctrl+q\"\n\
-         steer_iterate = \"ctrl+enter\"\n\
+         steer_comment = \"ctrl+enter\"\n\
          nav_toggle_hover = \"shift+h\"\n\
          ```\n\n\
          Chords are `mod+mod+key`, e.g. `ctrl+enter`, `shift+tab`, `f1`, `space`, `/`, `g`. \
@@ -344,7 +357,11 @@ pub fn generate_markdown(keymap: &Keymap) -> String {
          reported as warnings on startup and otherwise ignored — they never prevent steer from \
          starting.\n\n\
          Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) in the \
-         agent prompt, symbol filter, and commit message editor.\n\n",
+         agent prompt, symbol filter, and commit message editor.\n\n\
+         Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don't work \
+         in most terminals — the terminal collapses them to the same byte sequence as the bare \
+         key, so no modifier survives for steer to see. Prefer a plain letter or `ctrl+<letter>` \
+         chord instead.\n\n",
     );
 
     let mut groups: Vec<&'static str> = Vec::new();
