@@ -188,7 +188,15 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
         vec![super::key_hints(&[("c", "Comment"), ("v", view_toggle_label)]), super::key_hints(&[("i", "Iterate")])]
     } else {
         vec![
-            super::key_hints(&[("Tab", "Switch pane"), ("\u{2191}\u{2193}", "Move"), ("PgUp/PgDn", "Page"), ("c", "Comment"), ("g", "Mark good"), ("x", "Flag rework")]),
+            super::key_hints(&[
+                ("Tab", "Switch pane"),
+                ("\u{2191}\u{2193}", "Move"),
+                ("PgUp/PgDn", "Page"),
+                ("\u{2190}\u{2192}", "Scroll"),
+                ("c", "Comment"),
+                ("g", "Mark good"),
+                ("x", "Flag rework"),
+            ]),
             super::key_hints(&[
                 ("v", view_toggle_label),
                 ("s", "Split"),
@@ -208,6 +216,7 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
 
     let visible_height = rows[0].height as usize;
     let scroll_y = scroll_offset(app.nav_line, numbered.len(), visible_height);
+    let scroll_x = app.nav_scroll_x as usize;
 
     let rel = file.path.as_str();
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -221,7 +230,8 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
         if line_no.is_some_and(|n| app.notes.iter().any(|note| note.path == rel && note.line == Some(n))) {
             spans.push(Span::styled("\u{1f4cc}", Style::default().fg(theme::PINK).bg(bg.unwrap_or(theme::BG_PANEL))));
         }
-        spans.push(Span::styled(dl.text.clone(), style));
+        let visible_text: String = dl.text.chars().skip(scroll_x).collect();
+        spans.push(Span::styled(visible_text, style));
         lines.push(Line::from(spans).style(Style::default().bg(bg.unwrap_or(theme::BG_PANEL))));
     }
     if numbered.is_empty() {

@@ -41,8 +41,8 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | `review_end` | Jump to bottom | `End` |  | Jump to the last entry/line in the focused pane |
 | `review_open` | Open file | `Enter` |  | Open the selected file and focus the content pane |
 | `review_toggle_focus` | Switch pane | `Tab` |  | Switch focus between the tree and content panes |
-| `review_scroll_left` | Scroll left | `←` |  | Scroll the content pane left (source view only, while it's focused) |
-| `review_scroll_right` | Scroll right | `→` |  | Scroll the content pane right (source view only, while it's focused) |
+| `review_scroll_left` | Scroll left | `←` |  | Scroll the content pane left, while it's focused (source or diff view; not the before/after split) |
+| `review_scroll_right` | Scroll right | `→` |  | Scroll the content pane right, while it's focused (source or diff view; not the before/after split) |
 | `review_toggle_hover` | Toggle hover | `h` |  | Show/hide symbol info for the current line (source view only) |
 | `review_open_symbol_jump` | Open symbol jump | `/` |  | Open the fuzzy symbol-jump overlay |
 | `review_toggle_view` | Toggle diff/source | `v` |  | Switch the content pane between diff and source (only if the file has changes) |

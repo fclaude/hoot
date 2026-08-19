@@ -814,13 +814,17 @@ impl App {
                 NavFocus::Content => NavFocus::Tree,
             };
         } else if k.is(&key, Action::ReviewScrollLeft) {
-            // Horizontal scroll only makes sense for plain source: diff
-            // lines wrap/scroll differently and don't support it.
-            if self.nav_focus == NavFocus::Content && self.current_diff_index().is_none() {
+            // Applies in both plain source and the diff-in-context view —
+            // long lines get truncated either way (draw_source and
+            // draw_diff_scrollable both honor nav_scroll_x). The
+            // before/after split view isn't included: its two columns are
+            // already narrower and scroll independently, which doesn't fit
+            // a single shared offset.
+            if self.nav_focus == NavFocus::Content && !self.split_diff {
                 self.nav_scroll_x = self.nav_scroll_x.saturating_sub(4);
             }
         } else if k.is(&key, Action::ReviewScrollRight) {
-            if self.nav_focus == NavFocus::Content && self.current_diff_index().is_none() {
+            if self.nav_focus == NavFocus::Content && !self.split_diff {
                 self.nav_scroll_x = self.nav_scroll_x.saturating_add(4);
             }
         } else if k.is(&key, Action::ReviewToggleHover) {
@@ -1510,6 +1514,29 @@ mod tests {
         app.on_key(key(KeyCode::Tab));
         app.on_key(key(KeyCode::Right));
         assert!(app.nav_scroll_x > 0, "source-focused: Right should scroll");
+        let scrolled = app.nav_scroll_x;
+        app.on_key(key(KeyCode::Left));
+        assert!(app.nav_scroll_x < scrolled, "Left should scroll back");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn navigate_left_right_also_scroll_while_viewing_a_diff() {
+        // Regression: horizontal scroll used to be disabled whenever the
+        // open file had a diff, which meant it was disabled for basically
+        // every file under review — the diff-in-context view is the
+        // default content pane for any changed file, not an edge case.
+        let dir = scratch_repo("navigate-scroll-diff");
+        commit_file(&dir, "long.rs", "short\n");
+        fs::write(&dir.join("long.rs"), "a very much longer line than before, changed\n").unwrap();
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Review;
+        assert!(app.current_diff_index().is_some(), "long.rs should have a diff");
+
+        app.on_key(key(KeyCode::Tab)); // focus content
+        app.on_key(key(KeyCode::Right));
+        assert!(app.nav_scroll_x > 0, "content-focused: Right should scroll even while viewing a diff");
         let scrolled = app.nav_scroll_x;
         app.on_key(key(KeyCode::Left));
         assert!(app.nav_scroll_x < scrolled, "Left should scroll back");
