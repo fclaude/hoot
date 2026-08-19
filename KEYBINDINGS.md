@@ -92,7 +92,9 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 |---|---|---|---|---|
 | `curate_up` | Move up | `↑` |  | Select the previous file |
 | `curate_down` | Move down | `↓` |  | Select the next file |
-| `curate_toggle_hunk` | Toggle hunks | `Space` |  | Select/deselect all hunks for this file |
+| `curate_hunk_prev` | Previous hunk | `←` |  | View the previous hunk in this file |
+| `curate_hunk_next` | Next hunk | `→` |  | View the next hunk in this file |
+| `curate_toggle_hunk` | Toggle hunk | `Space` |  | Select/deselect the hunk currently shown |
 | `curate_edit_message` | Quick edit | `e` |  | In-TUI quick edit of the commit message |
 | `curate_generate_message` | Generate message | `g` |  | Draft a message from the real diff with pi, then open it in $EDITOR for a last pass |
 | `curate_commit` | Commit | `c` |  | git commit the selected hunks with the drafted message |

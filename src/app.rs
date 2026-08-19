@@ -137,7 +137,14 @@ pub struct App {
     // CURATION
     pub curation_files: Vec<CurationFile>,
     pub curation_index: usize,
+    /// Which of the current file's hunks is shown in the preview pane and
+    /// targeted by `CurateToggleHunk` — independent of `hunk_selected`
+    /// (which hunks are *selected* for commit), so you can look at and
+    /// toggle any hunk, not just whichever one happens to be selected.
+    pub curation_hunk_index: usize,
     pub commit_message: String,
+    /// Char index into `commit_message` (not a byte offset — see `char_boundary`).
+    pub commit_message_cursor: usize,
     pub commit_message_status: Option<String>,
     pub editing_commit: bool,
     /// Set to ask main.rs's event loop to suspend the TUI and open $EDITOR
@@ -256,9 +263,11 @@ impl App {
 
             curation_files: review.curation_files,
             curation_index: 0,
+            curation_hunk_index: 0,
             // Real diffs get an empty message the user must actually write —
             // the drafted mock text belongs only to the non-git demo path.
             commit_message: if review.is_real { String::new() } else { data::mock_commit_message() },
+            commit_message_cursor: 0,
             commit_message_status: None,
             editing_commit: false,
             open_editor_requested: None,
@@ -277,7 +286,9 @@ impl App {
         self.review_is_real = review.is_real;
         self.curation_files = review.curation_files;
         self.curation_index = 0;
+        self.curation_hunk_index = 0;
         self.commit_message.clear();
+        self.commit_message_cursor = 0;
         self.commit_message_status = None;
         self.content_view = self.default_content_view();
     }
@@ -383,6 +394,8 @@ impl App {
         self.review_is_real = review.is_real;
         self.curation_files = review.curation_files;
         self.curation_index = self.curation_index.min(self.curation_files.len().saturating_sub(1));
+        let hunk_total = self.curation_files.get(self.curation_index).map(|f| f.total()).unwrap_or(0);
+        self.curation_hunk_index = self.curation_hunk_index.min(hunk_total.saturating_sub(1) as usize);
         // `Focused` has nothing to show once there's no diff left to focus
         // on — fall back to `Context`, which renders fine either way.
         if self.current_diff_index().is_none() {
@@ -1161,16 +1174,25 @@ impl App {
         let k = &self.keymap;
         if k.is(&key, Action::CurateUp) {
             self.curation_index = self.curation_index.saturating_sub(1);
+            self.curation_hunk_index = 0;
         } else if k.is(&key, Action::CurateDown) && n > 0 {
             self.curation_index = (self.curation_index + 1).min(n - 1);
-        } else if k.is(&key, Action::CurateToggleHunk) && n > 0 {
-            let f = &mut self.curation_files[self.curation_index];
-            let all_selected = f.selected() == f.total();
-            for s in &mut f.hunk_selected {
-                *s = !all_selected;
+            self.curation_hunk_index = 0;
+        } else if k.is(&key, Action::CurateHunkPrev) {
+            self.curation_hunk_index = self.curation_hunk_index.saturating_sub(1);
+        } else if k.is(&key, Action::CurateHunkNext) {
+            if let Some(f) = self.curation_files.get(self.curation_index) {
+                self.curation_hunk_index = (self.curation_hunk_index + 1).min(f.total().saturating_sub(1) as usize);
+            }
+        } else if k.is(&key, Action::CurateToggleHunk) {
+            if let Some(f) = self.curation_files.get_mut(self.curation_index) {
+                if let Some(s) = f.hunk_selected.get_mut(self.curation_hunk_index) {
+                    *s = !*s;
+                }
             }
         } else if k.is(&key, Action::CurateEditMessage) {
             self.editing_commit = true;
+            self.commit_message_cursor = self.commit_message.chars().count();
         } else if k.is(&key, Action::CurateGenerateMessage) {
             self.generate_commit_message();
         } else if k.is(&key, Action::CurateCommit) {
@@ -1183,12 +1205,37 @@ impl App {
             self.editing_commit = false;
             return;
         }
+        let char_count = self.commit_message.chars().count();
         match key.code {
-            KeyCode::Enter => self.commit_message.push('\n'),
-            KeyCode::Backspace => {
-                self.commit_message.pop();
+            KeyCode::Enter => {
+                let byte = char_boundary(&self.commit_message, self.commit_message_cursor);
+                self.commit_message.insert(byte, '\n');
+                self.commit_message_cursor += 1;
             }
-            KeyCode::Char(c) => self.commit_message.push(c),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let byte = char_boundary(&self.commit_message, self.commit_message_cursor);
+                self.commit_message.insert(byte, c);
+                self.commit_message_cursor += 1;
+            }
+            KeyCode::Backspace => {
+                if self.commit_message_cursor > 0 {
+                    let start = char_boundary(&self.commit_message, self.commit_message_cursor - 1);
+                    let end = char_boundary(&self.commit_message, self.commit_message_cursor);
+                    self.commit_message.replace_range(start..end, "");
+                    self.commit_message_cursor -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                if self.commit_message_cursor < char_count {
+                    let start = char_boundary(&self.commit_message, self.commit_message_cursor);
+                    let end = char_boundary(&self.commit_message, self.commit_message_cursor + 1);
+                    self.commit_message.replace_range(start..end, "");
+                }
+            }
+            KeyCode::Left => self.commit_message_cursor = self.commit_message_cursor.saturating_sub(1),
+            KeyCode::Right => self.commit_message_cursor = (self.commit_message_cursor + 1).min(char_count),
+            KeyCode::Home => self.commit_message_cursor = 0,
+            KeyCode::End => self.commit_message_cursor = char_count,
             _ => {}
         }
     }
@@ -1624,6 +1671,75 @@ mod tests {
         assert_eq!(app.commit_message, "h");
         app.on_key(key(KeyCode::Esc));
         assert!(!app.editing_commit);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_message_editing_supports_cursor_movement_not_just_append() {
+        let (mut app, dir) = two_file_app("curate-cursor");
+        app.mode = Mode::Curation;
+        app.on_key(key(KeyCode::Char('e')));
+        for c in "helo".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.commit_message_cursor, 4);
+        // cursor is after "helo"; move left once and insert 'l' -> "hello"
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Char('l')));
+        assert_eq!(app.commit_message, "hello");
+        assert_eq!(app.commit_message_cursor, 4);
+
+        app.on_key(key(KeyCode::Home));
+        assert_eq!(app.commit_message_cursor, 0);
+        app.on_key(key(KeyCode::Delete));
+        assert_eq!(app.commit_message, "ello");
+
+        app.on_key(key(KeyCode::End));
+        assert_eq!(app.commit_message_cursor, 4);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.commit_message, "ello\n");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curation_toggles_only_the_currently_shown_hunk_not_all_of_them() {
+        let dir = scratch_repo("curate-multi-hunk");
+        let content: String = (1..=20).map(|n| format!("line{n}\n")).collect();
+        commit_file(&dir, "f.txt", &content);
+        // Two far-apart single-line changes -> two separate hunks.
+        let mut lines: Vec<String> = (1..=20).map(|n| format!("line{n}")).collect();
+        lines[0] = "line1-CHANGED".to_string();
+        lines[19] = "line20-CHANGED".to_string();
+        fs::write(dir.join("f.txt"), lines.join("\n") + "\n").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Curation;
+        assert_eq!(app.curation_files[0].total(), 2, "expected two separate hunks");
+        assert_eq!(app.curation_hunk_index, 0);
+        assert!(app.curation_files[0].hunk_selected[0], "both start selected");
+        assert!(app.curation_files[0].hunk_selected[1], "both start selected");
+
+        // Deselecting hunk 0 shouldn't touch hunk 1.
+        app.on_key(key(KeyCode::Char(' ')));
+        assert!(!app.curation_files[0].hunk_selected[0]);
+        assert!(app.curation_files[0].hunk_selected[1], "the other hunk should be untouched");
+
+        // Move to hunk 1 and deselect it independently.
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.curation_hunk_index, 1);
+        app.on_key(key(KeyCode::Char(' ')));
+        assert!(!app.curation_files[0].hunk_selected[1]);
+
+        // Right again clamps at the last hunk.
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.curation_hunk_index, 1);
+
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.curation_hunk_index, 0);
+        app.on_key(key(KeyCode::Left)); // clamps at 0
+        assert_eq!(app.curation_hunk_index, 0);
 
         let _ = fs::remove_dir_all(&dir);
     }

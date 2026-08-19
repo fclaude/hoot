@@ -7,6 +7,8 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::theme;
 
+use super::agent::input_spans;
+
 pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -30,7 +32,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     draw_hunk_box(f, app, right[1]);
 
     let hints = super::key_hints(&[
-        ("Space", "Toggle hunks"),
+        ("\u{2190}\u{2192}", "Hunk"),
+        ("Space", "Toggle hunk"),
         ("g", "Generate message"),
         ("e", "Quick edit"),
         ("c", "Commit"),
@@ -102,19 +105,42 @@ fn draw_commit_box(f: &mut Frame, app: &App, area: Rect) {
             "(empty — press g to draft one with pi, or e to write your own)",
             Style::default().fg(theme::DIM),
         )));
-    }
-    for l in app.commit_message.split('\n') {
-        lines.push(Line::from(Span::styled(l.to_string(), Style::default().fg(theme::FG))));
-    }
-    if app.editing_commit {
-        lines.push(Line::from(Span::styled("\u{2588}", Style::default().fg(theme::CYAN))));
+    } else if app.editing_commit {
+        lines.extend(commit_message_lines_with_cursor(&app.commit_message, app.commit_message_cursor));
+    } else {
+        for l in app.commit_message.split('\n') {
+            lines.push(Line::from(Span::styled(l.to_string(), Style::default().fg(theme::FG))));
+        }
     }
     let hints = if app.editing_commit {
-        vec![super::key_hints(&[("Esc", "Stop editing"), ("Enter", "Newline")])]
+        vec![super::key_hints(&[("\u{2190}\u{2192}", "Move"), ("Home/End", "Line start/end"), ("Enter", "Newline"), ("Esc", "Stop editing")])]
     } else {
         vec![super::key_hints(&[("g", "Generate + open $EDITOR"), ("e", "Quick edit")])]
     };
     super::draw_panel(f, area, title, Paragraph::new(lines), &hints);
+}
+
+/// Renders `text` as one `Line` per `\n`-separated row, with a visible
+/// block cursor on whichever row `cursor` (a char index into the whole
+/// buffer, not just one row) actually falls on — everything else in
+/// plain text.
+fn commit_message_lines_with_cursor(text: &str, cursor: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    let mut placed = false;
+    let rows: Vec<&str> = text.split('\n').collect();
+    for row in &rows {
+        let row_char_count = row.chars().count();
+        let row_end = offset + row_char_count;
+        if !placed && cursor >= offset && cursor <= row_end {
+            out.push(Line::from(input_spans(row, cursor - offset)));
+            placed = true;
+        } else {
+            out.push(Line::from(Span::styled(row.to_string(), Style::default().fg(theme::FG))));
+        }
+        offset = row_end + 1; // +1 skips the '\n' consumed between rows
+    }
+    out
 }
 
 fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
@@ -124,9 +150,18 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let file = app.project.files.iter().find(|f| f.path == cf.path);
-    let shown_index = cf.hunk_selected.iter().position(|s| *s).unwrap_or(0);
+    let shown_index = app.curation_hunk_index.min(cf.total().saturating_sub(1) as usize);
+    let this_selected = cf.hunk_selected.get(shown_index).copied().unwrap_or(false);
 
-    let title = format!("{} \u{2014} hunk {}/{} ({})", cf.path, shown_index + 1, cf.total(), if cf.selected() > 0 { "selected" } else { "none selected" });
+    let title = format!(
+        "{} \u{2014} hunk {}/{} ({}) \u{2014} {}/{} selected",
+        cf.path,
+        shown_index + 1,
+        cf.total(),
+        if this_selected { "selected" } else { "not selected" },
+        cf.selected(),
+        cf.total(),
+    );
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     match file.and_then(|f| f.hunks.get(shown_index)) {
@@ -143,5 +178,6 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    super::draw_panel(f, area, &title, Paragraph::new(lines), &[]);
+    let hints = vec![super::key_hints(&[("\u{2190}\u{2192}", "Prev/next hunk"), ("Space", "Select/deselect this hunk")])];
+    super::draw_panel(f, area, &title, Paragraph::new(lines), &hints);
 }
