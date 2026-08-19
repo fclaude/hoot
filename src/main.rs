@@ -70,6 +70,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, target_dir: PathBu
 
     loop {
         app.poll_agent();
+        app.sync_from_disk();
         terminal.draw(|f| ui::draw(f, &app))?;
 
         if event::poll(Duration::from_millis(100))? {

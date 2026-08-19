@@ -11,7 +11,7 @@ pub enum DiffLineKind {
     HunkHeader,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
     pub text: String,
@@ -30,7 +30,7 @@ fn hdr(text: &str) -> DiffLine {
     DiffLine { kind: DiffLineKind::HunkHeader, text: text.to_string() }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Hunk {
     pub lines: Vec<DiffLine>,
     /// A note-to-agent attached under this hunk, if any.
@@ -38,7 +38,7 @@ pub struct Hunk {
 }
 
 /// A file as it appears in the STEER sidebar.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FileEntry {
     pub path: String,
     pub hunk_count: u32,
@@ -173,6 +173,7 @@ pub fn mock_project() -> Project {
 // NAVIGATE
 // ---------------------------------------------------------------------
 
+#[derive(PartialEq)]
 pub struct TreeEntry {
     pub label: String,
     pub depth: u8,

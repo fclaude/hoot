@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::TryRecvError;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -59,6 +60,10 @@ pub struct App {
     pub overlay: Overlay,
     pub should_quit: bool,
     pub keymap: Keymap,
+    /// Last time `sync_from_disk` actually re-read the filesystem — gates
+    /// the poll to `FS_POLL_INTERVAL` so an idle app isn't re-running `git
+    /// diff` and re-reading the tree ten times a second.
+    last_fs_poll: Instant,
 
     // STEER
     pub project: Project,
@@ -94,7 +99,14 @@ pub struct App {
 
     // AGENT
     pub target_dir: PathBuf,
-    pub session_id: String,
+    /// Explicit path to `pi`'s session file for this run — not just a bare
+    /// session id. `pi` scopes `--session-id` lookups by (cwd, id), so a
+    /// bare id would silently lose memory whenever a turn's cwd changes
+    /// (e.g. Chat mode in the real repo vs. sandboxed Edit mode in a
+    /// worktree). Passing this exact file via `--session` instead sidesteps
+    /// that: `pi` creates it on first use and resumes it on every call
+    /// after, regardless of cwd. See `pi_client::spawn`.
+    pub session_file: PathBuf,
     pub transcript: Vec<AgentLine>,
     pub agent_input: String,
     /// Char index into `agent_input` (not a byte offset — see `char_boundary`).
@@ -133,6 +145,14 @@ pub struct App {
 
 const PERM_OPTIONS: [&str; 4] = ["Review files", "Approve all", "Modify", "Reject"];
 
+/// How often `sync_from_disk` re-reads the repo to pick up changes made
+/// outside steer (an external `pi` run, an editor, `git` on the command
+/// line). A plain poll rather than an OS file-watcher: this app already
+/// re-derives all of its state from disk on demand (git diff, fs reads),
+/// so a cheap periodic re-check reuses that instead of adding a new
+/// notification-based dependency and its own failure modes.
+const FS_POLL_INTERVAL: Duration = Duration::from_millis(1000);
+
 /// Lines per Page Up/Page Down in Navigate. app.rs doesn't know the actual
 /// rendered pane height, so this is a fixed, editor-typical step rather
 /// than a true screen-relative page.
@@ -170,6 +190,7 @@ impl App {
             overlay: Overlay::None,
             should_quit: false,
             keymap,
+            last_fs_poll: Instant::now(),
 
             project: review.project,
             review_is_real: review.is_real,
@@ -199,7 +220,7 @@ impl App {
             note_cursor: 0,
 
             target_dir,
-            session_id: format!("steer-{}", std::process::id()),
+            session_file: std::env::temp_dir().join(format!("steer-session-{}.jsonl", std::process::id())),
             transcript: data::mock_transcript(),
             agent_input: String::new(),
             agent_cursor: 0,
@@ -253,6 +274,72 @@ impl App {
         self.last_commit = Some(result);
         if ok {
             self.refresh_review();
+        }
+    }
+
+    /// Called every event-loop tick; re-reads the repo from disk at most
+    /// once per `FS_POLL_INTERVAL` and folds in anything that changed
+    /// outside steer — a `pi` run in another terminal, an editor, `git` on
+    /// the command line. Keeps Steer and Navigate usable as a pure
+    /// review/browsing layer even when whatever's making the changes isn't
+    /// steer's own Agent pane.
+    pub fn sync_from_disk(&mut self) {
+        if self.last_fs_poll.elapsed() < FS_POLL_INTERVAL {
+            return;
+        }
+        self.last_fs_poll = Instant::now();
+
+        self.sync_review_from_disk();
+        self.sync_navigate_from_disk();
+    }
+
+    /// Re-reads the git diff and merges it into `self.project` /
+    /// `self.curation_files`. A no-op (nothing replaced, nothing reset) if
+    /// the diff is byte-for-byte the same as last time — so idle polling
+    /// never disturbs in-progress Curation hunk selections. When the diff
+    /// really did change, per-file `selected`/`flagged`/`notes` are carried
+    /// over by path; hunk-level curation selections reset to "all
+    /// selected", matching a fresh `gitreview::load`, since hunks can shift
+    /// shape under a real content change and there's no reliable way to
+    /// match them index-for-index.
+    fn sync_review_from_disk(&mut self) {
+        let mut review = crate::gitreview::load(&self.target_dir);
+        if review.project.files == self.project.files {
+            return;
+        }
+        for f in &mut review.project.files {
+            if let Some(old) = self.project.files.iter().find(|o| o.path == f.path) {
+                f.selected = old.selected;
+                f.flagged = old.flagged;
+                f.notes = old.notes;
+            }
+        }
+        self.project = review.project;
+        self.review_is_real = review.is_real;
+        self.curation_files = review.curation_files;
+        self.steer_selected = self.steer_selected.min(self.project.files.len().saturating_sub(1));
+        self.curation_index = self.curation_index.min(self.curation_files.len().saturating_sub(1));
+    }
+
+    /// Re-scans the file tree and re-reads the currently open source file,
+    /// each a no-op unless it actually changed. Symbols are only
+    /// re-scanned alongside a tree change (a file was added/removed/moved)
+    /// rather than on every poll, since a full symbol scan is the more
+    /// expensive of the two and a same-file content edit doesn't need it.
+    fn sync_navigate_from_disk(&mut self) {
+        let new_tree = fsnav::build_tree(&self.target_dir);
+        if new_tree != self.tree {
+            self.tree = new_tree;
+            self.tree_index = self.tree_index.min(self.tree.len().saturating_sub(1));
+            self.symbols = fsnav::scan_symbols(&self.target_dir);
+            self.symbol_index = self.symbol_index.min(self.symbols.len().saturating_sub(1));
+        }
+
+        let new_source = fsnav::read_file(&self.nav_file);
+        if new_source != self.source {
+            self.source = new_source;
+            self.nav_line = self.nav_line.min(self.source.len().saturating_sub(1));
+            self.refresh_hover();
         }
     }
 
@@ -312,11 +399,13 @@ impl App {
     }
 
     /// Spawns a `pi` turn in `cwd` with the given tool profile. Reuses
-    /// `self.session_id` across every call in this run, so pi has real
-    /// cross-turn memory via its own session storage. For `TurnPurpose::Chat`
-    /// the visible transcript is cleared only once (to drop the initial demo
-    /// content) and then appended to on every call; `CommitMessage` turns
-    /// never touch the transcript at all — see `apply_agent_event`.
+    /// `self.session_file` across every call in this run — including calls
+    /// with a different `cwd` (Chat mode vs. sandboxed Edit mode) — so pi
+    /// has real cross-turn memory regardless of which directory a given
+    /// turn runs in. For `TurnPurpose::Chat` the visible transcript is
+    /// cleared only once (to drop the initial demo content) and then
+    /// appended to on every call; `CommitMessage` turns never touch the
+    /// transcript at all — see `apply_agent_event`.
     fn spawn_turn(&mut self, prompt: String, cwd: PathBuf, tools: ToolProfile, purpose: TurnPurpose) {
         let prompt = prompt.trim().to_string();
         if prompt.is_empty() || self.agent_running {
@@ -334,7 +423,7 @@ impl App {
             self.agent_scroll = 0; // jump to the bottom to watch it stream in
         }
 
-        match pi_client::spawn(&prompt, &cwd, self.backend, &self.session_id, tools) {
+        match pi_client::spawn(&prompt, &cwd, self.backend, &self.session_file, tools) {
             Ok(session) => {
                 self.pi_session = Some(session);
                 self.agent_running = true;
@@ -1602,6 +1691,72 @@ mod tests {
         app.project.files[1].selected = false;
         let empty_prompt = app.build_iterate_prompt();
         assert!(empty_prompt.contains("No specific notes were left"), "{empty_prompt}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_review_from_disk_picks_up_an_external_change_and_keeps_flags() {
+        let (mut app, dir) = two_file_app("sync-review");
+        app.project.files[0].flagged = true;
+        app.project.files[0].selected = false;
+        let before = app.project.files[0].hunks[0].lines.len();
+
+        // Simulate a change made outside steer (another `pi` run, an
+        // editor, plain `git`) — a plain fs::write, not through the app.
+        fs::write(dir.join("a.txt"), "a1-changed\na2\na3-new-line\n").unwrap();
+
+        app.sync_review_from_disk();
+
+        assert!(app.project.files[0].hunks[0].lines.len() > before, "should pick up the new line");
+        assert!(app.project.files[0].flagged, "flagged should survive an external content change");
+        assert!(!app.project.files[0].selected, "selected should survive an external content change");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_review_from_disk_is_a_noop_when_the_diff_is_unchanged() {
+        let (mut app, dir) = two_file_app("sync-review-noop");
+        app.curation_files[0].hunk_selected[0] = false;
+
+        app.sync_review_from_disk();
+
+        assert!(!app.curation_files[0].hunk_selected[0], "an unchanged diff shouldn't reset curation toggles");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_navigate_from_disk_picks_up_an_external_edit_to_the_open_file() {
+        let dir = scratch_repo("sync-nav-source");
+        commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Navigate;
+        assert_eq!(app.source.len(), 3);
+
+        fs::write(dir.join("main.rs"), "fn main() {\n    let x = 1;\n    let y = 2;\n}\n").unwrap();
+        app.sync_navigate_from_disk();
+
+        assert_eq!(app.source.len(), 4, "should re-read the file that changed on disk");
+        assert!(app.source.iter().any(|l| l.contains("let y = 2")), "{:?}", app.source);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_navigate_from_disk_picks_up_a_new_file_added_externally() {
+        let dir = scratch_repo("sync-nav-tree");
+        commit_file(&dir, "a.rs", "fn a() {}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.mode = Mode::Navigate;
+        let before = app.tree.len();
+
+        fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
+        app.sync_navigate_from_disk();
+
+        assert_eq!(app.tree.len(), before + 1, "should pick up the new file on disk");
+        assert!(app.tree.iter().any(|e| e.label == "b.rs"), "{:?}", app.tree.iter().map(|e| &e.label).collect::<Vec<_>>());
 
         let _ = fs::remove_dir_all(&dir);
     }
