@@ -1,0 +1,95 @@
+# Builds release binaries + a .deb and .rpm, and attaches them all to a
+# GitHub Release, whenever a `vX.Y.Z` tag is pushed.
+#
+# Deliberately uses native runners per architecture (macOS Intel/Apple
+# Silicon, Linux x86_64/arm64) instead of `cross` or Docker-based
+# cross-compilation — steer has no C dependencies, so there's nothing a
+# cross toolchain buys here that a native build doesn't already give for
+# free, and native builds are easier to reason about when something breaks.
+#
+# What this does NOT do: push to Homebrew, COPR, or the AUR. Those each
+# need their own account/repo that only a human can set up (see
+# packaging/README.md) — this workflow just produces the raw artifacts
+# those live downstream of.
+
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          stage="steer-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir "$stage"
+          cp target/${{ matrix.target }}/release/steer "$stage/"
+          cp README.md KEYBINDINGS.md "$stage/"
+          tar czf "$stage.tar.gz" "$stage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steer-${{ matrix.target }}
+          path: steer-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+
+  package-linux:
+    # .deb and .rpm are x86_64-only for now — see packaging/README.md for
+    # adding an arm64 pass if it's ever worth the extra CI time.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: cargo install cargo-deb cargo-generate-rpm
+
+      - run: cargo build --release
+
+      - run: cargo deb --no-build
+      - run: cargo generate-rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steer-deb-rpm
+          path: |
+            target/debian/*.deb
+            target/generate-rpm/*.rpm
+
+  release:
+    needs: [build, package-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
