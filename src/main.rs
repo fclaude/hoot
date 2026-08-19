@@ -5,6 +5,7 @@ mod fsnav;
 mod gitcommit;
 mod gitreview;
 mod keymap;
+mod markdown;
 mod pi_client;
 mod syntax;
 mod theme;

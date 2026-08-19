@@ -274,7 +274,6 @@ impl SymbolResult {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AgentLineKind {
     Done,
-    InProgress,
     /// The agent's final answer — rendered at full brightness.
     Text,
     /// The agent's private reasoning, shown dimmed so it reads as
@@ -291,32 +290,6 @@ pub enum AgentLineKind {
 pub struct AgentLine {
     pub kind: AgentLineKind,
     pub text: String,
-}
-
-fn al(kind: AgentLineKind, text: &str) -> AgentLine {
-    AgentLine { kind, text: text.to_string() }
-}
-
-pub fn mock_transcript() -> Vec<AgentLine> {
-    use AgentLineKind::*;
-    vec![
-        al(Text, "This is demo transcript. Type a prompt below and press Enter to talk to the real `pi` agent."),
-        al(Blank, ""),
-        al(Done, "Initial context loaded (187 tokens)"),
-        al(InProgress, "Analyzing codebase..."),
-        al(Text, "  Looking at query parser error handling patterns."),
-        al(Text, "  Implementation re-throws all errors; needs better messages."),
-        al(Blank, ""),
-        al(Text, "  Observation: ParseError enum has 5 variants, only 2 documented."),
-        al(Text, "  Decision: improve error messages and optimize phrase_match."),
-        al(Blank, ""),
-        al(ToolCall, "Calling: read_file(\"src/query/parser.rs\")"),
-        al(Done, "read_file(\"src/query/parser.rs\")  [1247 bytes]"),
-        al(ToolCall, "Calling: analyze_code(pattern=\"error handling\")"),
-        al(Done, "analyze_code returned 3 issues"),
-        al(Blank, ""),
-        al(Proposal, "Proposing changes to 3 files:"),
-    ]
 }
 
 // ---------------------------------------------------------------------

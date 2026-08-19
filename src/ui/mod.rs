@@ -354,7 +354,6 @@ mod tests {
         let dir = scratch_repo("agent-long");
         let mut app = App::new(dir.clone(), Keymap::defaults());
         app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
-        app.demo_transcript = false;
         app.transcript = (1..=100)
             .map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") })
             .collect();
@@ -377,7 +376,6 @@ mod tests {
         let dir = scratch_repo("agent-scrollback");
         let mut app = App::new(dir.clone(), Keymap::defaults());
         app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
-        app.demo_transcript = false;
         app.transcript = (1..=100)
             .map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") })
             .collect();

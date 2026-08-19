@@ -94,7 +94,6 @@ fn build_transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         let dim = Style::default().fg(theme::DIM);
         let mut wrapped_lines = match tl.kind {
             AgentLineKind::Done => wrapped("\u{2714} ", theme::GREEN, &tl.text, dim, width),
-            AgentLineKind::InProgress => wrapped("\u{21bb} ", theme::ORANGE, &tl.text, fg, width),
             AgentLineKind::ToolCall => wrapped("\u{29d6} ", theme::ORANGE, &tl.text, dim, width),
             AgentLineKind::Proposal => {
                 wrapped("\u{1f4dd} ", theme::FG, &tl.text, fg.add_modifier(Modifier::BOLD), width)
@@ -104,34 +103,18 @@ fn build_transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 if tl.text.is_empty() {
                     vec![Line::raw("")]
                 } else {
-                    wrap_text(&tl.text, width.max(4)).into_iter().map(|c| Line::from(Span::styled(c, dim))).collect()
+                    crate::markdown::render(&tl.text, width, dim)
                 }
             }
             AgentLineKind::Text | AgentLineKind::Blank => {
                 if tl.text.is_empty() {
                     vec![Line::raw("")]
                 } else {
-                    wrap_text(&tl.text, width.max(4)).into_iter().map(|c| Line::from(Span::styled(c, fg))).collect()
+                    crate::markdown::render(&tl.text, width, fg)
                 }
             }
         };
         lines.append(&mut wrapped_lines);
-    }
-    if app.demo_transcript {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled("  \u{25b6} ", Style::default().fg(theme::DIM)),
-            Span::styled("src/query/parser.rs (1 hunk)", Style::default().fg(theme::FG)),
-            Span::styled("  [demo only]", Style::default().fg(theme::DIM)),
-        ]));
-        lines.push(Line::from(Span::styled(
-            "      -   for &doc_id in phrase.docs() {",
-            Style::default().fg(theme::RED),
-        )));
-        lines.push(Line::from(Span::styled(
-            "      +   for &doc_id in phrase.docs().iter() {",
-            Style::default().fg(theme::GREEN),
-        )));
     }
     lines
 }
@@ -178,7 +161,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
 
     f.render_widget(Paragraph::new(header), rows[0]);
 
-    let transcript = build_transcript_lines(app, rows[2].width as usize);
+    let transcript = if app.transcript.is_empty() {
+        vec![Line::from(Span::styled(
+            "No conversation yet \u{2014} type a message below and press Enter to talk to pi.",
+            Style::default().fg(theme::DIM),
+        ))]
+    } else {
+        build_transcript_lines(app, rows[2].width as usize)
+    };
     let visible = rows[2].height as usize;
     let total = transcript.len();
     let start = transcript_scroll_start(total, visible, app.agent_scroll);

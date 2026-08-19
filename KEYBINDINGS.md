@@ -12,7 +12,7 @@ review_comment = "ctrl+enter"
 review_toggle_hover = "shift+h"
 ```
 
-Chords are `mod+mod+key`, e.g. `ctrl+enter`, `shift+tab`, `f1`, `space`, `/`, `g`. Modifiers: `ctrl`, `shift`, `alt`. Unknown binding names or unparsable chords are reported as warnings on startup and otherwise ignored — they never prevent steer from starting.
+Chords are `mod+mod+key`, e.g. `ctrl+enter`, `shift+tab`, `f1`, `space`, `/`, `g`. Modifiers: `ctrl`, `shift`, `alt`. Bind more than one chord to the same action with a comma, e.g. `f1,ctrl+r`. Unknown binding names or unparsable chords are reported as warnings on startup and otherwise ignored — they never prevent steer from starting.
 
 Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) in the agent prompt, symbol filter, and commit message editor.
 
@@ -23,9 +23,9 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | Binding name | Action | Default | Current | Description |
 |---|---|---|---|---|
 | `quit` | Quit | `q` |  | Exit steer |
-| `switch_review` | Switch: Review | `F1` |  | Jump to the Review screen (file tree + diff/source) |
-| `switch_agent` | Switch: Agent | `F2` |  | Jump to the Agent screen |
-| `switch_curate` | Switch: Curate | `F3` |  | Jump to the Curation screen |
+| `switch_review` | Switch: Review | `F1 / Ctrl+r` |  | Jump to the Review screen (file tree + diff/source) |
+| `switch_agent` | Switch: Agent | `F2 / Ctrl+a` |  | Jump to the Agent screen |
+| `switch_curate` | Switch: Curate | `F3 / Ctrl+u` |  | Jump to the Curation screen |
 | `open_symbol_jump` | Open Symbol Jump | `Ctrl+k` |  | Open the fuzzy symbol-jump overlay from anywhere |
 | `open_file_finder` | Open File Finder | `Ctrl+f` |  | Open the fuzzy file finder (with live preview) from anywhere |
 

@@ -91,9 +91,20 @@ macro_rules! b {
 
 pub const BINDINGS: &[Binding] = &[
     b!(Action::Quit, "quit", "Quit", "Global", "q", "Exit steer"),
-    b!(Action::SwitchReview, "switch_review", "Switch: Review", "Global", "f1", "Jump to the Review screen (file tree + diff/source)"),
-    b!(Action::SwitchAgent, "switch_agent", "Switch: Agent", "Global", "f2", "Jump to the Agent screen"),
-    b!(Action::SwitchCurate, "switch_curate", "Switch: Curate", "Global", "f3", "Jump to the Curation screen"),
+    // Two chords each: F-keys are the traditional binding, but laptop
+    // keyboards (MacBooks especially) map F1-F3 to brightness/Mission
+    // Control/etc by default and need Fn held to send the real F-key, so a
+    // Ctrl+letter fallback that always reaches the app is bound alongside.
+    // (Ctrl+digit was tried first but doesn't work: outside the Kitty
+    // keyboard protocol, terminals encode Ctrl+2/Ctrl+3/etc as legacy C0
+    // control bytes that either collide with other keys — Ctrl+3 is
+    // indistinguishable from plain Escape — or don't reach the app with
+    // the modifier intact at all. Ctrl+letter avoids both problems: it's
+    // real C0 range (0x01-0x1A), universally supported, and distinct from
+    // every other key.)
+    b!(Action::SwitchReview, "switch_review", "Switch: Review", "Global", "f1,ctrl+r", "Jump to the Review screen (file tree + diff/source)"),
+    b!(Action::SwitchAgent, "switch_agent", "Switch: Agent", "Global", "f2,ctrl+a", "Jump to the Agent screen"),
+    b!(Action::SwitchCurate, "switch_curate", "Switch: Curate", "Global", "f3,ctrl+u", "Jump to the Curation screen"),
     b!(Action::OpenSymbolJump, "open_symbol_jump", "Open Symbol Jump", "Global", "ctrl+k", "Open the fuzzy symbol-jump overlay from anywhere"),
     b!(Action::OpenFileFinder, "open_file_finder", "Open File Finder", "Global", "ctrl+f", "Open the fuzzy file finder (with live preview) from anywhere"),
 
@@ -199,6 +210,13 @@ impl KeyChord {
         };
         Some(KeyChord { code, mods })
     }
+
+    /// Parses a comma-separated list of chords (e.g. `"f1,ctrl+r"`), so one
+    /// action can be reachable by more than one key. Fails if any entry
+    /// fails to parse.
+    pub fn parse_list(s: &str) -> Option<Vec<KeyChord>> {
+        s.split(',').map(|part| KeyChord::parse(part.trim())).collect()
+    }
 }
 
 impl fmt::Display for KeyChord {
@@ -234,16 +252,16 @@ impl fmt::Display for KeyChord {
 }
 
 pub struct Keymap {
-    chords: HashMap<Action, KeyChord>,
+    chords: HashMap<Action, Vec<KeyChord>>,
 }
 
 impl Keymap {
     pub fn defaults() -> Keymap {
         let mut chords = HashMap::new();
         for b in BINDINGS {
-            let chord = KeyChord::parse(b.default)
+            let list = KeyChord::parse_list(b.default)
                 .unwrap_or_else(|| panic!("bad default chord {:?} for {}", b.default, b.name));
-            chords.insert(b.action, chord);
+            chords.insert(b.action, list);
         }
         Keymap { chords }
     }
@@ -276,9 +294,9 @@ impl Keymap {
                 warnings.push(format!("{}: {name} must be a string", path.display()));
                 continue;
             };
-            match KeyChord::parse(chord_str) {
-                Some(chord) => {
-                    keymap.chords.insert(binding.action, chord);
+            match KeyChord::parse_list(chord_str) {
+                Some(list) => {
+                    keymap.chords.insert(binding.action, list);
                 }
                 None => warnings.push(format!("{}: {name} = {chord_str:?} isn't a recognized chord", path.display())),
             }
@@ -288,20 +306,20 @@ impl Keymap {
     }
 
     pub fn is(&self, key: &KeyEvent, action: Action) -> bool {
-        self.chords.get(&action).map(|c| c.matches(key)).unwrap_or(false)
+        self.chords.get(&action).map(|list| list.iter().any(|c| c.matches(key))).unwrap_or(false)
     }
 
-    pub fn chord(&self, action: Action) -> KeyChord {
-        self.chords[&action]
+    pub fn chords(&self, action: Action) -> &[KeyChord] {
+        &self.chords[&action]
     }
 
-    /// Overrides a single binding programmatically. The `~/.steer.toml`
-    /// loader doesn't need this (it builds the map directly) — it exists so
-    /// tests can exercise a specific remap without touching the real
-    /// filesystem.
+    /// Overrides a binding programmatically to a single chord. The
+    /// `~/.steer.toml` loader doesn't need this (it builds the map
+    /// directly) — it exists so tests can exercise a specific remap without
+    /// touching the real filesystem.
     #[cfg(test)]
     pub fn set(&mut self, action: Action, chord: KeyChord) {
-        self.chords.insert(action, chord);
+        self.chords.insert(action, vec![chord]);
     }
 }
 
@@ -323,7 +341,8 @@ pub fn generate_markdown(keymap: &Keymap) -> String {
          review_toggle_hover = \"shift+h\"\n\
          ```\n\n\
          Chords are `mod+mod+key`, e.g. `ctrl+enter`, `shift+tab`, `f1`, `space`, `/`, `g`. \
-         Modifiers: `ctrl`, `shift`, `alt`. Unknown binding names or unparsable chords are \
+         Modifiers: `ctrl`, `shift`, `alt`. Bind more than one chord to the same action with a \
+         comma, e.g. `f1,ctrl+r`. Unknown binding names or unparsable chords are \
          reported as warnings on startup and otherwise ignored — they never prevent steer from \
          starting.\n\n\
          Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) in the \
@@ -346,12 +365,17 @@ pub fn generate_markdown(keymap: &Keymap) -> String {
         out.push_str("| Binding name | Action | Default | Current | Description |\n");
         out.push_str("|---|---|---|---|---|\n");
         for b in BINDINGS.iter().filter(|b| b.group == group) {
-            let default_chord = KeyChord::parse(b.default).unwrap();
-            let current = keymap.chord(b.action);
-            let current_col = if current == default_chord { String::new() } else { current.to_string() };
+            let default_chords = KeyChord::parse_list(b.default).unwrap();
+            let current = keymap.chords(b.action);
+            let default_str = default_chords.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" / ");
+            let current_col = if current == default_chords.as_slice() {
+                String::new()
+            } else {
+                current.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" / ")
+            };
             out.push_str(&format!(
                 "| `{}` | {} | `{}` | {} | {} |\n",
-                b.name, b.label, default_chord, current_col, b.help
+                b.name, b.label, default_str, current_col, b.help
             ));
         }
         out.push('\n');
@@ -378,7 +402,7 @@ mod tests {
         // Keymap::defaults() already panics on a bad default; this just
         // makes the failure message point at the specific binding.
         for b in BINDINGS {
-            assert!(KeyChord::parse(b.default).is_some(), "binding {:?} has an unparsable default {:?}", b.name, b.default);
+            assert!(KeyChord::parse_list(b.default).is_some(), "binding {:?} has an unparsable default {:?}", b.name, b.default);
         }
     }
 
@@ -443,8 +467,28 @@ mod tests {
     fn defaults_is_populated_and_matches_binding_table() {
         let keymap = Keymap::defaults();
         assert_eq!(keymap.chords.len(), BINDINGS.len());
-        let review_up = keymap.chord(Action::ReviewUp);
-        assert_eq!(review_up, KeyChord::parse("up").unwrap());
+        let review_up = keymap.chords(Action::ReviewUp);
+        assert_eq!(review_up, [KeyChord::parse("up").unwrap()]);
+    }
+
+    #[test]
+    fn parse_list_splits_on_comma() {
+        let list = KeyChord::parse_list("f1,ctrl+r").unwrap();
+        assert_eq!(list, vec![KeyChord::parse("f1").unwrap(), KeyChord::parse("ctrl+r").unwrap()]);
+    }
+
+    #[test]
+    fn parse_list_rejects_a_bad_entry_anywhere_in_the_list() {
+        assert!(KeyChord::parse_list("f1,banana").is_none());
+    }
+
+    #[test]
+    fn is_matches_any_chord_bound_to_an_action() {
+        let keymap = Keymap::defaults();
+        let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(keymap.is(&f1, Action::SwitchReview));
+        assert!(keymap.is(&ctrl_r, Action::SwitchReview));
     }
 
     #[test]

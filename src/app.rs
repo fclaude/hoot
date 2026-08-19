@@ -130,7 +130,6 @@ pub struct App {
     pub agent_scroll: usize,
     pub agent_model_live: Option<String>,
     pub agent_running: bool,
-    pub demo_transcript: bool,
     pi_session: Option<PiSession>,
     agent_purpose: TurnPurpose,
 
@@ -248,13 +247,12 @@ impl App {
 
             target_dir,
             session_file: std::env::temp_dir().join(format!("steer-session-{}.jsonl", std::process::id())),
-            transcript: data::mock_transcript(),
+            transcript: Vec::new(),
             agent_input: String::new(),
             agent_cursor: 0,
             agent_scroll: 0,
             agent_model_live: None,
             agent_running: false,
-            demo_transcript: true,
             pi_session: None,
             agent_purpose: TurnPurpose::Chat,
 
@@ -469,9 +467,7 @@ impl App {
 
     /// Spawns a `pi` turn in `cwd` with the given tool profile. Reuses
     /// `self.session_file` across every call in this run, so pi has real
-    /// cross-turn memory. For `TurnPurpose::Chat` the visible transcript is
-    /// cleared only once (to drop the initial demo content) and then
-    /// appended to on every call; `CommitMessage` turns never touch the
+    /// cross-turn memory. `CommitMessage` turns never touch the visible
     /// transcript at all — see `apply_agent_event`.
     fn spawn_turn(&mut self, prompt: String, cwd: PathBuf, tools: ToolProfile, purpose: TurnPurpose) {
         let prompt = prompt.trim().to_string();
@@ -481,10 +477,6 @@ impl App {
         self.agent_purpose = purpose;
         self.agent_model_live = None;
         if purpose == TurnPurpose::Chat {
-            if self.demo_transcript {
-                self.demo_transcript = false;
-                self.transcript.clear();
-            }
             self.transcript.push(AgentLine { kind: AgentLineKind::UserPrompt, text: prompt.clone() });
             self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() });
             self.agent_scroll = 0; // jump to the bottom to watch it stream in
