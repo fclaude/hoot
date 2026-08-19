@@ -109,6 +109,9 @@ pub struct App {
     /// The assembled iterate prompt, shown in `$EDITOR` for a last-pass
     /// edit (via `EditorTarget::IteratePrompt`) before it's ever sent.
     pub iterate_draft: String,
+    /// Result of the last `y` (copy prompt) press, shown next to the tree
+    /// footer until the next one overwrites it.
+    pub review_clipboard_status: Option<Result<String, String>>,
 
     // AGENT
     pub target_dir: PathBuf,
@@ -244,6 +247,7 @@ impl App {
             note_input: String::new(),
             note_cursor: 0,
             iterate_draft: String::new(),
+            review_clipboard_status: None,
 
             target_dir,
             session_file: std::env::temp_dir().join(format!("steer-session-{}.jsonl", std::process::id())),
@@ -865,6 +869,19 @@ impl App {
             // unseen.
             self.iterate_draft = self.build_iterate_prompt();
             self.open_editor_requested = Some(EditorTarget::IteratePrompt);
+        } else if k.is(&key, Action::ReviewCopyPrompt) {
+            // For running the actual agent in a separate terminal/session
+            // instead of steer's embedded one: builds the exact same
+            // prompt as Iterate, but puts it on the system clipboard
+            // instead of sending it anywhere.
+            let prompt = self.build_iterate_prompt();
+            self.review_clipboard_status = Some(match crate::clipboard::copy(&prompt) {
+                Ok(()) => {
+                    let n = self.notes_queued();
+                    Ok(format!("Copied prompt ({n} note{})", if n == 1 { "" } else { "s" }))
+                }
+                Err(e) => Err(e),
+            });
         } else if k.is(&key, Action::ReviewComment) {
             // With the content pane focused, a comment is scoped to
             // whatever line the cursor is actually on — works the same
@@ -1779,6 +1796,25 @@ mod tests {
         app.project.files[0].flagged = false;
         let empty_prompt = app.build_iterate_prompt();
         assert!(empty_prompt.contains("No specific notes were left"), "{empty_prompt}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_prompt_key_sets_a_clipboard_status() {
+        // For running the real agent in a separate terminal instead of
+        // steer's embedded one: 'y' builds the same prompt as Iterate but
+        // copies it instead of sending it. Whether the environment
+        // actually has a clipboard tool on PATH varies (CI, headless
+        // Linux), so this only checks that the attempt is made and
+        // recorded — clipboard::copy's own fallback/error behavior is
+        // covered directly in clipboard.rs.
+        let (mut app, dir) = two_file_app("copy-prompt");
+        assert!(app.review_clipboard_status.is_none());
+
+        app.mode = Mode::Review;
+        app.on_key(key(KeyCode::Char('y')));
+        assert!(app.review_clipboard_status.is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }

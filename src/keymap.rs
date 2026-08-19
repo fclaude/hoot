@@ -45,6 +45,7 @@ pub enum Action {
     ReviewSplitView,
     ReviewUnifiedView,
     ReviewIterate,
+    ReviewCopyPrompt,
 
     SymbolUp,
     SymbolDown,
@@ -132,6 +133,7 @@ pub const BINDINGS: &[Binding] = &[
     // with the Kitty keyboard protocol enabled. Enter already means "open
     // file" here, so iterate gets its own mnemonic letter instead.
     b!(Action::ReviewIterate, "review_iterate", "Iterate", "Review", "i", "Send queued notes to the real pi agent"),
+    b!(Action::ReviewCopyPrompt, "review_copy_prompt", "Copy prompt", "Review", "y", "Copy the same assembled review prompt to the system clipboard, for pasting into an agent running elsewhere"),
 
     b!(Action::SymbolUp, "symbol_up", "Move up", "Symbol Jump", "up", "Move the result selection up"),
     b!(Action::SymbolDown, "symbol_down", "Move down", "Symbol Jump", "down", "Move the result selection down"),

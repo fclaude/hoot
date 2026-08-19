@@ -1,4 +1,5 @@
 mod app;
+mod clipboard;
 mod data;
 mod editor;
 mod fsnav;

@@ -52,6 +52,7 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | `review_split_view` | Split view | `s` |  | Switch the diff view to before/after columns |
 | `review_unified_view` | Unified view | `u` |  | Switch the diff view back to unified |
 | `review_iterate` | Iterate | `i` |  | Send queued notes to the real pi agent |
+| `review_copy_prompt` | Copy prompt | `y` |  | Copy the same assembled review prompt to the system clipboard, for pasting into an agent running elsewhere |
 
 ## Symbol Jump
 

@@ -57,7 +57,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
 
 fn draw_tree(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let tick_color = if app.nav_focus == NavFocus::Tree { theme::CYAN } else { theme::DIM };
-    let footer_lines: u16 = if narrow { 1 } else { 2 };
+    // 2 rows reserved either way: the summary line, plus room for a
+    // transient clipboard-copy status line under it when there is one.
+    let footer_lines: u16 = 2;
     // 1 row for the root path, 1 blank separator, then the footer.
     let visible = area.height.saturating_sub(2 + footer_lines) as usize;
     let scroll = scroll_offset(app.tree_index, app.tree.len(), visible);
@@ -144,6 +146,18 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
         ]));
     }
 
+    match &app.review_clipboard_status {
+        Some(Ok(msg)) => lines.push(Line::from(vec![
+            Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
+            Span::styled(format!("\u{2714} {msg}"), Style::default().fg(theme::GREEN)),
+        ])),
+        Some(Err(e)) => lines.push(Line::from(vec![
+            Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
+            Span::styled(format!("\u{2717} {e}"), Style::default().fg(theme::RED)),
+        ])),
+        None => {}
+    }
+
     let para = Paragraph::new(lines).style(Style::default().bg(theme::BG_OUTER));
     f.render_widget(para, area);
 }
@@ -185,7 +199,10 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
         ContentView::Focused => "Context",
     };
     let hints = if narrow {
-        vec![super::key_hints(&[("c", "Comment"), ("v", view_toggle_label)]), super::key_hints(&[("i", "Iterate")])]
+        vec![
+            super::key_hints(&[("c", "Comment"), ("v", view_toggle_label)]),
+            super::key_hints(&[("i", "Iterate"), ("y", "Copy prompt")]),
+        ]
     } else {
         vec![
             super::key_hints(&[
@@ -201,6 +218,7 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
                 ("v", view_toggle_label),
                 ("s", "Split"),
                 ("i", &format!("Review {} notes \u{2192} send to agent", app.notes_queued())),
+                ("y", "...or copy the prompt to the clipboard"),
             ]),
         ]
     };
@@ -301,7 +319,7 @@ fn draw_diff_split(f: &mut Frame, area: Rect, file: &FileEntry) {
 
     let hints = vec![
         super::key_hints(&[("c", "Comment"), ("g", "Mark good"), ("x", "Flag rework"), ("u", "Unified")]),
-        super::key_hints(&[("i", "Review notes \u{2192} send to agent")]),
+        super::key_hints(&[("i", "Review notes \u{2192} send to agent"), ("y", "Copy prompt")]),
     ];
     f.render_widget(Paragraph::new(hints), rows[2]);
 }
