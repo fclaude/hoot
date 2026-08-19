@@ -4,10 +4,11 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::agent_client::{AgentBackend, AgentEvent, AgentSession, ToolProfile};
 use crate::data::{self, AgentLine, AgentLineKind, CurationFile, HoverInfo, Hunk, Note, Project, SymbolResult, TreeEntry};
 use crate::fsnav;
 use crate::keymap::{Action, Keymap};
-use crate::pi_client::{self, AgentEvent, PiSession, ToolProfile};
+use crate::{opencode_client, pi_client};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -25,6 +26,7 @@ pub enum Overlay {
     SymbolJump,
     FileFinder,
     NoteInput,
+    QuitConfirm,
 }
 
 /// Which pane arrow keys currently move.
@@ -115,6 +117,7 @@ pub struct App {
 
     // AGENT
     pub target_dir: PathBuf,
+    pub agent_backend: AgentBackend,
     /// Explicit path to `pi`'s session file for this run — not just a bare
     /// session id. `pi` scopes `--session-id` lookups by (cwd, id), so a
     /// bare id would silently lose memory the moment a turn ran from a
@@ -122,8 +125,15 @@ pub struct App {
     /// `target_dir`, so that's moot today, but passing this exact file via
     /// `--session` instead sidesteps the cwd-scoping question entirely — it
     /// creates the file on first use and resumes it on every call after,
-    /// regardless of cwd. See `pi_client::spawn`.
+    /// regardless of cwd. See `pi_client::spawn`. Only used when
+    /// `agent_backend` is `Pi`.
     pub session_file: PathBuf,
+    /// opencode's equivalent of `session_file`, except it can't be decided
+    /// upfront — opencode assigns this itself and only hands it back after
+    /// the first turn runs (`AgentEvent::Session`), so it starts `None` and
+    /// gets threaded into every call after. Only used when `agent_backend`
+    /// is `OpenCode`.
+    pub opencode_session_id: Option<String>,
     pub transcript: Vec<AgentLine>,
     pub agent_input: String,
     /// Char index into `agent_input` (not a byte offset — see `char_boundary`).
@@ -133,7 +143,7 @@ pub struct App {
     pub agent_scroll: usize,
     pub agent_model_live: Option<String>,
     pub agent_running: bool,
-    pi_session: Option<PiSession>,
+    agent_session: Option<AgentSession>,
     agent_purpose: TurnPurpose,
 
     // CURATION
@@ -204,7 +214,7 @@ fn diff_context_for(target_dir: &std::path::Path, file: &std::path::Path) -> Vec
 }
 
 impl App {
-    pub fn new(target_dir: PathBuf, keymap: Keymap) -> Self {
+    pub fn new(target_dir: PathBuf, keymap: Keymap, agent_backend: AgentBackend) -> Self {
         let review = crate::gitreview::load(&target_dir);
         let tree = fsnav::build_tree(&target_dir);
         let symbols = fsnav::scan_symbols(&target_dir);
@@ -250,14 +260,16 @@ impl App {
             review_clipboard_status: None,
 
             target_dir,
+            agent_backend,
             session_file: std::env::temp_dir().join(format!("steer-session-{}.jsonl", std::process::id())),
+            opencode_session_id: None,
             transcript: Vec::new(),
             agent_input: String::new(),
             agent_cursor: 0,
             agent_scroll: 0,
             agent_model_live: None,
             agent_running: false,
-            pi_session: None,
+            agent_session: None,
             agent_purpose: TurnPurpose::Chat,
 
             curation_files: review.curation_files,
@@ -460,19 +472,21 @@ impl App {
         self.project.files.iter().filter(|f| f.flagged).count()
     }
 
-    /// Sends `prompt` to `pi` against `self.target_dir` with read+write —
-    /// it's already a real git repo, so Review's diff view and plain `git`
-    /// are the review/undo mechanism for whatever it writes, same as any
-    /// other change made to the repo.
+    /// Sends `prompt` to the active agent backend against `self.target_dir`
+    /// with read+write — it's already a real git repo, so Review's diff
+    /// view and plain `git` are the review/undo mechanism for whatever it
+    /// writes, same as any other change made to the repo.
     pub fn start_agent_turn(&mut self, prompt: String) {
         let target_dir = self.target_dir.clone();
         self.spawn_turn(prompt, target_dir, ToolProfile::ReadWrite, TurnPurpose::Chat);
     }
 
-    /// Spawns a `pi` turn in `cwd` with the given tool profile. Reuses
-    /// `self.session_file` across every call in this run, so pi has real
-    /// cross-turn memory. `CommitMessage` turns never touch the visible
-    /// transcript at all — see `apply_agent_event`.
+    /// Spawns a turn in `cwd` with the given tool profile, on whichever
+    /// backend `self.agent_backend` selects. Reuses the backend's session
+    /// (`session_file` for pi, `opencode_session_id` for opencode) across
+    /// every call in this run, so it has real cross-turn memory.
+    /// `CommitMessage` turns never touch the visible transcript at all —
+    /// see `apply_agent_event`.
     fn spawn_turn(&mut self, prompt: String, cwd: PathBuf, tools: ToolProfile, purpose: TurnPurpose) {
         let prompt = prompt.trim().to_string();
         if prompt.is_empty() || self.agent_running {
@@ -486,13 +500,18 @@ impl App {
             self.agent_scroll = 0; // jump to the bottom to watch it stream in
         }
 
-        match pi_client::spawn(&prompt, &cwd, &self.session_file, tools) {
+        let result = match self.agent_backend {
+            AgentBackend::Pi => pi_client::spawn(&prompt, &cwd, &self.session_file, tools),
+            AgentBackend::OpenCode => opencode_client::spawn(&prompt, &cwd, self.opencode_session_id.as_deref(), tools),
+        };
+        match result {
             Ok(session) => {
-                self.pi_session = Some(session);
+                self.agent_session = Some(session);
                 self.agent_running = true;
             }
             Err(e) => {
-                let msg = format!("Error: couldn't start `pi` ({e}). Is it installed and on PATH?");
+                let label = self.agent_backend.label();
+                let msg = format!("Error: couldn't start `{label}` ({e}). Is it installed and on PATH?");
                 if purpose == TurnPurpose::Chat {
                     self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: msg });
                 } else {
@@ -552,13 +571,12 @@ impl App {
     /// Drains any events the background reader thread has queued up. Called
     /// once per event-loop tick; never blocks.
     pub fn poll_agent(&mut self) {
-        while let Some(session) = &self.pi_session {
+        while let Some(session) = &self.agent_session {
             match session.rx.try_recv() {
                 Ok(ev) => self.apply_agent_event(ev),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    self.agent_running = false;
-                    self.pi_session = None;
+                    self.finish_turn();
                     break;
                 }
             }
@@ -571,21 +589,20 @@ impl App {
         if self.agent_purpose == TurnPurpose::CommitMessage {
             match event {
                 Model(m) => self.agent_model_live = Some(m),
+                Session(id) => self.opencode_session_id = Some(id),
                 Text(t) => self.commit_message = t.trim().to_string(),
-                AgentEnd => {
-                    self.agent_running = false;
-                    self.pi_session = None;
-                    self.commit_message_status = None;
-                    self.open_editor_requested = Some(EditorTarget::CommitMessage);
-                }
                 Error(e) => self.commit_message_status = Some(format!("Error generating message: {e}")),
-                Thinking(_) | ToolCall { .. } | ToolResult { .. } | TurnEnd => {}
+                // The turn's actual end is handled uniformly in
+                // `finish_turn`, triggered when the backend process exits
+                // (the channel disconnects) — see its doc comment for why.
+                Thinking(_) | ToolCall { .. } | ToolResult { .. } | TurnEnd | AgentEnd => {}
             }
             return;
         }
 
         match event {
             Model(m) => self.agent_model_live = Some(m),
+            Session(id) => self.opencode_session_id = Some(id),
             Thinking(t) => {
                 // Rendered dimmed (AgentLineKind::Thinking) and followed by
                 // a blank line, so reasoning prose reads as clearly
@@ -604,34 +621,60 @@ impl App {
                 text: format!("{name}  {summary}"),
             }),
             TurnEnd => self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() }),
-            AgentEnd => {
-                self.agent_running = false;
-                self.pi_session = None;
-                // Every turn writes directly to target_dir now, so
-                // whatever's uncommitted there is exactly what this turn
-                // (and anything else outstanding) changed — pull Review's
-                // view of it forward immediately rather than waiting for
-                // the next background poll.
-                let n = crate::gitreview::diff_files(&self.target_dir).len();
-                let text = if n == 0 {
-                    "  (no file changes)".to_string()
-                } else {
-                    format!("{n} file{} changed \u{2014} see Review (F1) for the diff", if n == 1 { "" } else { "s" })
-                };
-                self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
-                self.sync_review_from_disk();
-                self.sync_navigate_from_disk();
-            }
+            // pi sends an explicit AgentEnd right before exiting; opencode
+            // has no equivalent event at all. `finish_turn` (fired on the
+            // channel disconnecting, i.e. the process actually exiting)
+            // covers both uniformly, so this is a no-op either way.
+            AgentEnd => {}
             Error(e) => {
                 self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("stderr: {e}") })
             }
         }
     }
 
+    /// Runs once a spawned turn's backend process has actually exited
+    /// (the event channel disconnecting is the signal, not any particular
+    /// JSON event — see `AgentEnd`'s doc comment above). Whichever backend
+    /// was used, this is the one place "the turn is fully over" logic
+    /// lives, so behavior doesn't fork per backend here.
+    fn finish_turn(&mut self) {
+        self.agent_running = false;
+        self.agent_session = None;
+        if self.agent_purpose == TurnPurpose::CommitMessage {
+            self.commit_message_status = None;
+            self.open_editor_requested = Some(EditorTarget::CommitMessage);
+            return;
+        }
+        // Every turn writes directly to target_dir now, so whatever's
+        // uncommitted there is exactly what this turn (and anything else
+        // outstanding) changed — pull Review's view of it forward
+        // immediately rather than waiting for the next background poll.
+        let n = crate::gitreview::diff_files(&self.target_dir).len();
+        let text = if n == 0 {
+            "  (no file changes)".to_string()
+        } else {
+            format!("{n} file{} changed \u{2014} see Review (F1) for the diff", if n == 1 { "" } else { "s" })
+        };
+        self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
+        self.sync_review_from_disk();
+        self.sync_navigate_from_disk();
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
-        // Fixed, not remappable: always quits, regardless of context.
+        // Fixed, not remappable, and checked first so it's never swallowed
+        // by whatever overlay or text field happens to be focused — but no
+        // longer an unconditional instant quit: it goes through the same
+        // risk check as 'q' (see quit_risk), so it can't silently drop
+        // unsent notes/flags/a drafted commit message/a running turn any
+        // more than 'q' can. It stays a real escape hatch either way: a
+        // second Ctrl+C while the confirmation is already showing confirms
+        // immediately, same as pressing 'q' or Enter would.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.should_quit = true;
+            if self.overlay == Overlay::QuitConfirm || self.quit_risk().is_none() {
+                self.should_quit = true;
+            } else {
+                self.overlay = Overlay::QuitConfirm;
+            }
             return;
         }
 
@@ -639,6 +682,7 @@ impl App {
             Overlay::SymbolJump => return self.on_key_symbol_jump(key),
             Overlay::FileFinder => return self.on_key_file_finder(key),
             Overlay::NoteInput => return self.on_key_note_input(key),
+            Overlay::QuitConfirm => return self.on_key_quit_confirm(key),
             Overlay::None => {}
         }
 
@@ -673,7 +717,11 @@ impl App {
             return;
         }
         if self.keymap.is(&key, Action::Quit) {
-            self.should_quit = true;
+            if self.quit_risk().is_some() {
+                self.overlay = Overlay::QuitConfirm;
+            } else {
+                self.should_quit = true;
+            }
             return;
         }
 
@@ -858,6 +906,20 @@ impl App {
             if let Some(i) = self.current_diff_index() {
                 self.project.files[i].flagged = true;
             }
+        } else if k.is(&key, Action::ReviewClearFileNotes) {
+            // Just the notes, unlike Mark Good ('g') which also clears the
+            // flag — for wiping stale comments on a file you're not ready
+            // to call done yet.
+            if let Some(i) = self.current_diff_index() {
+                let path = self.project.files[i].path.clone();
+                self.project.files[i].notes = 0;
+                self.notes.retain(|n| n.path != path);
+            }
+        } else if k.is(&key, Action::ReviewClearAllNotes) {
+            for f in &mut self.project.files {
+                f.notes = 0;
+            }
+            self.notes.clear();
         } else if k.is(&key, Action::ReviewSplitView) {
             self.split_diff = true;
         } else if k.is(&key, Action::ReviewUnifiedView) {
@@ -1105,6 +1167,46 @@ impl App {
     }
 
     // -------------------------------------------------------------
+    // QUIT CONFIRMATION
+    // -------------------------------------------------------------
+
+    /// `None` if quitting right now loses nothing; otherwise a short
+    /// description of what would be lost. Notes, flags, and a drafted
+    /// commit message all live only in memory — nothing here is ever
+    /// written to disk until it's actually sent to the agent or committed
+    /// — so an instant, unconfirmed quit can silently throw away real work.
+    pub(crate) fn quit_risk(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        let notes = self.notes_queued();
+        if notes > 0 {
+            parts.push(format!("{notes} note{}", if notes == 1 { "" } else { "s" }));
+        }
+        let flagged = self.files_flagged();
+        if flagged > 0 {
+            parts.push(format!("{flagged} flagged file{}", if flagged == 1 { "" } else { "s" }));
+        }
+        if !self.commit_message.trim().is_empty() {
+            parts.push("a drafted commit message".to_string());
+        }
+        if self.agent_running {
+            parts.push("an agent turn still running".to_string());
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(", "))
+        }
+    }
+
+    fn on_key_quit_confirm(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.overlay = Overlay::None,
+            _ => {}
+        }
+    }
+
+    // -------------------------------------------------------------
     // AGENT
     // -------------------------------------------------------------
     /// Returns true if the key was consumed as text input/send for the
@@ -1248,7 +1350,7 @@ mod tests {
         fs::write(dir.join("b.txt"), "b1-changed\nb2\n").unwrap();
         Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
         // Leave both staged-but-uncommitted so `git diff HEAD` still sees them.
-        let app = App::new(dir.clone(), Keymap::defaults());
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         (app, dir)
     }
 
@@ -1266,15 +1368,57 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits_regardless_of_the_keymap() {
+    fn ctrl_c_quits_immediately_when_nothing_is_at_risk() {
         // Ctrl+C is checked before the keymap is even consulted (see
         // on_key's first lines) — it's a fixed safety net, not a binding.
         // `quit_key_is_configurable` below covers the actually-configurable
         // `q` binding separately.
         let dir = scratch_repo("ctrlc");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(ctrl('c'));
         assert!(app.should_quit);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ctrl_c_asks_for_confirmation_too_but_a_second_press_always_gets_you_out() {
+        // Ctrl+C isn't an unconditional instant quit any more — it can't
+        // silently drop unsent work either, same as 'q'. But it must still
+        // be a real escape hatch: pressing it again while the dialog it
+        // just opened is showing confirms right away, no second key needed
+        // beyond the same Ctrl+C.
+        let (mut app, dir) = two_file_app("ctrlc-confirm");
+        app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "don't lose me".to_string() });
+        app.project.files[0].notes = 1;
+
+        app.on_key(ctrl('c'));
+        assert!(!app.should_quit, "should ask first, not quit outright");
+        assert_eq!(app.overlay, Overlay::QuitConfirm);
+
+        app.on_key(ctrl('c'));
+        assert!(app.should_quit, "a second Ctrl+C must always get you out");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ctrl_c_bypasses_whatever_overlay_is_open() {
+        // The whole point of Ctrl+C living outside the keymap is that it's
+        // never swallowed by a focused text field or overlay — it must
+        // still reach on_key's dispatch and not, say, get typed into
+        // whatever's currently being edited. quit_risk() itself doesn't
+        // track in-progress overlay text (only saved notes/flags/etc), so
+        // this only asserts the routing, not that unsaved overlay text is
+        // itself protected — that's a separate question.
+        let dir = scratch_repo("ctrlc-overlay");
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.mode = Mode::Review;
+        app.overlay = Overlay::NoteInput;
+        app.note_input = "some in-progress note text".to_string();
+
+        app.on_key(ctrl('c'));
+        assert!(app.should_quit, "Ctrl+C should still cut through an open overlay when nothing quit_risk tracks is at stake");
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1283,7 +1427,7 @@ mod tests {
         let dir = scratch_repo("quit-remap");
         let mut keymap = Keymap::defaults();
         keymap.set(Action::Quit, crate::keymap::KeyChord { code: KeyCode::Char('z'), mods: KeyModifiers::NONE });
-        let mut app = App::new(dir.clone(), keymap);
+        let mut app = App::new(dir.clone(), keymap, AgentBackend::Pi);
 
         app.on_key(key(KeyCode::Char('q')));
         assert!(!app.should_quit, "plain q should no longer quit once remapped");
@@ -1344,7 +1488,7 @@ mod tests {
         lines[0] = "line1-CHANGED".to_string();
         fs::write(dir.join("big.rs"), lines.join("\n") + "\n").unwrap();
 
-        let app = App::new(dir.clone(), Keymap::defaults());
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         assert!(app.current_diff_index().is_some(), "big.rs should have a diff");
         assert_eq!(app.content_view, ContentView::Context, "Context is always the default");
         // 30 file lines, but a *modified* line1 is a Removed+Added pair
@@ -1373,7 +1517,7 @@ mod tests {
         lines[4] = "line5-CHANGED".to_string(); // line 5, 0-indexed 4
         fs::write(dir.join("f.rs"), lines.join("\n") + "\n").unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(key(KeyCode::Tab)); // focus content
         // Rows: line1..line4 (context, 4 rows) then the old "line5"
         // (removed) then "line5-CHANGED" (added, file line 5) — 5 Downs
@@ -1395,7 +1539,7 @@ mod tests {
         let dir = scratch_repo("navigate-tree");
         commit_file(&dir, "a.rs", "fn a() {}\n");
         commit_file(&dir, "b.rs", "fn b() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
 
         assert_eq!(app.tree_index, 0);
@@ -1413,7 +1557,7 @@ mod tests {
     fn navigate_source_cursor_movement_and_hover_toggle() {
         let dir = scratch_repo("navigate-cursor");
         commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n    let y = 2;\n}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
 
         // Up/Down move the tree until the source pane is focused — arrows
@@ -1442,7 +1586,7 @@ mod tests {
     fn navigate_comment_opens_note_input_targeting_the_current_line() {
         let dir = scratch_repo("navigate-comment");
         commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n    let y = 2;\n}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
         app.on_key(key(KeyCode::Tab)); // focus source
         app.on_key(key(KeyCode::Down)); // nav_line == 1
@@ -1467,7 +1611,7 @@ mod tests {
     #[test]
     fn note_input_esc_discards_without_saving() {
         let dir = scratch_repo("note-cancel");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
         app.project.files.push(crate::data::FileEntry {
             path: "x.rs".to_string(),
@@ -1492,7 +1636,7 @@ mod tests {
     #[test]
     fn note_input_editing_supports_cursor_movement_and_backspace() {
         let dir = scratch_repo("note-edit");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
         app.project.files.push(crate::data::FileEntry {
             path: "x.rs".to_string(),
@@ -1522,7 +1666,7 @@ mod tests {
     fn navigate_left_right_scroll_the_source_pane_only_when_focused() {
         let dir = scratch_repo("navigate-scroll");
         commit_file(&dir, "main.rs", "fn main() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
 
         app.on_key(key(KeyCode::Right));
@@ -1547,7 +1691,7 @@ mod tests {
         let dir = scratch_repo("navigate-scroll-diff");
         commit_file(&dir, "long.rs", "short\n");
         fs::write(&dir.join("long.rs"), "a very much longer line than before, changed\n").unwrap();
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
         assert!(app.current_diff_index().is_some(), "long.rs should have a diff");
 
@@ -1566,7 +1710,7 @@ mod tests {
         let dir = scratch_repo("navigate-page");
         let content: String = (1..=60).map(|n| format!("line{n}\n")).collect();
         commit_file(&dir, "big.rs", &content);
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
         app.on_key(key(KeyCode::Tab)); // focus source
         assert!(app.nav_focus == NavFocus::Content);
@@ -1590,7 +1734,7 @@ mod tests {
     fn navigate_page_down_clamps_at_the_end_of_a_short_file() {
         let dir = scratch_repo("navigate-page-short");
         commit_file(&dir, "small.rs", "line1\nline2\nline3\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
         app.on_key(key(KeyCode::Tab));
 
@@ -1604,7 +1748,7 @@ mod tests {
     fn navigate_enter_focuses_source_and_opening_a_file_resets_scroll() {
         let dir = scratch_repo("navigate-open-focus");
         commit_file(&dir, "a.rs", "fn a() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
         app.nav_scroll_x = 12;
 
@@ -1620,7 +1764,7 @@ mod tests {
         let dir = scratch_repo("navigate-open");
         commit_file(&dir, "a.rs", "fn a() {}\n");
         commit_file(&dir, "b.rs", "fn b() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
 
         // No subdirectories, so the tree is just [a.rs, b.rs] in that order;
@@ -1670,7 +1814,7 @@ mod tests {
         lines[19] = "line20-CHANGED".to_string();
         fs::write(dir.join("f.txt"), lines.join("\n") + "\n").unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Curation;
         assert_eq!(app.curation_files[0].total(), 2, "expected two separate hunks");
         assert_eq!(app.curation_hunk_index, 0);
@@ -1703,7 +1847,7 @@ mod tests {
     #[test]
     fn agent_input_accumulates_text_without_spawning_pi() {
         let dir = scratch_repo("agent-input");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Agent;
 
         for c in "hello".chars() {
@@ -1722,7 +1866,7 @@ mod tests {
     fn symbol_jump_close_discards_filter_state_choice() {
         let dir = scratch_repo("symjump-close");
         commit_file(&dir, "lib.rs", "fn foo() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(ctrl('k'));
         app.on_key(key(KeyCode::Char('f')));
         assert_eq!(app.symbol_filter, "f");
@@ -1820,6 +1964,100 @@ mod tests {
     }
 
     #[test]
+    fn clear_file_notes_only_touches_the_open_files_notes_and_not_its_flag() {
+        let (mut app, dir) = two_file_app("clear-file-notes");
+        app.mode = Mode::Review;
+        app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "on a".to_string() });
+        app.notes.push(Note { path: "b.txt".to_string(), line: None, text: "on b".to_string() });
+        app.project.files[0].notes = 1;
+        app.project.files[0].flagged = true;
+        app.project.files[1].notes = 1;
+        app.nav_file = dir.join("a.txt"); // so current_diff_index() resolves to a.txt
+
+        app.on_key(key(KeyCode::Char('d')));
+
+        assert_eq!(app.project.files[0].notes, 0, "a.txt's notes should be cleared");
+        assert!(app.project.files[0].flagged, "clearing notes shouldn't touch the flag");
+        assert_eq!(app.project.files[1].notes, 1, "b.txt's notes are untouched");
+        assert_eq!(app.notes.len(), 1);
+        assert_eq!(app.notes[0].path, "b.txt");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_all_notes_wipes_every_file_but_leaves_flags_alone() {
+        let (mut app, dir) = two_file_app("clear-all-notes");
+        app.mode = Mode::Review;
+        app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "on a".to_string() });
+        app.notes.push(Note { path: "b.txt".to_string(), line: None, text: "on b".to_string() });
+        app.project.files[0].notes = 1;
+        app.project.files[0].flagged = true;
+        app.project.files[1].notes = 1;
+
+        app.on_key(key(KeyCode::Char('D')));
+
+        assert_eq!(app.project.files[0].notes, 0);
+        assert_eq!(app.project.files[1].notes, 0);
+        assert!(app.project.files[0].flagged, "clearing notes shouldn't touch flags");
+        assert!(app.notes.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quit_is_immediate_when_nothing_is_at_risk() {
+        let (mut app, dir) = two_file_app("quit-nothing-at-risk");
+        assert!(app.quit_risk().is_none());
+
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(app.should_quit, "no notes/flags/draft — q should quit immediately");
+        assert_eq!(app.overlay, Overlay::None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quit_asks_for_confirmation_when_notes_are_queued() {
+        let (mut app, dir) = two_file_app("quit-with-notes");
+        app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "don't lose me".to_string() });
+        app.project.files[0].notes = 1;
+        assert!(app.quit_risk().is_some());
+
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(!app.should_quit, "should ask first, not quit outright");
+        assert_eq!(app.overlay, Overlay::QuitConfirm);
+
+        // Esc backs out without quitting or losing the note.
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.should_quit);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.notes.len(), 1);
+
+        // Asking again and confirming (either Enter or 'q' again) quits.
+        app.on_key(key(KeyCode::Char('q')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.should_quit);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quit_risk_flags_a_drafted_commit_message_and_a_running_agent_too() {
+        let (mut app, dir) = two_file_app("quit-risk-other-state");
+        assert!(app.quit_risk().is_none());
+
+        app.commit_message = "fix: the thing".to_string();
+        assert!(app.quit_risk().unwrap().contains("drafted commit message"));
+        app.commit_message.clear();
+
+        app.agent_running = true;
+        assert!(app.quit_risk().unwrap().contains("agent turn"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sync_review_from_disk_picks_up_an_external_change_and_keeps_flags() {
         let (mut app, dir) = two_file_app("sync-review");
         app.project.files[0].flagged = true;
@@ -1860,7 +2098,13 @@ mod tests {
         fs::write(dir.join("a.txt"), "a1-changed\na2\na3-written-by-the-agent\n").unwrap();
         let before = app.project.files[0].hunks[0].lines.len();
 
-        app.apply_agent_event(AgentEvent::AgentEnd);
+        // Real backend processes signal "the turn is over" by exiting (the
+        // event channel disconnecting), not through any particular JSON
+        // event — pi sends AgentEnd and opencode doesn't, so this is
+        // triggered by `finish_turn` directly rather than by feeding
+        // AgentEnd through `apply_agent_event`. See finish_turn's doc
+        // comment.
+        app.finish_turn();
 
         assert!(!app.agent_running);
         assert!(app.project.files[0].hunks[0].lines.len() > before, "Review should already reflect the write, no waiting for the next poll");
@@ -1873,7 +2117,7 @@ mod tests {
     fn sync_navigate_from_disk_picks_up_an_external_edit_to_the_open_file() {
         let dir = scratch_repo("sync-nav-source");
         commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
         assert_eq!(app.source.len(), 3);
 
@@ -1890,7 +2134,7 @@ mod tests {
     fn sync_navigate_from_disk_picks_up_a_new_file_added_externally() {
         let dir = scratch_repo("sync-nav-tree");
         commit_file(&dir, "a.rs", "fn a() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
         let before = app.tree.len();
 
@@ -1906,7 +2150,7 @@ mod tests {
     #[test]
     fn commit_message_purpose_routes_text_and_end_away_from_the_transcript() {
         let dir = scratch_repo("purpose-text");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         let transcript_len_before = app.transcript.len();
 
         app.agent_purpose = TurnPurpose::CommitMessage;
@@ -1915,7 +2159,7 @@ mod tests {
         assert_eq!(app.commit_message, "feat: add the thing");
         assert_eq!(app.transcript.len(), transcript_len_before, "should not touch the chat transcript");
 
-        app.apply_agent_event(AgentEvent::AgentEnd);
+        app.finish_turn();
         assert_eq!(app.open_editor_requested, Some(EditorTarget::CommitMessage), "completing generation should request the editor");
         assert!(app.commit_message_status.is_none());
         assert!(!app.agent_running);
@@ -1926,7 +2170,7 @@ mod tests {
     #[test]
     fn commit_message_purpose_routes_errors_to_status_not_transcript() {
         let dir = scratch_repo("purpose-error");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         let transcript_len_before = app.transcript.len();
 
         app.agent_purpose = TurnPurpose::CommitMessage;
@@ -1939,11 +2183,31 @@ mod tests {
     }
 
     #[test]
+    fn opencode_session_id_is_captured_from_the_session_event() {
+        // opencode has no equivalent of pi's upfront session file — it
+        // assigns a session id itself and hands it back over the stream,
+        // which then has to be threaded into every later call. Confirms
+        // that capture happens regardless of which turn purpose is active.
+        let dir = scratch_repo("opencode-session-capture");
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::OpenCode);
+        assert!(app.opencode_session_id.is_none());
+
+        app.apply_agent_event(AgentEvent::Session("ses_abc123".to_string()));
+        assert_eq!(app.opencode_session_id.as_deref(), Some("ses_abc123"));
+
+        app.agent_purpose = TurnPurpose::CommitMessage;
+        app.apply_agent_event(AgentEvent::Session("ses_def456".to_string()));
+        assert_eq!(app.opencode_session_id.as_deref(), Some("ses_def456"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn file_finder_fuzzy_filters_and_opens_the_selected_file() {
         let dir = scratch_repo("finder");
         commit_file(&dir, "main.rs", "fn main() {}\n");
         commit_file(&dir, "readme.md", "# hi\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
 
         app.on_key(ctrl('f'));
         assert!(app.overlay == Overlay::FileFinder);
@@ -1969,7 +2233,7 @@ mod tests {
     fn file_finder_esc_closes_without_opening_anything() {
         let dir = scratch_repo("finder-close");
         commit_file(&dir, "a.rs", "fn a() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         let original_file = app.nav_file.clone();
 
         app.on_key(ctrl('f'));
@@ -1995,7 +2259,7 @@ mod tests {
     #[test]
     fn agent_input_types_at_cursor_not_just_appends() {
         let dir = scratch_repo("agent-cursor");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Agent;
 
         for c in "ac".chars() {
@@ -2016,7 +2280,7 @@ mod tests {
     #[test]
     fn agent_input_backspace_and_delete() {
         let dir = scratch_repo("agent-bs-del");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Agent;
         for c in "abc".chars() {
             app.on_key(key(KeyCode::Char(c)));
@@ -2044,7 +2308,7 @@ mod tests {
     #[test]
     fn agent_input_home_end_and_arrow_clamping() {
         let dir = scratch_repo("agent-home-end");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Agent;
         for c in "hello".chars() {
             app.on_key(key(KeyCode::Char(c)));
@@ -2068,7 +2332,7 @@ mod tests {
     #[test]
     fn agent_input_editing_is_utf8_safe() {
         let dir = scratch_repo("agent-utf8");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Agent;
         for c in "caf\u{e9}".chars() {
             app.on_key(key(KeyCode::Char(c)));
@@ -2083,7 +2347,7 @@ mod tests {
     #[test]
     fn agent_send_clears_input_and_resets_cursor() {
         let dir = scratch_repo("agent-send-reset");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Agent;
         for c in "hello".chars() {
             app.on_key(key(KeyCode::Char(c)));
@@ -2101,7 +2365,7 @@ mod tests {
         // deliberately not exercised here, same as elsewhere in this file —
         // it would spawn a real, un-cleaned-up `pi` subprocess.
         let dir = scratch_repo("agent-scroll");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Agent;
 
         assert_eq!(app.agent_scroll, 0);

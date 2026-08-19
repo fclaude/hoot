@@ -1,51 +1,27 @@
 //! Drives a real `pi` coding-agent subprocess (https://github.com/earendil-works/pi)
 //! and streams its `--mode json` NDJSON event log back as [`AgentEvent`]s.
+//!
+//! `--approve` is used unconditionally: pi has no native "pause and wait
+//! for external approval before writing" hook (confirmed by testing —
+//! `write` executes as soon as the model calls it, `--approve` or not), so
+//! there's no filesystem-level gate to stage changes through either way.
+//! Steer's diff view and plain `git` are the review/undo mechanism instead,
+//! same as any other change made to the repo.
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc;
 use std::thread;
 
 use serde_json::Value;
 
-pub enum AgentEvent {
-    Model(String),
-    Thinking(String),
-    Text(String),
-    ToolCall { name: String, args: String },
-    ToolResult { name: String, summary: String },
-    TurnEnd,
-    AgentEnd,
-    Error(String),
-}
+use crate::agent_client::{AgentEvent, AgentSession, ToolProfile};
 
-pub struct PiSession {
-    pub rx: Receiver<AgentEvent>,
-}
-
-/// Which tools a spawned turn is allowed to use.
-///
-/// `ReadOnly` is for normal chat/Q&A in the Agent pane — pi can inspect the
-/// real target directory but never write to it. `ReadWrite` (Edit mode)
-/// writes straight to the real target directory: pi has no native "pause
-/// and wait for external approval before writing" hook (confirmed by
-/// testing — `write` executes as soon as the model calls it, `--approve`
-/// or not), so there's no filesystem-level gate to stage changes through
-/// either way. Steer's diff view and plain `git` are the review/undo
-/// mechanism instead, same as any other change made to the repo.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ToolProfile {
-    ReadOnly,
-    ReadWrite,
-}
-
-impl ToolProfile {
-    fn tools_arg(self) -> &'static str {
-        match self {
-            ToolProfile::ReadOnly => "read",
-            ToolProfile::ReadWrite => "read,write",
-        }
+fn tools_arg(profile: ToolProfile) -> &'static str {
+    match profile {
+        ToolProfile::ReadOnly => "read",
+        ToolProfile::ReadWrite => "read,write",
     }
 }
 
@@ -61,7 +37,7 @@ impl ToolProfile {
 /// bypasses that cwd scoping entirely: `pi` creates the file on first use
 /// and resumes it exactly on every call after, regardless of which
 /// directory the call runs from.
-pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) -> std::io::Result<PiSession> {
+pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) -> std::io::Result<AgentSession> {
     let mut cmd = Command::new("pi");
     cmd.arg("--mode")
         .arg("json")
@@ -70,7 +46,7 @@ pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) 
         .arg("--session")
         .arg(session_file)
         .arg("--tools")
-        .arg(tools.tools_arg())
+        .arg(tools_arg(tools))
         .arg(prompt)
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -110,7 +86,7 @@ pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) 
         let _ = child.wait();
     });
 
-    Ok(PiSession { rx })
+    Ok(AgentSession { rx })
 }
 
 fn parse_line(line: &str) -> Option<AgentEvent> {

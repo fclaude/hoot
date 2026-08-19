@@ -101,7 +101,7 @@ fn draw_commit_box(f: &mut Frame, app: &App, area: Rect) {
     }
     if app.commit_message.is_empty() {
         lines.push(Line::from(Span::styled(
-            "(empty — press g to draft one with pi, or e to write your own)",
+            format!("(empty \u{2014} press g to draft one with {}, or e to write your own)", app.agent_backend.label()),
             Style::default().fg(theme::DIM),
         )));
     } else {

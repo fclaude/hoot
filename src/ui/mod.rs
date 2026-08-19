@@ -2,6 +2,7 @@ mod agent;
 mod curation;
 mod file_finder;
 mod note_input;
+mod quit_confirm;
 mod review;
 mod symbol_jump;
 
@@ -13,6 +14,9 @@ use ratatui::Frame;
 
 use crate::app::{App, Mode, Overlay};
 use crate::theme;
+
+#[cfg(test)]
+use crate::agent_client::AgentBackend;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -40,6 +44,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::SymbolJump => symbol_jump::draw(f, app, area),
         Overlay::FileFinder => file_finder::draw(f, app, area),
         Overlay::NoteInput => note_input::draw(f, app, area),
+        Overlay::QuitConfirm => quit_confirm::draw(f, app, area),
         Overlay::None => {}
     }
 }
@@ -67,7 +72,7 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
         Mode::Agent => {
             let model = app.agent_model_live.as_deref().unwrap_or("\u{2014}");
             let status = if app.agent_running { "running" } else { "idle" };
-            format!("pi   model: {}   {}", model, status)
+            format!("{}   model: {}   {}", app.agent_backend.label(), model, status)
         }
         Mode::Curation => {
             let (sel, total): (u32, u32) =
@@ -227,7 +232,7 @@ mod tests {
         commit_file(&dir, "f.txt", "line1\nline2\n");
         fs::write(dir.join("f.txt"), "line1-changed\nline2\n").unwrap();
 
-        let app = App::new(dir.clone(), Keymap::defaults());
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         let screen = render(&app, 120, 30);
         assert!(screen.contains("f.txt"), "{screen}");
         assert!(screen.contains("line1-changed"), "{screen}");
@@ -248,7 +253,7 @@ mod tests {
         lines[0] = "line1-CHANGED".to_string();
         fs::write(dir.join("big.rs"), lines.join("\n") + "\n").unwrap();
 
-        let app = App::new(dir.clone(), Keymap::defaults());
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         let screen = render(&app, 120, 40);
         assert!(screen.contains("line1-CHANGED"), "{screen}");
         assert!(screen.contains("line30"), "whole file should be visible, not just a window around the change: {screen}");
@@ -265,7 +270,7 @@ mod tests {
         lines[0] = "line1-CHANGED".to_string();
         fs::write(dir.join("big.rs"), lines.join("\n") + "\n").unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
         let screen = render(&app, 120, 40);
         assert!(screen.contains("line1-CHANGED"), "{screen}");
@@ -284,7 +289,7 @@ mod tests {
         let dir = scratch_repo("steer-clean");
         commit_file(&dir, "f.txt", "line1\n");
 
-        let app = App::new(dir.clone(), Keymap::defaults());
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         let screen = render(&app, 120, 30);
         assert!(screen.contains("f.txt"), "{screen}");
         assert!(screen.contains("line1"), "{screen}");
@@ -298,7 +303,7 @@ mod tests {
         let dir = scratch_repo("nav");
         commit_file(&dir, "main.rs", "fn main() {\n    println!(\"hi\");\n}\n");
 
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         let screen = render(&app, 120, 30);
         assert!(screen.contains("main.rs"), "{screen}");
@@ -313,7 +318,7 @@ mod tests {
         let content: String = (1..=200).map(|n| format!("UNIQUE_LINE_MARKER_{n}\n")).collect();
         commit_file(&dir, "big.rs", &content);
 
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // focus source
 
@@ -338,7 +343,7 @@ mod tests {
     #[test]
     fn agent_screen_shows_pi_status_via_f2() {
         let dir = scratch_repo("agent");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         let screen = render(&app, 120, 30);
         assert!(screen.contains("pi"), "{screen}");
@@ -348,11 +353,22 @@ mod tests {
     }
 
     #[test]
+    fn agent_screen_shows_the_active_backends_label() {
+        let dir = scratch_repo("agent-opencode");
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::OpenCode);
+        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("opencode"), "the header/status line should reflect the selected backend: {screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn agent_input_line_stays_visible_with_a_long_transcript() {
         use crate::data::{AgentLine, AgentLineKind};
 
         let dir = scratch_repo("agent-long");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         app.transcript = (1..=100)
             .map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") })
@@ -374,7 +390,7 @@ mod tests {
         use crate::data::{AgentLine, AgentLineKind};
 
         let dir = scratch_repo("agent-scrollback");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         app.transcript = (1..=100)
             .map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") })
@@ -396,7 +412,7 @@ mod tests {
         commit_file(&dir, "f.txt", "a\nb\n");
         fs::write(dir.join("f.txt"), "a-changed\nb\n").unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
         let screen = render(&app, 120, 30);
         assert!(screen.contains("f.txt"), "{screen}");
@@ -410,7 +426,7 @@ mod tests {
         let dir = scratch_repo("symjump");
         commit_file(&dir, "lib.rs", "pub fn parse_query(s: &str) {}\n");
 
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
         for c in "parse_q".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -427,7 +443,7 @@ mod tests {
         let dir = scratch_repo("symjump-goto");
         commit_file(&dir, "lib.rs", "fn unrelated() {}\npub fn parse_query(s: &str) {}\n");
 
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
         for c in "parse_query".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -448,7 +464,7 @@ mod tests {
         commit_file(&dir, "main.rs", "fn main() {\n    println!(\"finder preview\");\n}\n");
         commit_file(&dir, "readme.md", "# unrelated\n");
 
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         for c in "mnrs".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -468,7 +484,7 @@ mod tests {
         fs::write(dir.join("a.rs"), "a1-changed\na2\n").unwrap();
         Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults());
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         for c in "extract this".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -484,7 +500,7 @@ mod tests {
     #[test]
     fn narrow_terminal_uses_compact_review_header() {
         let dir = scratch_repo("narrow");
-        let app = App::new(dir.clone(), Keymap::defaults());
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         let screen = render(&app, 80, 30);
         // Narrow layout abbreviates the status line's full
         // "path:line · N changed · N notes" center down to just "N changed"
@@ -501,7 +517,7 @@ mod tests {
     #[test]
     fn wide_terminal_uses_full_review_header() {
         let dir = scratch_repo("wide");
-        let app = App::new(dir.clone(), Keymap::defaults());
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         let screen = render(&app, 150, 30);
         let status_line = screen.lines().next().unwrap_or("");
         assert!(status_line.contains("changed"), "{status_line}");

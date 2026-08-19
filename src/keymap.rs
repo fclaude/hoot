@@ -46,6 +46,8 @@ pub enum Action {
     ReviewUnifiedView,
     ReviewIterate,
     ReviewCopyPrompt,
+    ReviewClearFileNotes,
+    ReviewClearAllNotes,
 
     SymbolUp,
     SymbolDown,
@@ -124,6 +126,14 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::ReviewToggleView, "review_toggle_view", "Toggle diff/source", "Review", "v", "Switch the content pane between diff and source (only if the file has changes)"),
     b!(Action::ReviewMarkGood, "review_mark_good", "Mark good", "Review", "g", "Clear notes/flag on the open file"),
     b!(Action::ReviewFlagRework, "review_flag_rework", "Flag rework", "Review", "x", "Flag the open file as needing a redo"),
+    b!(Action::ReviewClearFileNotes, "review_clear_file_notes", "Clear file notes", "Review", "d", "Clear notes on the open file, without touching its flag (unlike Mark Good)"),
+    // "D" (the literal uppercase character), not "shift+d" — crossterm
+    // reports Shift+letter as the uppercase Char code itself with no
+    // separate Shift modifier bit set on most terminals, so a chord that
+    // requires the modifier bit would never match. Same class of gotcha as
+    // the ctrl+enter one below, just easier to miss since it doesn't error,
+    // it just silently never fires.
+    b!(Action::ReviewClearAllNotes, "review_clear_all_notes", "Clear all notes", "Review", "D", "Clear every queued note across the whole tree"),
     b!(Action::ReviewComment, "review_comment", "Comment", "Review", "c", "In source view: comment on the current line. Otherwise: comment on the whole file"),
     b!(Action::ReviewSplitView, "review_split_view", "Split view", "Review", "s", "Switch the diff view to before/after columns"),
     b!(Action::ReviewUnifiedView, "review_unified_view", "Unified view", "Review", "u", "Switch the diff view back to unified"),
@@ -174,7 +184,24 @@ pub struct KeyChord {
 
 impl KeyChord {
     pub fn matches(&self, key: &KeyEvent) -> bool {
-        key.code == self.code && key.modifiers == self.mods
+        if key.code != self.code {
+            return false;
+        }
+        // Confirmed empirically (crossterm on a real terminal, not just
+        // reasoned about): pressing Shift+D delivers `Char('D')` with the
+        // SHIFT bit still set, not cleared just because it's already
+        // implied by the uppercase code. A chord for an uppercase letter
+        // (parsed from e.g. "D") carries mods: NONE, since case alone is
+        // how it's written — so without this, no uppercase-letter binding
+        // could ever match a real keypress. Ignore SHIFT specifically when
+        // the code is an uppercase letter; every other modifier (and SHIFT
+        // on non-letter codes, e.g. a real Shift+Tab) still must match
+        // exactly.
+        let mut incoming = key.modifiers;
+        if matches!(self.code, KeyCode::Char(c) if c.is_ascii_uppercase()) {
+            incoming.remove(KeyModifiers::SHIFT);
+        }
+        incoming == self.mods
     }
 
     /// Parses chord strings like "ctrl+enter", "f1", "space", "/", "g".
@@ -190,7 +217,14 @@ impl KeyChord {
                 _ => return None,
             }
         }
-        let code = match key_part.to_lowercase().as_str() {
+        // Named keys and modifiers match case-insensitively ("Enter" ==
+        // "enter"), but a bare letter must keep its original case — "D" and
+        // "d" are genuinely different `KeyCode::Char`s once crossterm
+        // reports a real keypress, so lowercasing here would make every
+        // uppercase-letter chord silently collapse onto its lowercase
+        // sibling instead of erroring or working as written.
+        let lower = key_part.to_lowercase();
+        let code = match lower.as_str() {
             "enter" | "return" => KeyCode::Enter,
             "esc" | "escape" => KeyCode::Esc,
             "space" => KeyCode::Char(' '),
@@ -207,7 +241,7 @@ impl KeyChord {
             f if f.len() >= 2 && f.starts_with('f') && f[1..].chars().all(|c| c.is_ascii_digit()) => {
                 KeyCode::F(f[1..].parse().ok()?)
             }
-            single if single.chars().count() == 1 => KeyCode::Char(single.chars().next().unwrap()),
+            _ if key_part.chars().count() == 1 => KeyCode::Char(key_part.chars().next().unwrap()),
             _ => return None,
         };
         Some(KeyChord { code, mods })
@@ -339,20 +373,23 @@ pub fn generate_markdown(keymap: &Keymap) -> String {
          Create `~/.steer.toml` and set any binding name below to a new chord, e.g.:\n\n\
          ```toml\n\
          quit = \"ctrl+q\"\n\
-         review_comment = \"ctrl+enter\"\n\
-         review_toggle_hover = \"shift+h\"\n\
+         review_comment = \"ctrl+e\"\n\
+         review_toggle_hover = \"H\"\n\
          ```\n\n\
-         Chords are `mod+mod+key`, e.g. `ctrl+enter`, `shift+tab`, `f1`, `space`, `/`, `g`. \
-         Modifiers: `ctrl`, `shift`, `alt`. Bind more than one chord to the same action with a \
-         comma, e.g. `f1,ctrl+r`. Unknown binding names or unparsable chords are \
-         reported as warnings on startup and otherwise ignored — they never prevent steer from \
-         starting.\n\n\
-         Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) in the \
-         agent prompt, symbol filter, and commit message editor.\n\n\
+         Chords are `mod+mod+key`, e.g. `ctrl+e`, `f1`, `space`, `/`, `g`, or a single \
+         uppercase letter like `H`. Modifiers: `ctrl`, `shift`, `alt`. Bind more than one chord \
+         to the same action with a comma, e.g. `f1,ctrl+r`. Unknown binding names or unparsable \
+         chords are reported as warnings on startup and otherwise ignored — they never prevent \
+         steer from starting.\n\n\
+         Not overridable: `Ctrl+C` (always gets you out — same quit-confirmation as `q` if there's \
+         unsent work, but a second `Ctrl+C` always confirms immediately), and raw text entry \
+         (typing/Backspace) in the agent prompt, symbol filter, and commit message editor.\n\n\
          Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don't work \
          in most terminals — the terminal collapses them to the same byte sequence as the bare \
          key, so no modifier survives for steer to see. Prefer a plain letter or `ctrl+<letter>` \
-         chord instead.\n\n",
+         chord instead. `shift+<letter>` has the same problem for a different reason: most \
+         terminals report Shift+letter as the uppercase character itself, not as a separate \
+         Shift bit — so write the literal uppercase letter (`\"H\"`) rather than `\"shift+h\"`.\n\n",
     );
 
     let mut groups: Vec<&'static str> = Vec::new();
@@ -415,6 +452,19 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_uppercase_letter_keeps_its_case_and_differs_from_lowercase() {
+        // Regression: the key part used to be lowercased before becoming a
+        // KeyCode, so "D" and "d" parsed to the exact same chord — silently
+        // breaking every uppercase-letter binding (they'd match a lowercase
+        // keypress instead of the uppercase one they were written for).
+        let upper = KeyChord::parse("D").unwrap();
+        let lower = KeyChord::parse("d").unwrap();
+        assert_eq!(upper, KeyChord { code: KeyCode::Char('D'), mods: KeyModifiers::NONE });
+        assert_eq!(lower, KeyChord { code: KeyCode::Char('d'), mods: KeyModifiers::NONE });
+        assert_ne!(upper, lower);
+    }
+
+    #[test]
     fn parses_modified_key_case_insensitively() {
         let c = KeyChord::parse("Ctrl+Enter").unwrap();
         assert_eq!(c, KeyChord { code: KeyCode::Enter, mods: KeyModifiers::CONTROL });
@@ -463,6 +513,28 @@ mod tests {
         assert!(chord.matches(&hit));
         assert!(!chord.matches(&wrong_mods));
         assert!(!chord.matches(&wrong_code));
+    }
+
+    #[test]
+    fn matches_an_uppercase_letter_chord_whether_or_not_crossterm_also_sets_shift() {
+        // Confirmed via real keypress capture: this terminal reports
+        // Shift+D as Char('D') with the SHIFT bit set, but a "D" chord
+        // parses to mods: NONE (case alone conveys shift). Both must match.
+        let chord = KeyChord::parse("D").unwrap();
+        let with_shift_bit = KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT);
+        let without_shift_bit = KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE);
+        assert!(chord.matches(&with_shift_bit));
+        assert!(chord.matches(&without_shift_bit));
+
+        // A lowercase 'd' keypress must NOT satisfy an uppercase-only chord.
+        let lowercase_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(!chord.matches(&lowercase_d));
+
+        // SHIFT-ignoring is specific to uppercase letters — a real
+        // Shift+Tab still needs to actually carry the SHIFT bit.
+        let tab_chord = KeyChord::parse("shift+tab").unwrap();
+        assert!(tab_chord.matches(&KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert!(!tab_chord.matches(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
     }
 
     #[test]

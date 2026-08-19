@@ -213,6 +213,7 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
                 ("c", "Comment"),
                 ("g", "Mark good"),
                 ("x", "Flag rework"),
+                ("d/D", "Clear file/all notes"),
             ]),
             super::key_hints(&[
                 ("v", view_toggle_label),
@@ -318,7 +319,7 @@ fn draw_diff_split(f: &mut Frame, area: Rect, file: &FileEntry) {
     f.render_widget(Paragraph::new(divider).style(Style::default().fg(theme::DIM)), rows[1]);
 
     let hints = vec![
-        super::key_hints(&[("c", "Comment"), ("g", "Mark good"), ("x", "Flag rework"), ("u", "Unified")]),
+        super::key_hints(&[("c", "Comment"), ("g", "Mark good"), ("x", "Flag rework"), ("d/D", "Clear file/all notes"), ("u", "Unified")]),
         super::key_hints(&[("i", "Review notes \u{2192} send to agent"), ("y", "Copy prompt")]),
     ];
     f.render_widget(Paragraph::new(hints), rows[2]);

@@ -8,15 +8,15 @@ Create `~/.steer.toml` and set any binding name below to a new chord, e.g.:
 
 ```toml
 quit = "ctrl+q"
-review_comment = "ctrl+enter"
-review_toggle_hover = "shift+h"
+review_comment = "ctrl+e"
+review_toggle_hover = "H"
 ```
 
-Chords are `mod+mod+key`, e.g. `ctrl+enter`, `shift+tab`, `f1`, `space`, `/`, `g`. Modifiers: `ctrl`, `shift`, `alt`. Bind more than one chord to the same action with a comma, e.g. `f1,ctrl+r`. Unknown binding names or unparsable chords are reported as warnings on startup and otherwise ignored — they never prevent steer from starting.
+Chords are `mod+mod+key`, e.g. `ctrl+e`, `f1`, `space`, `/`, `g`, or a single uppercase letter like `H`. Modifiers: `ctrl`, `shift`, `alt`. Bind more than one chord to the same action with a comma, e.g. `f1,ctrl+r`. Unknown binding names or unparsable chords are reported as warnings on startup and otherwise ignored — they never prevent steer from starting.
 
-Not overridable: `Ctrl+C` (always quits), and raw text entry (typing/Backspace) in the agent prompt, symbol filter, and commit message editor.
+Not overridable: `Ctrl+C` (always gets you out — same quit-confirmation as `q` if there's unsent work, but a second `Ctrl+C` always confirms immediately), and raw text entry (typing/Backspace) in the agent prompt, symbol filter, and commit message editor.
 
-Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don't work in most terminals — the terminal collapses them to the same byte sequence as the bare key, so no modifier survives for steer to see. Prefer a plain letter or `ctrl+<letter>` chord instead.
+Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don't work in most terminals — the terminal collapses them to the same byte sequence as the bare key, so no modifier survives for steer to see. Prefer a plain letter or `ctrl+<letter>` chord instead. `shift+<letter>` has the same problem for a different reason: most terminals report Shift+letter as the uppercase character itself, not as a separate Shift bit — so write the literal uppercase letter (`"H"`) rather than `"shift+h"`.
 
 ## Global
 
@@ -48,6 +48,8 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | `review_toggle_view` | Toggle diff/source | `v` |  | Switch the content pane between diff and source (only if the file has changes) |
 | `review_mark_good` | Mark good | `g` |  | Clear notes/flag on the open file |
 | `review_flag_rework` | Flag rework | `x` |  | Flag the open file as needing a redo |
+| `review_clear_file_notes` | Clear file notes | `d` |  | Clear notes on the open file, without touching its flag (unlike Mark Good) |
+| `review_clear_all_notes` | Clear all notes | `D` |  | Clear every queued note across the whole tree |
 | `review_comment` | Comment | `c` |  | In source view: comment on the current line. Otherwise: comment on the whole file |
 | `review_split_view` | Split view | `s` |  | Switch the diff view to before/after columns |
 | `review_unified_view` | Unified view | `u` |  | Switch the diff view back to unified |

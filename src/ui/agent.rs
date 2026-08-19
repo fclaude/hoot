@@ -124,7 +124,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
     let status_color = if app.agent_running { theme::ORANGE } else { theme::DIM };
 
     let header = vec![Line::from(vec![
-        Span::styled("pi", Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(app.agent_backend.label(), Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
         Span::styled(
             app.agent_model_live.clone().unwrap_or_else(|| "\u{2014}".to_string()),
@@ -163,7 +163,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
 
     let transcript = if app.transcript.is_empty() {
         vec![Line::from(Span::styled(
-            "No conversation yet \u{2014} type a message below and press Enter to talk to pi.",
+            format!("No conversation yet \u{2014} type a message below and press Enter to talk to {}.", app.agent_backend.label()),
             Style::default().fg(theme::DIM),
         ))]
     } else {

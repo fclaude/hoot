@@ -1,3 +1,4 @@
+mod agent_client;
 mod app;
 mod clipboard;
 mod data;
@@ -7,6 +8,7 @@ mod gitcommit;
 mod gitreview;
 mod keymap;
 mod markdown;
+mod opencode_client;
 mod pi_client;
 mod syntax;
 mod theme;
@@ -22,13 +24,17 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use agent_client::AgentBackend;
 use app::App;
 use keymap::Keymap;
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     let mut target_arg: Option<String> = None;
-    for arg in &mut args {
+    // opencode is the default backend — see agent_client.rs for why each
+    // is wired the way it is.
+    let mut agent_backend = AgentBackend::OpenCode;
+    while let Some(arg) = args.next() {
         if arg == "--print-keymap" {
             let (keymap, warnings) = Keymap::load();
             for w in &warnings {
@@ -36,6 +42,18 @@ fn main() -> io::Result<()> {
             }
             print!("{}", keymap::generate_markdown(&keymap));
             return Ok(());
+        }
+        if arg == "--agent" {
+            let Some(value) = args.next() else {
+                eprintln!("--agent needs a value: pi or opencode");
+                std::process::exit(1);
+            };
+            let Some(backend) = AgentBackend::parse(&value) else {
+                eprintln!("unknown --agent value {value:?}: expected pi or opencode");
+                std::process::exit(1);
+            };
+            agent_backend = backend;
+            continue;
         }
         target_arg = Some(arg);
     }
@@ -57,7 +75,7 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, target_dir, keymap);
+    let result = run(&mut terminal, target_dir, keymap, agent_backend);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -66,8 +84,8 @@ fn main() -> io::Result<()> {
     result
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, target_dir: PathBuf, keymap: Keymap) -> io::Result<()> {
-    let mut app = App::new(target_dir, keymap);
+fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, target_dir: PathBuf, keymap: Keymap, agent_backend: AgentBackend) -> io::Result<()> {
+    let mut app = App::new(target_dir, keymap, agent_backend);
 
     loop {
         app.poll_agent();
