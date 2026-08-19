@@ -150,84 +150,92 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
 
 fn draw_content(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     match app.current_diff_index() {
-        Some(idx) if app.content_view == ContentView::Diff => {
+        Some(idx) => {
+            let file = &app.project.files[idx];
             if app.split_diff {
-                draw_diff_split(f, area, &app.project.files[idx]);
+                draw_diff_split(f, area, file);
             } else {
-                draw_diff_unified(f, app, area, &app.project.files[idx], narrow);
+                draw_diff_scrollable(f, app, area, file, narrow);
             }
         }
-        _ => draw_source(f, app, area),
+        None => draw_source(f, app, area),
     }
 }
 
-fn hunk_lines(file: &FileEntry, width: usize) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for hunk in &file.hunks {
-        for dl in &hunk.lines {
-            let style = super::diff_line_style(dl.kind);
-            lines.push(Line::from(Span::styled(dl.text.clone(), style)));
-        }
-        if let Some(note) = &hunk.note {
-            lines.push(Line::raw(""));
-            let prefix = "\u{bb} note to agent: ";
-            let wrapped = wrap_note(note, prefix, width.max(20));
-            for l in wrapped {
-                lines.push(Line::from(Span::styled(l, Style::default().fg(theme::PINK).add_modifier(Modifier::BOLD))));
-            }
-        }
-        lines.push(Line::raw(""));
-    }
-    lines
-}
+/// The main diff view: the file's changes shown in place, scrollable like
+/// source. `Context` (the default) shows the whole file; `Focused`
+/// collapses long unchanged stretches down to a placeholder line, for
+/// scanning files with many small, scattered changes without paging
+/// through everything in between.
+fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data::FileEntry, narrow: bool) {
+    let numbered = crate::data::diff_lines_with_file_line_numbers(&app.diff_context);
+    let numbered = match app.content_view {
+        ContentView::Context => numbered,
+        ContentView::Focused => crate::data::focus_diff_lines(&numbered, 3),
+    };
 
-fn wrap_note(note: &str, prefix: &str, width: usize) -> Vec<String> {
-    let note = note.strip_prefix("note to agent: ").unwrap_or(note);
-    let mut out = Vec::new();
-    let mut current = prefix.to_string();
-    for word in note.split_whitespace() {
-        if current.len() + word.len() + 1 > width {
-            out.push(current);
-            current = "  ".to_string();
-        }
-        if !current.ends_with(' ') && !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-    if !current.trim().is_empty() {
-        out.push(current);
-    }
-    out
-}
-
-fn draw_diff_unified(f: &mut Frame, app: &App, area: Rect, file: &FileEntry, narrow: bool) {
-    let content_width = area.width.saturating_sub(2) as usize;
-    let body = Paragraph::new(hunk_lines(file, content_width));
+    let focused = app.nav_focus == NavFocus::Content;
+    let mode_label = match app.content_view {
+        ContentView::Context => "context",
+        ContentView::Focused => "focused",
+    };
+    let title = format!("{} \u{2014} {mode_label} \u{2014} line {}/{}", file.path, (app.nav_line + 1).min(numbered.len().max(1)), numbered.len());
+    let view_toggle_label = match app.content_view {
+        ContentView::Context => "Focused",
+        ContentView::Focused => "Context",
+    };
     let hints = if narrow {
-        vec![super::key_hints(&[("c", "Comment"), ("g", "Mark good")]), super::key_hints(&[("i", "Iterate"), ("v", "Source")])]
+        vec![super::key_hints(&[("c", "Comment"), ("v", view_toggle_label)]), super::key_hints(&[("i", "Iterate")])]
     } else {
         vec![
+            super::key_hints(&[("Tab", "Switch pane"), ("\u{2191}\u{2193}", "Move"), ("PgUp/PgDn", "Page"), ("c", "Comment"), ("g", "Mark good"), ("x", "Flag rework")]),
             super::key_hints(&[
-                ("c", "Comment"),
-                ("g", "Mark good"),
-                ("x", "Flag rework"),
+                ("v", view_toggle_label),
                 ("s", "Split"),
-                ("\u{2191}\u{2193}", "Next/prev file"),
-            ]),
-            super::key_hints(&[
                 ("i", &format!("Review {} notes \u{2192} send to agent", app.notes_queued())),
-                ("v", "View source"),
-                ("Tab", "Switch pane"),
             ]),
         ]
     };
-    super::draw_panel(f, area, &file.path, body, &hints);
+
+    let block = super::panel_block(&title).border_style(Style::default().fg(if focused { theme::CYAN } else { theme::DIM }));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Length(hints.len() as u16)])
+        .split(inner);
+
+    let visible_height = rows[0].height as usize;
+    let scroll_y = scroll_offset(app.nav_line, numbered.len(), visible_height);
+
+    let rel = file.path.as_str();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, (line_no, dl)) in numbered.iter().enumerate().skip(scroll_y).take(visible_height) {
+        let bg = if i == app.nav_line { Some(theme::BG_SELECTION) } else { None };
+        let mut style = super::diff_line_style(dl.kind);
+        if let Some(bg) = bg {
+            style = style.bg(bg);
+        }
+        let mut spans = Vec::new();
+        if line_no.is_some_and(|n| app.notes.iter().any(|note| note.path == rel && note.line == Some(n))) {
+            spans.push(Span::styled("\u{1f4cc}", Style::default().fg(theme::PINK).bg(bg.unwrap_or(theme::BG_PANEL))));
+        }
+        spans.push(Span::styled(dl.text.clone(), style));
+        lines.push(Line::from(spans).style(Style::default().bg(bg.unwrap_or(theme::BG_PANEL))));
+    }
+    if numbered.is_empty() {
+        lines.push(Line::from(Span::styled("(no diff content)", Style::default().fg(theme::DIM))));
+    }
+
+    f.render_widget(Paragraph::new(lines), rows[0]);
+    let divider = "\u{2500}".repeat(rows[1].width as usize);
+    f.render_widget(Paragraph::new(divider).style(Style::default().fg(theme::DIM)), rows[1]);
+    f.render_widget(Paragraph::new(hints), rows[2]);
 }
 
 fn draw_diff_split(f: &mut Frame, area: Rect, file: &FileEntry) {
     let title = format!("{} \u{2014} before / after", file.path);
-    let column_width = (area.width.saturating_sub(3) / 2) as usize;
 
     let mut before: Vec<Line<'static>> = Vec::new();
     let mut after: Vec<Line<'static>> = Vec::new();
@@ -250,15 +258,6 @@ fn draw_diff_split(f: &mut Frame, area: Rect, file: &FileEntry) {
         let max = before.len().max(after.len());
         before.resize(max, Line::raw(""));
         after.resize(max, Line::raw(""));
-        if let Some(note) = &hunk.note {
-            let prefix = "\u{bb} note to agent: ";
-            for l in wrap_note(note, prefix, column_width.max(20)) {
-                before.push(Line::from(Span::styled(l, Style::default().fg(theme::PINK).add_modifier(Modifier::BOLD))));
-            }
-            let max = before.len().max(after.len());
-            before.resize(max, Line::raw(""));
-            after.resize(max, Line::raw(""));
-        }
     }
 
     let block = super::panel_block(&title);

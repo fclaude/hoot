@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::data::{self, AgentLine, AgentLineKind, CurationFile, HoverInfo, Note, Project, SymbolResult, TreeEntry};
+use crate::data::{self, AgentLine, AgentLineKind, CurationFile, HoverInfo, Hunk, Note, Project, SymbolResult, TreeEntry};
 use crate::fsnav;
 use crate::keymap::{Action, Keymap};
 use crate::pi_client::{self, AgentEvent, PiSession, ToolProfile};
@@ -34,14 +34,19 @@ pub enum NavFocus {
     Content,
 }
 
-/// What the right-hand content pane shows for the currently open file.
-/// `Diff` is only available when the file has uncommitted changes;
-/// `open_file` defaults to it when there's a diff to show, otherwise falls
-/// back to `Source`. `ReviewToggleView` switches between them by hand.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// How the right-hand content pane shows the currently open file. Both
+/// variants show the *whole* file, not just isolated snippets — real
+/// diffs load with a huge context window (`gitreview::FULL_CONTEXT`), so
+/// there's no separate "plain source" state to fall back to: a file with
+/// no changes just renders as all-context, which looks exactly like plain
+/// source anyway. `Context` is the default; `Focused` collapses long
+/// unchanged stretches down to a few lines around each change.
+/// `ReviewToggleView` switches between them by hand, but only has any
+/// effect while the open file actually has a diff.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ContentView {
-    Diff,
-    Source,
+    Context,
+    Focused,
 }
 
 /// What an in-flight `pi` turn is for. `Chat` (the normal Agent-pane
@@ -75,6 +80,13 @@ pub struct App {
     pub content_view: ContentView,
     pub nav_file: PathBuf,
     pub source: Vec<String>,
+    /// `nav_file`'s diff, loaded with a huge context window
+    /// (`gitreview::file_diff_in_context`) — empty if the file has no
+    /// changes. Kept alongside `source` rather than recomputed from
+    /// `self.project.files` because it deliberately uses a *different*,
+    /// wider context than the small hunks Curation relies on for partial
+    /// commits; the two shouldn't be conflated into one field.
+    pub diff_context: Vec<Hunk>,
     pub nav_line: usize,
     pub nav_scroll_x: u16,
     pub hover: Option<HoverInfo>,
@@ -174,6 +186,17 @@ fn char_boundary(s: &str, n: usize) -> usize {
     s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
 }
 
+/// `file`'s whole-file-context diff, relative to `target_dir` — empty if
+/// `file` isn't inside `target_dir` at all (e.g. it still points at
+/// `target_dir` itself, the placeholder used when a repo has no files).
+fn diff_context_for(target_dir: &std::path::Path, file: &std::path::Path) -> Vec<Hunk> {
+    let Ok(rel) = file.strip_prefix(target_dir) else { return Vec::new() };
+    if rel.as_os_str().is_empty() {
+        return Vec::new();
+    }
+    crate::gitreview::file_diff_in_context(target_dir, &rel.display().to_string())
+}
+
 impl App {
     pub fn new(target_dir: PathBuf, keymap: Keymap) -> Self {
         let review = crate::gitreview::load(&target_dir);
@@ -181,6 +204,7 @@ impl App {
         let symbols = fsnav::scan_symbols(&target_dir);
         let nav_file = tree.iter().find(|e| !e.is_dir).map(|e| e.path.clone()).unwrap_or_else(|| target_dir.clone());
         let source = fsnav::read_file(&nav_file);
+        let diff_context = diff_context_for(&target_dir, &nav_file);
 
         let mut app = App {
             mode: Mode::Review,
@@ -196,9 +220,10 @@ impl App {
             tree,
             tree_index: 0,
             nav_focus: NavFocus::Tree,
-            content_view: ContentView::Source,
+            content_view: ContentView::Context,
             nav_file,
             source,
+            diff_context,
             nav_line: 0,
             nav_scroll_x: 0,
             hover: None,
@@ -277,7 +302,7 @@ impl App {
     /// Diff if the open file has uncommitted changes, source otherwise —
     /// the default `content_view` every time a different file is opened.
     fn default_content_view(&self) -> ContentView {
-        if self.current_diff_index().is_some() { ContentView::Diff } else { ContentView::Source }
+        ContentView::Context
     }
 
     /// Commits whatever's currently selected in Curation, for real.
@@ -348,7 +373,6 @@ impl App {
         if review.project.files == self.project.files {
             return;
         }
-        let had_diff = self.current_diff_index().is_some();
         for f in &mut review.project.files {
             if let Some(old) = self.project.files.iter().find(|o| o.path == f.path) {
                 f.flagged = old.flagged;
@@ -359,14 +383,10 @@ impl App {
         self.review_is_real = review.is_real;
         self.curation_files = review.curation_files;
         self.curation_index = self.curation_index.min(self.curation_files.len().saturating_sub(1));
-        // Only auto-switch the open file's view on an actual diff ↔
-        // no-diff transition for THAT file specifically (not just because
-        // something changed somewhere in the repo) — otherwise a manual
-        // toggle to Source for the open file would get yanked back to
-        // Diff just because some unrelated file's diff changed elsewhere.
-        let has_diff = self.current_diff_index().is_some();
-        if had_diff != has_diff {
-            self.content_view = if has_diff { ContentView::Diff } else { ContentView::Source };
+        // `Focused` has nothing to show once there's no diff left to focus
+        // on — fall back to `Context`, which renders fine either way.
+        if self.current_diff_index().is_none() {
+            self.content_view = ContentView::Context;
         }
     }
 
@@ -387,13 +407,15 @@ impl App {
         let new_source = fsnav::read_file(&self.nav_file);
         if new_source != self.source {
             self.source = new_source;
-            self.nav_line = self.nav_line.min(self.source.len().saturating_sub(1));
+            self.diff_context = diff_context_for(&self.target_dir, &self.nav_file);
+            self.nav_line = self.nav_line.min(self.content_line_count().saturating_sub(1));
             self.refresh_hover();
         }
     }
 
     fn open_file(&mut self, path: PathBuf) {
         self.source = fsnav::read_file(&path);
+        self.diff_context = diff_context_for(&self.target_dir, &path);
         self.nav_file = path;
         self.nav_line = 0;
         self.nav_scroll_x = 0;
@@ -402,6 +424,14 @@ impl App {
     }
 
     fn refresh_hover(&mut self) {
+        // `nav_line` indexes into whatever's currently on screen — when
+        // that's a diff view, it isn't a position in `self.source` at all
+        // (a diff has a different length: removed lines are shown too,
+        // and `Focused` collapses stretches), so hover just doesn't apply.
+        if self.current_diff_index().is_some() {
+            self.hover = None;
+            return;
+        }
         self.hover = self.source.get(self.nav_line).and_then(|line| {
             let sym = fsnav::hover_for_line(&self.symbols, line)?;
             let references = fsnav::reference_count(&self.target_dir, &sym.name);
@@ -662,11 +692,11 @@ impl App {
     /// clamped to its bounds. `tree_len` is passed in since the tree and
     /// source have different lengths and only one is relevant per call.
     fn move_nav_focus(&mut self, delta: i64, tree_len: usize) {
-        if self.moves_the_tree() {
+        if self.nav_focus == NavFocus::Tree {
             self.tree_index = clamped_move(self.tree_index, delta, tree_len);
             self.preview_tree_selection();
         } else {
-            self.nav_line = clamped_move(self.nav_line, delta, self.source.len());
+            self.nav_line = clamped_move(self.nav_line, delta, self.content_line_count());
             if self.show_hover {
                 self.refresh_hover();
             }
@@ -676,26 +706,75 @@ impl App {
     /// Jumps the focused pane's index directly to `target` (clamped to its
     /// bounds) — `usize::MAX` means "the last entry".
     fn jump_nav_focus(&mut self, target: usize, tree_len: usize) {
-        if self.moves_the_tree() {
+        if self.nav_focus == NavFocus::Tree {
             self.tree_index = target.min(tree_len.saturating_sub(1));
             self.preview_tree_selection();
         } else {
-            self.nav_line = target.min(self.source.len().saturating_sub(1));
+            self.nav_line = target.min(self.content_line_count().saturating_sub(1));
             if self.show_hover {
                 self.refresh_hover();
             }
         }
     }
 
-    /// Whether Up/Down/PageUp/PageDown/Home/End currently move the tree
-    /// cursor rather than the source line cursor. True when Tree is
-    /// focused, but *also* when Content is focused and showing a Diff —
-    /// a diff has no line cursor to move (it isn't scrollable), so without
-    /// this, movement there would silently do nothing instead of doing the
-    /// obviously-intended thing: cycling to the next/previous file, same
-    /// as the old Steer screen's Up/Down.
-    fn moves_the_tree(&self) -> bool {
-        self.nav_focus == NavFocus::Tree || self.content_view == ContentView::Diff
+    /// How many rows the content pane currently has — the plain file's
+    /// line count when there's no diff to show, otherwise however many
+    /// rows the active `ContentView` renders (a diff has a different
+    /// length than the file itself: removed lines are shown too, and
+    /// `Focused` collapses unchanged stretches). Clamps `nav_line` to
+    /// whatever's actually on screen.
+    fn content_line_count(&self) -> usize {
+        match self.current_diff_content_lines() {
+            Some(lines) => lines.len(),
+            None => self.source.len(),
+        }
+    }
+
+    /// The open file's diff, numbered with current-file line numbers and
+    /// collapsed to match whichever `ContentView` is active — `None` if
+    /// the file has no diff at all (plain source browsing instead).
+    /// Shared by `content_line_count` and `current_content_line_number` so
+    /// they can't disagree about what's actually on screen.
+    fn current_diff_content_lines(&self) -> Option<Vec<(Option<usize>, data::DiffLine)>> {
+        self.current_diff_index()?;
+        let numbered = data::diff_lines_with_file_line_numbers(&self.diff_context);
+        Some(match self.content_view {
+            ContentView::Context => numbered,
+            ContentView::Focused => data::focus_diff_lines(&numbered, 3),
+        })
+    }
+
+    /// The file line number the cursor (`nav_line`) currently corresponds
+    /// to, for line-scoped review comments — `None` if there's nothing
+    /// sensible to attach a note to at that exact position (an empty
+    /// file, a `Removed` line that no longer exists in the current file,
+    /// or a collapsed "unchanged" placeholder in `Focused` view).
+    fn current_content_line_number(&self) -> Option<usize> {
+        match self.current_diff_content_lines() {
+            Some(lines) => lines.get(self.nav_line).and_then(|(n, _)| *n),
+            None => {
+                if self.source.is_empty() {
+                    None
+                } else {
+                    Some(self.nav_line + 1)
+                }
+            }
+        }
+    }
+
+    /// The `nav_line` row that shows 1-based `file_line` of the file
+    /// that's open *right now* — used to land on the right row after a
+    /// symbol jump or file-finder open, regardless of whether the content
+    /// pane ends up showing plain source or a diff (which can have a
+    /// different row for the same file line, since removed lines are
+    /// shown too). Always resolves against `Context`, never `Focused`,
+    /// since a `Focused` view can collapse the exact target line away.
+    fn nav_line_for_file_line(&self, file_line: usize) -> usize {
+        if self.current_diff_index().is_none() {
+            return file_line.saturating_sub(1).min(self.source.len().saturating_sub(1));
+        }
+        let numbered = data::diff_lines_with_file_line_numbers(&self.diff_context);
+        numbered.iter().position(|(n, _)| *n == Some(file_line)).unwrap_or(0).min(numbered.len().saturating_sub(1))
     }
 
     /// Live-previews whatever file the tree cursor currently points at in
@@ -739,11 +818,13 @@ impl App {
                 NavFocus::Content => NavFocus::Tree,
             };
         } else if k.is(&key, Action::ReviewScrollLeft) {
-            if self.nav_focus == NavFocus::Content && self.content_view == ContentView::Source {
+            // Horizontal scroll only makes sense for plain source: diff
+            // lines wrap/scroll differently and don't support it.
+            if self.nav_focus == NavFocus::Content && self.current_diff_index().is_none() {
                 self.nav_scroll_x = self.nav_scroll_x.saturating_sub(4);
             }
         } else if k.is(&key, Action::ReviewScrollRight) {
-            if self.nav_focus == NavFocus::Content && self.content_view == ContentView::Source {
+            if self.nav_focus == NavFocus::Content && self.current_diff_index().is_none() {
                 self.nav_scroll_x = self.nav_scroll_x.saturating_add(4);
             }
         } else if k.is(&key, Action::ReviewToggleHover) {
@@ -756,9 +837,10 @@ impl App {
         } else if k.is(&key, Action::ReviewToggleView) {
             if self.current_diff_index().is_some() {
                 self.content_view = match self.content_view {
-                    ContentView::Diff => ContentView::Source,
-                    ContentView::Source => ContentView::Diff,
+                    ContentView::Context => ContentView::Focused,
+                    ContentView::Focused => ContentView::Context,
                 };
+                self.nav_line = 0; // the two views have different lengths
             }
         } else if k.is(&key, Action::ReviewMarkGood) {
             if let Some(i) = self.current_diff_index() {
@@ -784,14 +866,16 @@ impl App {
             self.iterate_draft = self.build_iterate_prompt();
             self.open_editor_requested = Some(EditorTarget::IteratePrompt);
         } else if k.is(&key, Action::ReviewComment) {
-            // In Source view with the content pane focused, a comment is
-            // scoped to the current line; otherwise (Tree focused, or Diff
-            // view) it's scoped to the whole file.
-            if self.nav_focus == NavFocus::Content && self.content_view == ContentView::Source {
-                if !self.source.is_empty() {
-                    let rel = self.nav_file.strip_prefix(&self.target_dir).unwrap_or(&self.nav_file).display().to_string();
-                    self.open_note_input(rel, Some(self.nav_line + 1));
-                }
+            // With the content pane focused, a comment is scoped to
+            // whatever line the cursor is actually on — works the same
+            // whether that's plain source or a diff. Otherwise (Tree
+            // focused, or the cursor's on a line with no clean file-line
+            // mapping — a removed line, or a `Focused`-view placeholder)
+            // it falls back to a whole-file comment.
+            let line_target = if self.nav_focus == NavFocus::Content { self.current_content_line_number() } else { None };
+            if let Some(line) = line_target {
+                let rel = self.nav_file.strip_prefix(&self.target_dir).unwrap_or(&self.nav_file).display().to_string();
+                self.open_note_input(rel, Some(line));
             } else if let Some(i) = self.current_diff_index() {
                 let path = self.project.files[i].path.clone();
                 self.open_note_input(path, None);
@@ -861,10 +945,11 @@ impl App {
                 let path = sym.path.clone();
                 let line = sym.line;
                 self.open_file(path);
-                self.nav_line = line.saturating_sub(1).min(self.source.len().saturating_sub(1));
-                // Jumping to a symbol means "read this code", regardless
-                // of whether the file also happens to have a pending diff.
-                self.content_view = ContentView::Source;
+                // Always land on Context (never Focused): Focused can
+                // collapse the exact target line away if it's not near a
+                // change, but Context always has every line.
+                self.content_view = ContentView::Context;
+                self.nav_line = self.nav_line_for_file_line(line);
                 self.nav_focus = NavFocus::Content;
                 self.refresh_hover();
             }
@@ -918,7 +1003,7 @@ impl App {
             if let Some(&i) = self.filtered_files().get(self.file_finder_index) {
                 let path = self.tree[i].path.clone();
                 self.open_file(path);
-                self.content_view = ContentView::Source;
+                self.content_view = ContentView::Context;
                 self.nav_focus = NavFocus::Content;
             }
             self.overlay = Overlay::None;
@@ -1234,6 +1319,61 @@ mod tests {
         assert!(app.split_diff);
         app.on_key(key(KeyCode::Char('u')));
         assert!(!app.split_diff);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn context_view_shows_the_whole_file_and_focused_collapses_it() {
+        let dir = scratch_repo("context-vs-focused");
+        let content: String = (1..=30).map(|n| format!("line{n}\n")).collect();
+        commit_file(&dir, "big.rs", &content);
+        let mut lines: Vec<String> = (1..=30).map(|n| format!("line{n}")).collect();
+        lines[0] = "line1-CHANGED".to_string();
+        fs::write(dir.join("big.rs"), lines.join("\n") + "\n").unwrap();
+
+        let app = App::new(dir.clone(), Keymap::defaults());
+        assert!(app.current_diff_index().is_some(), "big.rs should have a diff");
+        assert_eq!(app.content_view, ContentView::Context, "Context is always the default");
+        // 30 file lines, but a *modified* line1 is a Removed+Added pair
+        // (git diff has no "changed line" concept), so Context has 31 rows:
+        // 29 unchanged as Context, plus the removed old line1 and the
+        // added new line1.
+        assert_eq!(app.content_line_count(), 31);
+
+        let mut app = app;
+        app.on_key(key(KeyCode::Char('v')));
+        assert_eq!(app.content_view, ContentView::Focused);
+        assert!(app.content_line_count() < 31, "Focused should collapse the long unchanged stretch");
+
+        app.on_key(key(KeyCode::Char('v')));
+        assert_eq!(app.content_view, ContentView::Context, "'v' toggles back");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn line_scoped_comment_targets_the_correct_file_line_in_a_diff() {
+        let dir = scratch_repo("diff-line-comment");
+        let content: String = (1..=10).map(|n| format!("line{n}\n")).collect();
+        commit_file(&dir, "f.rs", &content);
+        let mut lines: Vec<String> = (1..=10).map(|n| format!("line{n}")).collect();
+        lines[4] = "line5-CHANGED".to_string(); // line 5, 0-indexed 4
+        fs::write(dir.join("f.rs"), lines.join("\n") + "\n").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(key(KeyCode::Tab)); // focus content
+        // Rows: line1..line4 (context, 4 rows) then the old "line5"
+        // (removed) then "line5-CHANGED" (added, file line 5) — 5 Downs
+        // from row 0 lands on that added row.
+        for _ in 0..5 {
+            app.on_key(key(KeyCode::Down));
+        }
+        assert_eq!(app.current_content_line_number(), Some(5), "cursor should be on file line 5");
+
+        app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(app.overlay, Overlay::NoteInput);
+        assert_eq!(app.note_target, Some(("f.rs".to_string(), Some(5))));
 
         let _ = fs::remove_dir_all(&dir);
     }

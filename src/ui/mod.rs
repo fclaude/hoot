@@ -236,6 +236,46 @@ mod tests {
     }
 
     #[test]
+    fn review_context_view_shows_the_whole_file_not_just_the_hunk() {
+        // A change on line 1 of a much longer file — under git's default
+        // -U3 this wouldn't show line 30 at all, but Context mode loads
+        // with a huge window specifically so the whole file is visible in
+        // place around the change, not just a few lines of context.
+        let dir = scratch_repo("context-whole-file");
+        let content: String = (1..=30).map(|n| format!("line{n}\n")).collect();
+        commit_file(&dir, "big.rs", &content);
+        let mut lines: Vec<String> = (1..=30).map(|n| format!("line{n}")).collect();
+        lines[0] = "line1-CHANGED".to_string();
+        fs::write(dir.join("big.rs"), lines.join("\n") + "\n").unwrap();
+
+        let app = App::new(dir.clone(), Keymap::defaults());
+        let screen = render(&app, 120, 40);
+        assert!(screen.contains("line1-CHANGED"), "{screen}");
+        assert!(screen.contains("line30"), "whole file should be visible, not just a window around the change: {screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_focused_view_collapses_unchanged_stretches() {
+        let dir = scratch_repo("focused-collapse");
+        let content: String = (1..=30).map(|n| format!("line{n}\n")).collect();
+        commit_file(&dir, "big.rs", &content);
+        let mut lines: Vec<String> = (1..=30).map(|n| format!("line{n}")).collect();
+        lines[0] = "line1-CHANGED".to_string();
+        fs::write(dir.join("big.rs"), lines.join("\n") + "\n").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults());
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        let screen = render(&app, 120, 40);
+        assert!(screen.contains("line1-CHANGED"), "{screen}");
+        assert!(screen.contains("unchanged"), "far-away unchanged lines should collapse: {screen}");
+        assert!(!screen.contains("line30"), "line30 is far from the only change, should be collapsed away: {screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn review_screen_falls_back_to_source_browsing_on_a_clean_repo() {
         // Unlike the old separate Steer screen (which showed a blocking
         // "nothing to review" message), the merged screen stays useful on a

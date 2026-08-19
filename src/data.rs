@@ -47,6 +47,81 @@ pub struct FileEntry {
     pub hunks: Vec<Hunk>,
 }
 
+/// `hunks` flattened into one line sequence and paired with the
+/// corresponding line number in the *current* file content — `None` for a
+/// `Removed` line, since those no longer exist in the current file.
+/// Hunk-header lines are dropped entirely (they're structural, not file
+/// content). Called with a whole-file-context diff
+/// (`gitreview::file_diff_in_context`), this reconstructs the entire
+/// current file in order, changes overlaid — not just isolated snippets
+/// around each change. Powers both the whole-file diff view and
+/// line-scoped review comments.
+pub fn diff_lines_with_file_line_numbers(hunks: &[Hunk]) -> Vec<(Option<usize>, DiffLine)> {
+    let mut out = Vec::new();
+    for hunk in hunks {
+        let mut line_no =
+            hunk.lines.first().filter(|l| l.kind == DiffLineKind::HunkHeader).and_then(|l| parse_hunk_new_start(&l.text)).unwrap_or(1);
+        for dl in &hunk.lines {
+            match dl.kind {
+                DiffLineKind::HunkHeader => continue,
+                DiffLineKind::Removed => out.push((None, dl.clone())),
+                DiffLineKind::Context | DiffLineKind::Added => {
+                    out.push((Some(line_no), dl.clone()));
+                    line_no += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Extracts the new-file starting line number from a hunk header like
+/// `@@ -12,7 +18,11 @@ impl Foo {` — the `18` after the `+`.
+fn parse_hunk_new_start(header: &str) -> Option<usize> {
+    let plus = header.split('+').nth(1)?;
+    let num = plus.split(|c: char| c == ',' || c == ' ').next()?;
+    num.parse().ok()
+}
+
+/// Collapses long unchanged stretches of `lines` down to `context` lines
+/// immediately around each `Added`/`Removed` line, replacing anything
+/// longer with a single placeholder line (paired with `None`, since it
+/// doesn't correspond to any one line) — the compact "just the changes"
+/// style, derived from the same full-context, numbered lines the
+/// whole-file view uses rather than a second, separately-loaded diff.
+pub fn focus_diff_lines(lines: &[(Option<usize>, DiffLine)], context: usize) -> Vec<(Option<usize>, DiffLine)> {
+    let changed: Vec<usize> =
+        lines.iter().enumerate().filter(|(_, (_, l))| matches!(l.kind, DiffLineKind::Added | DiffLineKind::Removed)).map(|(i, _)| i).collect();
+    if changed.is_empty() {
+        return Vec::new();
+    }
+    let mut keep = vec![false; lines.len()];
+    for &i in &changed {
+        let lo = i.saturating_sub(context);
+        let hi = (i + context).min(lines.len().saturating_sub(1));
+        for k in keep.iter_mut().take(hi + 1).skip(lo) {
+            *k = true;
+        }
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if keep[i] {
+            out.push(lines[i].clone());
+            i += 1;
+        } else {
+            let start = i;
+            while i < lines.len() && !keep[i] {
+                i += 1;
+            }
+            let n = i - start;
+            let text = format!("\u{22ef} {n} unchanged line{} \u{22ef}", if n == 1 { "" } else { "s" });
+            out.push((None, DiffLine { kind: DiffLineKind::HunkHeader, text }));
+        }
+    }
+    out
+}
+
 pub struct Project {
     pub name: String,
     pub root: String,

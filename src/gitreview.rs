@@ -56,11 +56,14 @@ fn is_git_repo(root: &Path) -> bool {
 /// falls back to a plain working-tree diff (e.g. a repo with zero commits).
 /// Appends untracked files too — plain `git diff` never shows those (they
 /// aren't in the index at all), which would otherwise make a file the
-/// agent just created invisible to Steer until it's staged.
+/// agent just created invisible to Steer until it's staged. Uses git's
+/// default (small) context window — this is the canonical hunk breakdown
+/// Curation's per-hunk selection and partial commits rely on, so it needs
+/// real, separate hunk boundaries, not one hunk spanning the whole file.
+/// See `file_diff_in_context` for the Review screen's whole-file view.
 fn run_git_diff(root: &Path) -> String {
     let has_head = git(root, &["rev-parse", "--verify", "-q", "HEAD"]).map(|o| o.status.success()).unwrap_or(false);
-    let args: &[&str] =
-        if has_head { &["diff", "HEAD", "--no-color", "-U3"] } else { &["diff", "--no-color", "-U3"] };
+    let args: &[&str] = if has_head { &["diff", "HEAD", "--no-color"] } else { &["diff", "--no-color"] };
     let mut diff = git(root, args).map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
     diff.push_str(&untracked_files_diff(root));
     diff
@@ -76,11 +79,40 @@ fn untracked_files_diff(root: &Path) -> String {
     };
     let mut diff = String::new();
     for path in String::from_utf8_lossy(&listing.stdout).lines().filter(|l| !l.is_empty()) {
-        if let Some(out) = git(root, &["diff", "--no-color", "-U3", "--no-index", "/dev/null", path]) {
+        if let Some(out) = git(root, &["diff", "--no-color", "--no-index", "/dev/null", path]) {
             diff.push_str(&String::from_utf8_lossy(&out.stdout));
         }
     }
     diff
+}
+
+/// A context window comfortably larger than any real source file, so a
+/// hunk's context lines cover the *entire* file rather than just a few
+/// lines around each change — used only for `file_diff_in_context`, never
+/// for the canonical per-file hunk breakdown `run_git_diff` returns.
+const FULL_CONTEXT: &str = "-U100000";
+
+/// The single file `rel_path`'s diff, loaded with a huge context window so
+/// (in practice) one hunk reconstructs the entire current file in order,
+/// changes overlaid in place — what the Review screen's content pane
+/// shows, as opposed to the small, separately-loaded hunks `run_git_diff`
+/// returns for Curation. `rel_path` is relative to `root`. Returns an
+/// empty list for a file with no changes (or that doesn't exist).
+pub fn file_diff_in_context(root: &Path, rel_path: &str) -> Vec<Hunk> {
+    let has_head = git(root, &["rev-parse", "--verify", "-q", "HEAD"]).map(|o| o.status.success()).unwrap_or(false);
+    let tracked_diff = if has_head {
+        git(root, &["diff", "HEAD", "--no-color", FULL_CONTEXT, "--", rel_path])
+    } else {
+        git(root, &["diff", "--no-color", FULL_CONTEXT, "--", rel_path])
+    };
+    let mut diff = tracked_diff.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    if diff.trim().is_empty() {
+        // Not a tracked change — might be untracked entirely.
+        if let Some(out) = git(root, &["diff", "--no-color", FULL_CONTEXT, "--no-index", "/dev/null", rel_path]) {
+            diff = String::from_utf8_lossy(&out.stdout).to_string();
+        }
+    }
+    parse_unified_diff(&diff).into_iter().next().map(|f| f.hunks).unwrap_or_default()
 }
 
 fn parse_unified_diff(diff: &str) -> Vec<FileEntry> {
