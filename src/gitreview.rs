@@ -104,7 +104,7 @@ fn parse_unified_diff(diff: &str) -> Vec<FileEntry> {
     for line in diff.lines() {
         if let Some(path) = line.strip_prefix("diff --git ").map(parse_diff_git_path) {
             flush_file(&mut files, &mut current, &mut current_hunk);
-            current = Some(FileEntry { path, hunk_count: 0, notes: 0, selected: true, flagged: false, hunks: Vec::new() });
+            current = Some(FileEntry { path, hunk_count: 0, notes: 0, flagged: false, hunks: Vec::new() });
         } else if line.starts_with("@@ ") {
             if let Some(f) = current.as_mut() {
                 flush_hunk(f, &mut current_hunk);
@@ -173,7 +173,6 @@ index 3333333..4444444 100644
         assert_eq!(main_rs.path, "src/main.rs");
         assert_eq!(main_rs.hunks.len(), 1);
         assert_eq!(main_rs.hunk_count, 1);
-        assert!(main_rs.selected);
         assert!(!main_rs.flagged);
 
         let readme = &files[1];

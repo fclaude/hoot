@@ -90,7 +90,7 @@ fn draw_preview(f: &mut Frame, app: &App, entry: Option<&crate::data::TreeEntry>
     let content = crate::fsnav::read_file(&entry.path);
     let visible = area.height.saturating_sub(2) as usize;
     for src_line in content.iter().take(visible) {
-        lines.push(super::navigate::highlighted_line(&ext, src_line, None));
+        lines.push(super::review::highlighted_line(&ext, src_line, None));
     }
 
     f.render_widget(Paragraph::new(lines), area);

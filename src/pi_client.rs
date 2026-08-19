@@ -1,9 +1,5 @@
 //! Drives a real `pi` coding-agent subprocess (https://github.com/earendil-works/pi)
 //! and streams its `--mode json` NDJSON event log back as [`AgentEvent`]s.
-//!
-//! `pi` already supports routing through OpenAI's Codex via
-//! `--provider openai-codex`, so "codex" is exposed here as a selectable
-//! [`Backend`] rather than a second, separate integration.
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -12,35 +8,6 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use serde_json::Value;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Backend {
-    Pi,
-    PiCodex,
-}
-
-impl Backend {
-    pub fn label(self) -> &'static str {
-        match self {
-            Backend::Pi => "pi",
-            Backend::PiCodex => "pi \u{2192} openai-codex",
-        }
-    }
-
-    pub fn toggled(self) -> Backend {
-        match self {
-            Backend::Pi => Backend::PiCodex,
-            Backend::PiCodex => Backend::Pi,
-        }
-    }
-
-    fn extra_args(self) -> &'static [&'static str] {
-        match self {
-            Backend::Pi => &[],
-            Backend::PiCodex => &["--provider", "openai-codex"],
-        }
-    }
-}
 
 pub enum AgentEvent {
     Model(String),
@@ -83,26 +50,18 @@ impl ToolProfile {
 }
 
 /// Spawns `pi --mode json --print --session <file> --tools <profile>
-/// [backend args] <prompt>` in `cwd` and streams parsed events back over a
-/// channel. Non-blocking: stdout and stderr are each read on their own
-/// thread.
+/// <prompt>` in `cwd` and streams parsed events back over a channel.
+/// Non-blocking: stdout and stderr are each read on their own thread.
 ///
 /// `session_file` (not `--session-id`) is what makes cross-turn memory
 /// actually work: `pi` scopes `--session-id <id>` lookups by *both* the id
 /// and the current working directory (it's a "project session"), so a turn
-/// run from a different `cwd` — e.g. Steer's sandboxed Edit-mode turns,
-/// which run inside a disposable git-worktree, not the real target dir —
-/// silently gets a brand-new, empty session even with the same id. Passing
-/// an explicit file via `--session` bypasses that cwd scoping entirely:
-/// `pi` creates the file on first use and resumes it exactly on every call
-/// after, regardless of which directory the call runs from.
-pub fn spawn(
-    prompt: &str,
-    cwd: &Path,
-    backend: Backend,
-    session_file: &Path,
-    tools: ToolProfile,
-) -> std::io::Result<PiSession> {
+/// run from a different `cwd` would silently get a brand-new, empty
+/// session even with the same id. Passing an explicit file via `--session`
+/// bypasses that cwd scoping entirely: `pi` creates the file on first use
+/// and resumes it exactly on every call after, regardless of which
+/// directory the call runs from.
+pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) -> std::io::Result<PiSession> {
     let mut cmd = Command::new("pi");
     cmd.arg("--mode")
         .arg("json")
@@ -112,7 +71,6 @@ pub fn spawn(
         .arg(session_file)
         .arg("--tools")
         .arg(tools.tools_arg())
-        .args(backend.extra_args())
         .arg(prompt)
         .current_dir(cwd)
         .stdout(Stdio::piped())

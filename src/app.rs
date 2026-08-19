@@ -7,12 +7,14 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::data::{self, AgentLine, AgentLineKind, CurationFile, HoverInfo, Note, Project, SymbolResult, TreeEntry};
 use crate::fsnav;
 use crate::keymap::{Action, Keymap};
-use crate::pi_client::{self, AgentEvent, Backend, PiSession, ToolProfile};
+use crate::pi_client::{self, AgentEvent, PiSession, ToolProfile};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    Steer,
-    Navigate,
+    /// Merged file tree + change review: browse the repo and see each
+    /// file's diff (if it has uncommitted changes) or plain source
+    /// (otherwise) in the same screen — see `ContentView`.
+    Review,
     Agent,
     Curation,
 }
@@ -25,10 +27,20 @@ pub enum Overlay {
     NoteInput,
 }
 
-/// Which Navigate pane arrow keys currently move.
+/// Which pane arrow keys currently move.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NavFocus {
     Tree,
+    Content,
+}
+
+/// What the right-hand content pane shows for the currently open file.
+/// `Diff` is only available when the file has uncommitted changes;
+/// `open_file` defaults to it when there's a diff to show, otherwise falls
+/// back to `Source`. `ReviewToggleView` switches between them by hand.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ContentView {
+    Diff,
     Source,
 }
 
@@ -53,16 +65,14 @@ pub struct App {
     /// diff` and re-reading the tree ten times a second.
     last_fs_poll: Instant,
 
-    // STEER
+    // REVIEW
     pub project: Project,
     pub review_is_real: bool,
-    pub steer_selected: usize,
-    pub steer_split: bool,
-
-    // NAVIGATE
+    pub split_diff: bool,
     pub tree: Vec<TreeEntry>,
     pub tree_index: usize,
     pub nav_focus: NavFocus,
+    pub content_view: ContentView,
     pub nav_file: PathBuf,
     pub source: Vec<String>,
     pub nav_line: usize,
@@ -79,11 +89,14 @@ pub struct App {
     pub file_finder_filter: String,
     pub file_finder_index: usize,
 
-    // NOTES (real free-text review notes, from Steer or Navigate)
+    // NOTES (real free-text review notes, left while reviewing)
     pub notes: Vec<Note>,
     pub(crate) note_target: Option<(String, Option<usize>)>,
     pub note_input: String,
     pub note_cursor: usize,
+    /// The assembled iterate prompt, shown in `$EDITOR` for a last-pass
+    /// edit (via `EditorTarget::IteratePrompt`) before it's ever sent.
+    pub iterate_draft: String,
 
     // AGENT
     pub target_dir: PathBuf,
@@ -104,15 +117,10 @@ pub struct App {
     /// the latest content (and stays pinned as new lines arrive).
     pub agent_scroll: usize,
     pub agent_model_live: Option<String>,
-    pub backend: Backend,
     pub agent_running: bool,
     pub demo_transcript: bool,
     pi_session: Option<PiSession>,
     agent_purpose: TurnPurpose,
-    /// Chat (read-only) vs Edit (writes go straight to `target_dir`, since
-    /// it's already a real git repo — Steer's diff view plus `git` itself
-    /// are the review/undo mechanism, same as any other change to the repo).
-    pub edit_mode: bool,
 
     // CURATION
     pub curation_files: Vec<CurationFile>,
@@ -120,10 +128,18 @@ pub struct App {
     pub commit_message: String,
     pub commit_message_status: Option<String>,
     pub editing_commit: bool,
-    /// Set true to ask main.rs's event loop to suspend the TUI and open
-    /// $EDITOR on `commit_message` — App itself doesn't own the Terminal.
-    pub open_editor_requested: bool,
+    /// Set to ask main.rs's event loop to suspend the TUI and open $EDITOR
+    /// on the buffer named by the target — App itself doesn't own the
+    /// Terminal, so it can only request the suspend/resume, not do it.
+    pub open_editor_requested: Option<EditorTarget>,
     pub last_commit: Option<Result<String, String>>,
+}
+
+/// Which buffer a requested `$EDITOR` session is for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EditorTarget {
+    CommitMessage,
+    IteratePrompt,
 }
 
 /// How often `sync_from_disk` re-reads the repo to pick up changes made
@@ -134,7 +150,7 @@ pub struct App {
 /// notification-based dependency and its own failure modes.
 const FS_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
-/// Lines per Page Up/Page Down in Navigate. app.rs doesn't know the actual
+/// Lines per Page Up/Page Down in Review. app.rs doesn't know the actual
 /// rendered pane height, so this is a fixed, editor-typical step rather
 /// than a true screen-relative page.
 const PAGE_SIZE: usize = 20;
@@ -167,7 +183,7 @@ impl App {
         let source = fsnav::read_file(&nav_file);
 
         let mut app = App {
-            mode: Mode::Steer,
+            mode: Mode::Review,
             overlay: Overlay::None,
             should_quit: false,
             keymap,
@@ -175,12 +191,12 @@ impl App {
 
             project: review.project,
             review_is_real: review.is_real,
-            steer_selected: 0,
-            steer_split: false,
+            split_diff: false,
 
             tree,
             tree_index: 0,
             nav_focus: NavFocus::Tree,
+            content_view: ContentView::Source,
             nav_file,
             source,
             nav_line: 0,
@@ -199,6 +215,7 @@ impl App {
             note_target: None,
             note_input: String::new(),
             note_cursor: 0,
+            iterate_draft: String::new(),
 
             target_dir,
             session_file: std::env::temp_dir().join(format!("steer-session-{}.jsonl", std::process::id())),
@@ -207,12 +224,10 @@ impl App {
             agent_cursor: 0,
             agent_scroll: 0,
             agent_model_live: None,
-            backend: Backend::Pi,
             agent_running: false,
             demo_transcript: true,
             pi_session: None,
             agent_purpose: TurnPurpose::Chat,
-            edit_mode: false,
 
             curation_files: review.curation_files,
             curation_index: 0,
@@ -221,9 +236,10 @@ impl App {
             commit_message: if review.is_real { String::new() } else { data::mock_commit_message() },
             commit_message_status: None,
             editing_commit: false,
-            open_editor_requested: false,
+            open_editor_requested: None,
             last_commit: None,
         };
+        app.content_view = app.default_content_view();
         app.refresh_hover();
         app
     }
@@ -235,10 +251,33 @@ impl App {
         self.project = review.project;
         self.review_is_real = review.is_real;
         self.curation_files = review.curation_files;
-        self.steer_selected = 0;
         self.curation_index = 0;
         self.commit_message.clear();
         self.commit_message_status = None;
+        self.content_view = self.default_content_view();
+    }
+
+    /// `self.project.files`' index for `path` (relative to `target_dir`),
+    /// if that file has any uncommitted changes — the source of truth for
+    /// whether the content pane *can* show a diff at all. `pub(crate)` so
+    /// `ui::review` can annotate tree rows for files other than the one
+    /// currently open.
+    pub(crate) fn diff_index_for(&self, path: &std::path::Path) -> Option<usize> {
+        let rel = path.strip_prefix(&self.target_dir).unwrap_or(path).display().to_string();
+        self.project.files.iter().position(|f| f.path == rel)
+    }
+
+    /// `diff_index_for` on the currently open file — which file (if any)
+    /// in `self.project.files` the content pane's diff view refers to.
+    /// `pub(crate)` so `ui::review` can decide what to render.
+    pub(crate) fn current_diff_index(&self) -> Option<usize> {
+        self.diff_index_for(&self.nav_file)
+    }
+
+    /// Diff if the open file has uncommitted changes, source otherwise —
+    /// the default `content_view` every time a different file is opened.
+    fn default_content_view(&self) -> ContentView {
+        if self.current_diff_index().is_some() { ContentView::Diff } else { ContentView::Source }
     }
 
     /// Commits whatever's currently selected in Curation, for real.
@@ -251,12 +290,40 @@ impl App {
         }
     }
 
+    /// Called by main.rs once the suspended `$EDITOR` session for
+    /// `EditorTarget::CommitMessage` returns.
+    pub fn finish_editing_commit_message(&mut self, result: Result<String, String>) {
+        match result {
+            Ok(text) => self.commit_message = text.trim_end().to_string(),
+            Err(e) => self.commit_message_status = Some(e),
+        }
+    }
+
+    /// Called by main.rs once the suspended `$EDITOR` session for
+    /// `EditorTarget::IteratePrompt` returns. An empty (or all-deleted)
+    /// buffer cancels the send — that's how you back out of iterating
+    /// after seeing the assembled prompt.
+    pub fn finish_editing_iterate_prompt(&mut self, result: Result<String, String>) {
+        match result {
+            Ok(text) => {
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    self.mode = Mode::Agent;
+                    self.start_agent_turn(text);
+                }
+            }
+            Err(e) => {
+                self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("Error opening editor: {e}") });
+            }
+        }
+    }
+
     /// Called every event-loop tick; re-reads the repo from disk at most
     /// once per `FS_POLL_INTERVAL` and folds in anything that changed
     /// outside steer — a `pi` run in another terminal, an editor, `git` on
-    /// the command line. Keeps Steer and Navigate usable as a pure
-    /// review/browsing layer even when whatever's making the changes isn't
-    /// steer's own Agent pane.
+    /// the command line. Keeps Review usable as a pure review/browsing
+    /// layer even when whatever's making the changes isn't steer's own
+    /// Agent pane.
     pub fn sync_from_disk(&mut self) {
         if self.last_fs_poll.elapsed() < FS_POLL_INTERVAL {
             return;
@@ -281,9 +348,9 @@ impl App {
         if review.project.files == self.project.files {
             return;
         }
+        let had_diff = self.current_diff_index().is_some();
         for f in &mut review.project.files {
             if let Some(old) = self.project.files.iter().find(|o| o.path == f.path) {
-                f.selected = old.selected;
                 f.flagged = old.flagged;
                 f.notes = old.notes;
             }
@@ -291,8 +358,16 @@ impl App {
         self.project = review.project;
         self.review_is_real = review.is_real;
         self.curation_files = review.curation_files;
-        self.steer_selected = self.steer_selected.min(self.project.files.len().saturating_sub(1));
         self.curation_index = self.curation_index.min(self.curation_files.len().saturating_sub(1));
+        // Only auto-switch the open file's view on an actual diff ↔
+        // no-diff transition for THAT file specifically (not just because
+        // something changed somewhere in the repo) — otherwise a manual
+        // toggle to Source for the open file would get yanked back to
+        // Diff just because some unrelated file's diff changed elsewhere.
+        let has_diff = self.current_diff_index().is_some();
+        if had_diff != has_diff {
+            self.content_view = if has_diff { ContentView::Diff } else { ContentView::Source };
+        }
     }
 
     /// Re-scans the file tree and re-reads the currently open source file,
@@ -322,6 +397,7 @@ impl App {
         self.nav_file = path;
         self.nav_line = 0;
         self.nav_scroll_x = 0;
+        self.content_view = self.default_content_view();
         self.refresh_hover();
     }
 
@@ -341,20 +417,17 @@ impl App {
         self.project.files.iter().map(|f| f.notes).sum()
     }
 
-    pub fn files_selected(&self) -> usize {
-        self.project.files.iter().filter(|f| f.selected).count()
+    pub fn files_flagged(&self) -> usize {
+        self.project.files.iter().filter(|f| f.flagged).count()
     }
 
-    /// Sends `prompt` to `pi` against `self.target_dir`. Chat mode grants
-    /// only the `read` tool (a read-only sounding board); Edit mode grants
-    /// `read,write` too, and writes land directly in the real repo — it's
-    /// already a real git repo (required to even start), so Steer's diff
-    /// view and plain `git` are the review/undo mechanism, same as any
-    /// other change made to it.
+    /// Sends `prompt` to `pi` against `self.target_dir` with read+write —
+    /// it's already a real git repo, so Review's diff view and plain `git`
+    /// are the review/undo mechanism for whatever it writes, same as any
+    /// other change made to the repo.
     pub fn start_agent_turn(&mut self, prompt: String) {
-        let tools = if self.edit_mode { ToolProfile::ReadWrite } else { ToolProfile::ReadOnly };
         let target_dir = self.target_dir.clone();
-        self.spawn_turn(prompt, target_dir, tools, TurnPurpose::Chat);
+        self.spawn_turn(prompt, target_dir, ToolProfile::ReadWrite, TurnPurpose::Chat);
     }
 
     /// Spawns a `pi` turn in `cwd` with the given tool profile. Reuses
@@ -375,12 +448,12 @@ impl App {
                 self.demo_transcript = false;
                 self.transcript.clear();
             }
-            self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("> {prompt}") });
+            self.transcript.push(AgentLine { kind: AgentLineKind::UserPrompt, text: prompt.clone() });
             self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() });
             self.agent_scroll = 0; // jump to the bottom to watch it stream in
         }
 
-        match pi_client::spawn(&prompt, &cwd, self.backend, &self.session_file, tools) {
+        match pi_client::spawn(&prompt, &cwd, &self.session_file, tools) {
             Ok(session) => {
                 self.pi_session = Some(session);
                 self.agent_running = true;
@@ -470,7 +543,7 @@ impl App {
                     self.agent_running = false;
                     self.pi_session = None;
                     self.commit_message_status = None;
-                    self.open_editor_requested = true;
+                    self.open_editor_requested = Some(EditorTarget::CommitMessage);
                 }
                 Error(e) => self.commit_message_status = Some(format!("Error generating message: {e}")),
                 Thinking(_) | ToolCall { .. } | ToolResult { .. } | TurnEnd => {}
@@ -481,11 +554,11 @@ impl App {
         match event {
             Model(m) => self.agent_model_live = Some(m),
             Thinking(t) => {
-                // Always followed by a blank line: thinking prose and
-                // whatever comes next (a tool call or the final answer)
-                // share the same line kind, so without an explicit
-                // separator they visually run together.
-                self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("  {t}") });
+                // Rendered dimmed (AgentLineKind::Thinking) and followed by
+                // a blank line, so reasoning prose reads as clearly
+                // secondary to — and doesn't visually run into — whatever
+                // comes next (a tool call or the final answer).
+                self.transcript.push(AgentLine { kind: AgentLineKind::Thinking, text: t });
                 self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() });
             }
             Text(t) => self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: t }),
@@ -501,22 +574,20 @@ impl App {
             AgentEnd => {
                 self.agent_running = false;
                 self.pi_session = None;
-                if self.edit_mode {
-                    // Edit-mode writes land directly in target_dir, so
-                    // whatever's uncommitted there now is exactly what this
-                    // turn (and anything else outstanding) changed — pull
-                    // Steer/Navigate's view of it forward immediately
-                    // rather than waiting for the next background poll.
-                    let n = crate::gitreview::diff_files(&self.target_dir).len();
-                    let text = if n == 0 {
-                        "  (no file changes)".to_string()
-                    } else {
-                        format!("{n} file{} changed \u{2014} see Steer (F1) for the diff", if n == 1 { "" } else { "s" })
-                    };
-                    self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
-                    self.sync_review_from_disk();
-                    self.sync_navigate_from_disk();
-                }
+                // Every turn writes directly to target_dir now, so
+                // whatever's uncommitted there is exactly what this turn
+                // (and anything else outstanding) changed — pull Review's
+                // view of it forward immediately rather than waiting for
+                // the next background poll.
+                let n = crate::gitreview::diff_files(&self.target_dir).len();
+                let text = if n == 0 {
+                    "  (no file changes)".to_string()
+                } else {
+                    format!("{n} file{} changed \u{2014} see Review (F1) for the diff", if n == 1 { "" } else { "s" })
+                };
+                self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
+                self.sync_review_from_disk();
+                self.sync_navigate_from_disk();
             }
             Error(e) => {
                 self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("stderr: {e}") })
@@ -539,13 +610,9 @@ impl App {
         }
 
         // Mode switches always work, even mid-text-entry (their default
-        // chords are F1-F4, which no text field would otherwise consume).
-        if self.keymap.is(&key, Action::SwitchSteer) {
-            self.mode = Mode::Steer;
-            return;
-        }
-        if self.keymap.is(&key, Action::SwitchNavigate) {
-            self.mode = Mode::Navigate;
+        // chords are F1-F3, which no text field would otherwise consume).
+        if self.keymap.is(&key, Action::SwitchReview) {
+            self.mode = Mode::Review;
             return;
         }
         if self.keymap.is(&key, Action::SwitchAgent) {
@@ -581,75 +648,173 @@ impl App {
         }
 
         match self.mode {
-            Mode::Steer => self.on_key_steer(key),
-            Mode::Navigate => self.on_key_navigate(key),
+            Mode::Review => self.on_key_review(key),
             Mode::Agent => self.on_key_agent(key),
             Mode::Curation => self.on_key_curation(key),
         }
     }
 
     // -------------------------------------------------------------
-    // STEER
+    // REVIEW
     // -------------------------------------------------------------
-    fn on_key_steer(&mut self, key: KeyEvent) {
-        let n = self.project.files.len();
-        if n == 0 {
-            return;
-        }
-        let k = &self.keymap;
-        if k.is(&key, Action::SteerUp) {
-            self.steer_selected = self.steer_selected.saturating_sub(1);
-        } else if k.is(&key, Action::SteerDown) || k.is(&key, Action::SteerNextFile) {
-            self.steer_selected = (self.steer_selected + 1).min(n - 1);
-        } else if k.is(&key, Action::SteerToggleSelect) {
-            self.project.files[self.steer_selected].selected ^= true;
-        } else if k.is(&key, Action::SteerMarkGood) {
-            let path = self.project.files[self.steer_selected].path.clone();
-            let f = &mut self.project.files[self.steer_selected];
-            f.flagged = false;
-            f.notes = 0;
-            self.notes.retain(|n| n.path != path);
-        } else if k.is(&key, Action::SteerFlagRework) {
-            self.project.files[self.steer_selected].flagged = true;
-        } else if k.is(&key, Action::SteerComment) {
-            let path = self.project.files[self.steer_selected].path.clone();
-            self.open_note_input(path, None);
-        } else if k.is(&key, Action::SteerSplitView) {
-            self.steer_split = true;
-        } else if k.is(&key, Action::SteerUnifiedView) {
-            self.steer_split = false;
-        } else if k.is(&key, Action::SteerIterate) {
-            let prompt = self.build_iterate_prompt();
-            self.mode = Mode::Agent;
-            // Notes ask the agent to change things — iterating through
-            // read-only Chat mode would let it see the request but never
-            // act on it, so switch to Edit mode first.
-            self.edit_mode = true;
-            self.start_agent_turn(prompt);
+
+    /// Moves the focused pane's index by `delta` (negative = up/back),
+    /// clamped to its bounds. `tree_len` is passed in since the tree and
+    /// source have different lengths and only one is relevant per call.
+    fn move_nav_focus(&mut self, delta: i64, tree_len: usize) {
+        if self.moves_the_tree() {
+            self.tree_index = clamped_move(self.tree_index, delta, tree_len);
+            self.preview_tree_selection();
+        } else {
+            self.nav_line = clamped_move(self.nav_line, delta, self.source.len());
+            if self.show_hover {
+                self.refresh_hover();
+            }
         }
     }
 
-    /// Turns the queued review notes into a real prompt for `pi`, pulling
-    /// from `self.notes` (the real free-text notes left in Steer/Navigate)
-    /// rather than the unused mock-only `Hunk::note` field. Notes are
-    /// grouped under their file, with an explicit line annotation, so the
-    /// agent can't confuse which file (or line) a piece of feedback is
-    /// actually about.
+    /// Jumps the focused pane's index directly to `target` (clamped to its
+    /// bounds) — `usize::MAX` means "the last entry".
+    fn jump_nav_focus(&mut self, target: usize, tree_len: usize) {
+        if self.moves_the_tree() {
+            self.tree_index = target.min(tree_len.saturating_sub(1));
+            self.preview_tree_selection();
+        } else {
+            self.nav_line = target.min(self.source.len().saturating_sub(1));
+            if self.show_hover {
+                self.refresh_hover();
+            }
+        }
+    }
+
+    /// Whether Up/Down/PageUp/PageDown/Home/End currently move the tree
+    /// cursor rather than the source line cursor. True when Tree is
+    /// focused, but *also* when Content is focused and showing a Diff —
+    /// a diff has no line cursor to move (it isn't scrollable), so without
+    /// this, movement there would silently do nothing instead of doing the
+    /// obviously-intended thing: cycling to the next/previous file, same
+    /// as the old Steer screen's Up/Down.
+    fn moves_the_tree(&self) -> bool {
+        self.nav_focus == NavFocus::Tree || self.content_view == ContentView::Diff
+    }
+
+    /// Live-previews whatever file the tree cursor currently points at in
+    /// the content pane, without changing pane focus — the same idea as
+    /// the File Finder's live preview, so browsing the tree always shows
+    /// what's currently highlighted rather than needing an explicit "open".
+    fn preview_tree_selection(&mut self) {
+        if let Some(entry) = self.tree.get(self.tree_index) {
+            if !entry.is_dir {
+                let path = entry.path.clone();
+                self.open_file(path);
+            }
+        }
+    }
+
+    fn on_key_review(&mut self, key: KeyEvent) {
+        let n = self.tree.len();
+        let k = &self.keymap;
+        // j/k always move too, regardless of ReviewUp/ReviewDown's
+        // configured chord — vim muscle memory shouldn't require a remap.
+        // Which pane they move depends on nav_focus, same as the arrows:
+        // only one pane moves at a time, never both.
+        if k.is(&key, Action::ReviewUp) || key.code == KeyCode::Char('k') {
+            self.move_nav_focus(-1, n);
+        } else if k.is(&key, Action::ReviewDown) || key.code == KeyCode::Char('j') {
+            self.move_nav_focus(1, n);
+        } else if k.is(&key, Action::ReviewPageUp) {
+            self.move_nav_focus(-(PAGE_SIZE as i64), n);
+        } else if k.is(&key, Action::ReviewPageDown) {
+            self.move_nav_focus(PAGE_SIZE as i64, n);
+        } else if k.is(&key, Action::ReviewHome) {
+            self.jump_nav_focus(0, n);
+        } else if k.is(&key, Action::ReviewEnd) {
+            self.jump_nav_focus(usize::MAX, n);
+        } else if k.is(&key, Action::ReviewOpen) {
+            self.preview_tree_selection();
+            self.nav_focus = NavFocus::Content;
+        } else if k.is(&key, Action::ReviewToggleFocus) {
+            self.nav_focus = match self.nav_focus {
+                NavFocus::Tree => NavFocus::Content,
+                NavFocus::Content => NavFocus::Tree,
+            };
+        } else if k.is(&key, Action::ReviewScrollLeft) {
+            if self.nav_focus == NavFocus::Content && self.content_view == ContentView::Source {
+                self.nav_scroll_x = self.nav_scroll_x.saturating_sub(4);
+            }
+        } else if k.is(&key, Action::ReviewScrollRight) {
+            if self.nav_focus == NavFocus::Content && self.content_view == ContentView::Source {
+                self.nav_scroll_x = self.nav_scroll_x.saturating_add(4);
+            }
+        } else if k.is(&key, Action::ReviewToggleHover) {
+            self.show_hover = !self.show_hover;
+            if self.show_hover {
+                self.refresh_hover();
+            }
+        } else if k.is(&key, Action::ReviewOpenSymbolJump) {
+            self.overlay = Overlay::SymbolJump;
+        } else if k.is(&key, Action::ReviewToggleView) {
+            if self.current_diff_index().is_some() {
+                self.content_view = match self.content_view {
+                    ContentView::Diff => ContentView::Source,
+                    ContentView::Source => ContentView::Diff,
+                };
+            }
+        } else if k.is(&key, Action::ReviewMarkGood) {
+            if let Some(i) = self.current_diff_index() {
+                let path = self.project.files[i].path.clone();
+                let f = &mut self.project.files[i];
+                f.flagged = false;
+                f.notes = 0;
+                self.notes.retain(|n| n.path != path);
+            }
+        } else if k.is(&key, Action::ReviewFlagRework) {
+            if let Some(i) = self.current_diff_index() {
+                self.project.files[i].flagged = true;
+            }
+        } else if k.is(&key, Action::ReviewSplitView) {
+            self.split_diff = true;
+        } else if k.is(&key, Action::ReviewUnifiedView) {
+            self.split_diff = false;
+        } else if k.is(&key, Action::ReviewIterate) {
+            // Open every queued note and flag for a last-pass edit before
+            // anything is sent — same reasoning as the commit-message
+            // flow: never fire an assembled prompt at the agent sight
+            // unseen.
+            self.iterate_draft = self.build_iterate_prompt();
+            self.open_editor_requested = Some(EditorTarget::IteratePrompt);
+        } else if k.is(&key, Action::ReviewComment) {
+            // In Source view with the content pane focused, a comment is
+            // scoped to the current line; otherwise (Tree focused, or Diff
+            // view) it's scoped to the whole file.
+            if self.nav_focus == NavFocus::Content && self.content_view == ContentView::Source {
+                if !self.source.is_empty() {
+                    let rel = self.nav_file.strip_prefix(&self.target_dir).unwrap_or(&self.nav_file).display().to_string();
+                    self.open_note_input(rel, Some(self.nav_line + 1));
+                }
+            } else if let Some(i) = self.current_diff_index() {
+                let path = self.project.files[i].path.clone();
+                self.open_note_input(path, None);
+            }
+        }
+    }
+
+    /// Turns every queued review note and flag into a real prompt for
+    /// `pi` — all of them, not just whatever file happens to be open right
+    /// now. Grouped under their file, with an explicit line annotation, so
+    /// the agent can't confuse which file (or line) a piece of feedback is
+    /// actually about. This is only ever shown to the user in the iterate
+    /// draft editor before sending, never fired off directly.
     fn build_iterate_prompt(&self) -> String {
         let mut prompt = String::from(
-            "You're iterating on review feedback for this repo. Each note below is attached to a \
-             specific file, and a specific line when one is given — address them there, not elsewhere:\n\n",
+            "Here is a review of the current changes for you to work through. Each note below \
+             is attached to a specific file, and a specific line when one is given:\n\n",
         );
         let mut any = false;
-        let selected_paths: std::collections::HashSet<&str> =
-            self.project.files.iter().filter(|f| f.selected).map(|f| f.path.as_str()).collect();
 
         let mut order: Vec<&str> = Vec::new();
         let mut grouped: std::collections::HashMap<&str, Vec<&Note>> = std::collections::HashMap::new();
         for note in &self.notes {
-            if !selected_paths.contains(note.path.as_str()) {
-                continue;
-            }
             grouped.entry(note.path.as_str()).or_insert_with(|| { order.push(note.path.as_str()); Vec::new() }).push(note);
         }
         for path in &order {
@@ -663,103 +828,15 @@ impl App {
             }
         }
         for file in &self.project.files {
-            if file.selected && file.flagged {
+            if file.flagged {
                 any = true;
                 prompt.push_str(&format!("File: {}\n  - Flagged for rework: please redo this file's change.\n", file.path));
             }
         }
         if !any {
-            prompt.push_str("No specific notes were left — please review the selected files' current diffs and suggest improvements.\n");
+            prompt.push_str("No specific notes were left — please review the current diffs and suggest improvements.\n");
         }
         prompt
-    }
-
-    // -------------------------------------------------------------
-    // NAVIGATE
-    // -------------------------------------------------------------
-
-    /// Moves the focused pane's index by `delta` (negative = up/back),
-    /// clamped to its bounds. `tree_len` is passed in since the tree and
-    /// source have different lengths and only one is relevant per call.
-    fn move_nav_focus(&mut self, delta: i64, tree_len: usize) {
-        match self.nav_focus {
-            NavFocus::Tree => self.tree_index = clamped_move(self.tree_index, delta, tree_len),
-            NavFocus::Source => {
-                self.nav_line = clamped_move(self.nav_line, delta, self.source.len());
-                if self.show_hover {
-                    self.refresh_hover();
-                }
-            }
-        }
-    }
-
-    /// Jumps the focused pane's index directly to `target` (clamped to its
-    /// bounds) — `usize::MAX` means "the last entry".
-    fn jump_nav_focus(&mut self, target: usize, tree_len: usize) {
-        match self.nav_focus {
-            NavFocus::Tree => self.tree_index = target.min(tree_len.saturating_sub(1)),
-            NavFocus::Source => {
-                self.nav_line = target.min(self.source.len().saturating_sub(1));
-                if self.show_hover {
-                    self.refresh_hover();
-                }
-            }
-        }
-    }
-
-    fn on_key_navigate(&mut self, key: KeyEvent) {
-        let n = self.tree.len();
-        let k = &self.keymap;
-        // j/k always move too, regardless of NavUp/NavDown's configured
-        // chord — vim muscle memory shouldn't require a remap. Which pane
-        // they move depends on nav_focus, same as the arrows: only one
-        // pane moves at a time, never both.
-        if k.is(&key, Action::NavUp) || key.code == KeyCode::Char('k') {
-            self.move_nav_focus(-1, n);
-        } else if k.is(&key, Action::NavDown) || key.code == KeyCode::Char('j') {
-            self.move_nav_focus(1, n);
-        } else if k.is(&key, Action::NavPageUp) {
-            self.move_nav_focus(-(PAGE_SIZE as i64), n);
-        } else if k.is(&key, Action::NavPageDown) {
-            self.move_nav_focus(PAGE_SIZE as i64, n);
-        } else if k.is(&key, Action::NavHome) {
-            self.jump_nav_focus(0, n);
-        } else if k.is(&key, Action::NavEnd) {
-            self.jump_nav_focus(usize::MAX, n);
-        } else if k.is(&key, Action::NavOpen) {
-            if let Some(entry) = self.tree.get(self.tree_index) {
-                if !entry.is_dir {
-                    let path = entry.path.clone();
-                    self.open_file(path);
-                }
-            }
-            self.nav_focus = NavFocus::Source;
-        } else if k.is(&key, Action::NavToggleFocus) {
-            self.nav_focus = match self.nav_focus {
-                NavFocus::Tree => NavFocus::Source,
-                NavFocus::Source => NavFocus::Tree,
-            };
-        } else if k.is(&key, Action::NavScrollLeft) {
-            if self.nav_focus == NavFocus::Source {
-                self.nav_scroll_x = self.nav_scroll_x.saturating_sub(4);
-            }
-        } else if k.is(&key, Action::NavScrollRight) {
-            if self.nav_focus == NavFocus::Source {
-                self.nav_scroll_x = self.nav_scroll_x.saturating_add(4);
-            }
-        } else if k.is(&key, Action::NavToggleHover) {
-            self.show_hover = !self.show_hover;
-            if self.show_hover {
-                self.refresh_hover();
-            }
-        } else if k.is(&key, Action::NavOpenSymbolJump) {
-            self.overlay = Overlay::SymbolJump;
-        } else if k.is(&key, Action::NavComment) {
-            if !self.source.is_empty() {
-                let rel = self.nav_file.strip_prefix(&self.target_dir).unwrap_or(&self.nav_file).display().to_string();
-                self.open_note_input(rel, Some(self.nav_line + 1));
-            }
-        }
     }
 
     // -------------------------------------------------------------
@@ -785,10 +862,14 @@ impl App {
                 let line = sym.line;
                 self.open_file(path);
                 self.nav_line = line.saturating_sub(1).min(self.source.len().saturating_sub(1));
+                // Jumping to a symbol means "read this code", regardless
+                // of whether the file also happens to have a pending diff.
+                self.content_view = ContentView::Source;
+                self.nav_focus = NavFocus::Content;
                 self.refresh_hover();
             }
             self.overlay = Overlay::None;
-            self.mode = Mode::Navigate;
+            self.mode = Mode::Review;
         } else if k.is(&key, Action::SymbolUp) {
             self.symbol_index = self.symbol_index.saturating_sub(1);
         } else if k.is(&key, Action::SymbolDown) {
@@ -837,10 +918,11 @@ impl App {
             if let Some(&i) = self.filtered_files().get(self.file_finder_index) {
                 let path = self.tree[i].path.clone();
                 self.open_file(path);
-                self.nav_focus = NavFocus::Source;
+                self.content_view = ContentView::Source;
+                self.nav_focus = NavFocus::Content;
             }
             self.overlay = Overlay::None;
-            self.mode = Mode::Navigate;
+            self.mode = Mode::Review;
         } else if k.is(&key, Action::FinderUp) {
             self.file_finder_index = self.file_finder_index.saturating_sub(1);
         } else if k.is(&key, Action::FinderDown) {
@@ -979,11 +1061,7 @@ impl App {
 
     fn on_key_agent(&mut self, key: KeyEvent) {
         let k = &self.keymap;
-        if k.is(&key, Action::AgentSwitchBackend) {
-            self.backend = self.backend.toggled();
-        } else if k.is(&key, Action::AgentToggleEditMode) {
-            self.edit_mode = !self.edit_mode;
-        } else if k.is(&key, Action::AgentScrollUp) {
+        if k.is(&key, Action::AgentScrollUp) {
             self.agent_scroll = self.agent_scroll.saturating_add(PAGE_SIZE);
         } else if k.is(&key, Action::AgentScrollDown) {
             self.agent_scroll = self.agent_scroll.saturating_sub(PAGE_SIZE);
@@ -1080,14 +1158,13 @@ mod tests {
     #[test]
     fn f_keys_switch_mode_from_anywhere() {
         let (mut app, dir) = two_file_app("fkeys");
+        assert!(app.mode == Mode::Review, "App::new starts in Review");
         app.on_key(key(KeyCode::F(2)));
-        assert!(app.mode == Mode::Navigate);
-        app.on_key(key(KeyCode::F(4)));
-        assert!(app.mode == Mode::Curation);
-        app.on_key(key(KeyCode::F(3)));
         assert!(app.mode == Mode::Agent);
+        app.on_key(key(KeyCode::F(3)));
+        assert!(app.mode == Mode::Curation);
         app.on_key(key(KeyCode::F(1)));
-        assert!(app.mode == Mode::Steer);
+        assert!(app.mode == Mode::Review);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1120,22 +1197,24 @@ mod tests {
     }
 
     #[test]
-    fn steer_navigation_and_toggles() {
+    fn review_diff_navigation_and_toggles() {
         let (mut app, dir) = two_file_app("steer-nav");
-        assert_eq!(app.steer_selected, 0);
+        assert_eq!(app.tree_index, 0);
+        // Both a.txt (index 0) and b.txt (index 1) have changes, so the
+        // content pane defaults to Diff — meaning Up/Down move the tree
+        // cursor (cycle files) even without explicitly focusing Tree.
         app.on_key(key(KeyCode::Down));
-        assert_eq!(app.steer_selected, 1);
+        assert_eq!(app.tree_index, 1);
         app.on_key(key(KeyCode::Down)); // clamps at the last file
-        assert_eq!(app.steer_selected, 1);
+        assert_eq!(app.tree_index, 1);
         app.on_key(key(KeyCode::Up));
-        assert_eq!(app.steer_selected, 0);
+        assert_eq!(app.tree_index, 0);
 
-        let was_selected = app.project.files[0].selected;
-        app.on_key(key(KeyCode::Char(' ')));
-        assert_eq!(app.project.files[0].selected, !was_selected);
+        let idx = app.current_diff_index().expect("a.txt has a diff");
+        assert_eq!(app.project.files[idx].path, "a.txt");
 
         app.on_key(key(KeyCode::Char('x')));
-        assert!(app.project.files[0].flagged);
+        assert!(app.project.files[idx].flagged);
         app.on_key(key(KeyCode::Char('c')));
         assert_eq!(app.overlay, Overlay::NoteInput);
         for c in "please fix this".chars() {
@@ -1143,18 +1222,18 @@ mod tests {
         }
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.overlay, Overlay::None);
-        assert_eq!(app.project.files[0].notes, 1);
+        assert_eq!(app.project.files[idx].notes, 1);
         assert_eq!(app.notes.len(), 1);
         assert_eq!(app.notes[0].text, "please fix this");
         app.on_key(key(KeyCode::Char('g')));
-        assert!(!app.project.files[0].flagged);
-        assert_eq!(app.project.files[0].notes, 0);
+        assert!(!app.project.files[idx].flagged);
+        assert_eq!(app.project.files[idx].notes, 0);
 
-        assert!(!app.steer_split);
+        assert!(!app.split_diff);
         app.on_key(key(KeyCode::Char('s')));
-        assert!(app.steer_split);
+        assert!(app.split_diff);
         app.on_key(key(KeyCode::Char('u')));
-        assert!(!app.steer_split);
+        assert!(!app.split_diff);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1165,7 +1244,7 @@ mod tests {
         commit_file(&dir, "a.rs", "fn a() {}\n");
         commit_file(&dir, "b.rs", "fn b() {}\n");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Navigate;
+        app.mode = Mode::Review;
 
         assert_eq!(app.tree_index, 0);
         app.on_key(key(KeyCode::Down));
@@ -1183,7 +1262,7 @@ mod tests {
         let dir = scratch_repo("navigate-cursor");
         commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n    let y = 2;\n}\n");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Navigate;
+        app.mode = Mode::Review;
 
         // Up/Down move the tree until the source pane is focused — arrows
         // never move both at once.
@@ -1192,7 +1271,7 @@ mod tests {
         assert_eq!(app.nav_line, 0, "still tree-focused, shouldn't touch the cursor");
 
         app.on_key(key(KeyCode::Tab));
-        assert!(app.nav_focus == NavFocus::Source);
+        assert!(app.nav_focus == NavFocus::Content);
 
         let start_line = app.nav_line;
         app.on_key(key(KeyCode::Down));
@@ -1212,7 +1291,7 @@ mod tests {
         let dir = scratch_repo("navigate-comment");
         commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n    let y = 2;\n}\n");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Navigate;
+        app.mode = Mode::Review;
         app.on_key(key(KeyCode::Tab)); // focus source
         app.on_key(key(KeyCode::Down)); // nav_line == 1
 
@@ -1237,16 +1316,15 @@ mod tests {
     fn note_input_esc_discards_without_saving() {
         let dir = scratch_repo("note-cancel");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Steer;
+        app.mode = Mode::Review;
         app.project.files.push(crate::data::FileEntry {
             path: "x.rs".to_string(),
             hunk_count: 0,
             notes: 0,
-            selected: false,
             flagged: false,
             hunks: vec![],
         });
-        app.steer_selected = 0;
+        app.nav_file = dir.join("x.rs"); // so current_diff_index() resolves to it
 
         app.on_key(key(KeyCode::Char('c')));
         assert_eq!(app.overlay, Overlay::NoteInput);
@@ -1263,16 +1341,15 @@ mod tests {
     fn note_input_editing_supports_cursor_movement_and_backspace() {
         let dir = scratch_repo("note-edit");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Steer;
+        app.mode = Mode::Review;
         app.project.files.push(crate::data::FileEntry {
             path: "x.rs".to_string(),
             hunk_count: 0,
             notes: 0,
-            selected: false,
             flagged: false,
             hunks: vec![],
         });
-        app.steer_selected = 0;
+        app.nav_file = dir.join("x.rs"); // so current_diff_index() resolves to it
         app.on_key(key(KeyCode::Char('c')));
         for c in "helo".chars() {
             app.on_key(key(KeyCode::Char(c)));
@@ -1294,7 +1371,7 @@ mod tests {
         let dir = scratch_repo("navigate-scroll");
         commit_file(&dir, "main.rs", "fn main() {}\n");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Navigate;
+        app.mode = Mode::Review;
 
         app.on_key(key(KeyCode::Right));
         assert_eq!(app.nav_scroll_x, 0, "tree-focused: arrows shouldn't scroll source");
@@ -1315,9 +1392,9 @@ mod tests {
         let content: String = (1..=60).map(|n| format!("line{n}\n")).collect();
         commit_file(&dir, "big.rs", &content);
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Navigate;
+        app.mode = Mode::Review;
         app.on_key(key(KeyCode::Tab)); // focus source
-        assert!(app.nav_focus == NavFocus::Source);
+        assert!(app.nav_focus == NavFocus::Content);
 
         app.on_key(key(KeyCode::PageDown));
         assert_eq!(app.nav_line, PAGE_SIZE);
@@ -1339,7 +1416,7 @@ mod tests {
         let dir = scratch_repo("navigate-page-short");
         commit_file(&dir, "small.rs", "line1\nline2\nline3\n");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Navigate;
+        app.mode = Mode::Review;
         app.on_key(key(KeyCode::Tab));
 
         app.on_key(key(KeyCode::PageDown));
@@ -1353,11 +1430,11 @@ mod tests {
         let dir = scratch_repo("navigate-open-focus");
         commit_file(&dir, "a.rs", "fn a() {}\n");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Navigate;
+        app.mode = Mode::Review;
         app.nav_scroll_x = 12;
 
         app.on_key(key(KeyCode::Enter));
-        assert!(app.nav_focus == NavFocus::Source);
+        assert!(app.nav_focus == NavFocus::Content);
         assert_eq!(app.nav_scroll_x, 0);
 
         let _ = fs::remove_dir_all(&dir);
@@ -1369,7 +1446,7 @@ mod tests {
         commit_file(&dir, "a.rs", "fn a() {}\n");
         commit_file(&dir, "b.rs", "fn b() {}\n");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Navigate;
+        app.mode = Mode::Review;
 
         // No subdirectories, so the tree is just [a.rs, b.rs] in that order;
         // App::new() opens a.rs by default. Moving down and pressing Enter
@@ -1430,25 +1507,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_backend_and_edit_mode_toggle() {
-        let dir = scratch_repo("agent-toggles");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Agent;
-
-        assert_eq!(app.backend, Backend::Pi);
-        app.on_key(ctrl('b'));
-        assert_eq!(app.backend, Backend::PiCodex);
-        app.on_key(ctrl('b'));
-        assert_eq!(app.backend, Backend::Pi);
-
-        assert!(!app.edit_mode);
-        app.on_key(ctrl('e'));
-        assert!(app.edit_mode);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn symbol_jump_close_discards_filter_state_choice() {
         let dir = scratch_repo("symjump-close");
         commit_file(&dir, "lib.rs", "fn foo() {}\n");
@@ -1494,31 +1552,29 @@ mod tests {
     }
 
     #[test]
-    fn iterate_prompt_groups_notes_by_file_with_line_annotations() {
+    fn iterate_prompt_groups_all_notes_by_file_with_line_annotations() {
+        // Notes are sent unconditionally, for every file with notes — no
+        // per-file "selected" gate to remember to toggle first.
         let (mut app, dir) = two_file_app("iterate-prompt");
-        // a.txt selected (default from two_file_app); b.txt is not.
-        app.project.files[1].selected = false;
 
         app.notes.push(Note { path: "a.txt".to_string(), line: Some(2), text: "tighten this up".to_string() });
         app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "consider a rename".to_string() });
-        // Excluded: not a selected file.
-        app.notes.push(Note { path: "b.txt".to_string(), line: Some(1), text: "should not appear".to_string() });
+        app.notes.push(Note { path: "b.txt".to_string(), line: Some(1), text: "this one too".to_string() });
 
         let prompt = app.build_iterate_prompt();
         assert!(prompt.contains("File: a.txt"), "{prompt}");
         assert!(prompt.contains("Line 2: tighten this up"), "{prompt}");
         assert!(prompt.contains("consider a rename"), "{prompt}");
-        assert!(!prompt.contains("b.txt"), "{prompt}");
-        assert!(!prompt.contains("should not appear"), "{prompt}");
+        assert!(prompt.contains("File: b.txt"), "{prompt}");
+        assert!(prompt.contains("Line 1: this one too"), "{prompt}");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn iterate_prompt_includes_flagged_selected_files_and_honest_empty_state() {
+    fn iterate_prompt_includes_all_flagged_files_and_honest_empty_state() {
         let (mut app, dir) = two_file_app("iterate-prompt-flagged");
         app.project.files[0].flagged = true;
-        app.project.files[1].selected = false; // no notes, no flag, excluded
 
         let prompt = app.build_iterate_prompt();
         assert!(prompt.contains("File: a.txt"), "{prompt}");
@@ -1526,7 +1582,6 @@ mod tests {
         assert!(!prompt.contains("b.txt"), "{prompt}");
 
         app.project.files[0].flagged = false;
-        app.project.files[1].selected = false;
         let empty_prompt = app.build_iterate_prompt();
         assert!(empty_prompt.contains("No specific notes were left"), "{empty_prompt}");
 
@@ -1537,7 +1592,6 @@ mod tests {
     fn sync_review_from_disk_picks_up_an_external_change_and_keeps_flags() {
         let (mut app, dir) = two_file_app("sync-review");
         app.project.files[0].flagged = true;
-        app.project.files[0].selected = false;
         let before = app.project.files[0].hunks[0].lines.len();
 
         // Simulate a change made outside steer (another `pi` run, an
@@ -1548,7 +1602,6 @@ mod tests {
 
         assert!(app.project.files[0].hunks[0].lines.len() > before, "should pick up the new line");
         assert!(app.project.files[0].flagged, "flagged should survive an external content change");
-        assert!(!app.project.files[0].selected, "selected should survive an external content change");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1566,37 +1619,21 @@ mod tests {
     }
 
     #[test]
-    fn agent_end_in_edit_mode_refreshes_review_immediately_no_approval_needed() {
+    fn agent_end_refreshes_review_immediately() {
         let (mut app, dir) = two_file_app("agent-end-edit-mode");
         app.mode = Mode::Agent;
-        app.edit_mode = true;
 
-        // Edit mode writes straight to target_dir (no sandbox, no separate
-        // accept step) — simulate that by editing the file directly, the
-        // same as what a real `pi` write tool call would have just done.
+        // Every turn writes straight to target_dir — simulate that by
+        // editing the file directly, the same as what a real `pi` write
+        // tool call would have just done.
         fs::write(dir.join("a.txt"), "a1-changed\na2\na3-written-by-the-agent\n").unwrap();
         let before = app.project.files[0].hunks[0].lines.len();
 
         app.apply_agent_event(AgentEvent::AgentEnd);
 
         assert!(!app.agent_running);
-        assert!(app.project.files[0].hunks[0].lines.len() > before, "Steer should already reflect the write, no Ctrl+A needed");
+        assert!(app.project.files[0].hunks[0].lines.len() > before, "Review should already reflect the write, no waiting for the next poll");
         assert!(app.transcript.iter().any(|l| l.text.contains("file") && l.text.contains("changed")), "{:?}", app.transcript.iter().map(|l| &l.text).collect::<Vec<_>>());
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn agent_end_in_chat_mode_does_not_touch_review_state() {
-        let (mut app, dir) = two_file_app("agent-end-chat-mode");
-        app.mode = Mode::Agent;
-        assert!(!app.edit_mode);
-        let before = app.project.files[0].hunks[0].lines.len();
-
-        fs::write(dir.join("a.txt"), "a1-changed\na2\na3-should-not-be-picked-up-yet\n").unwrap();
-        app.apply_agent_event(AgentEvent::AgentEnd);
-
-        assert_eq!(app.project.files[0].hunks[0].lines.len(), before, "Chat mode shouldn't force a review refresh");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1606,7 +1643,7 @@ mod tests {
         let dir = scratch_repo("sync-nav-source");
         commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n}\n");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Navigate;
+        app.mode = Mode::Review;
         assert_eq!(app.source.len(), 3);
 
         fs::write(dir.join("main.rs"), "fn main() {\n    let x = 1;\n    let y = 2;\n}\n").unwrap();
@@ -1623,7 +1660,7 @@ mod tests {
         let dir = scratch_repo("sync-nav-tree");
         commit_file(&dir, "a.rs", "fn a() {}\n");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.mode = Mode::Navigate;
+        app.mode = Mode::Review;
         let before = app.tree.len();
 
         fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
@@ -1648,7 +1685,7 @@ mod tests {
         assert_eq!(app.transcript.len(), transcript_len_before, "should not touch the chat transcript");
 
         app.apply_agent_event(AgentEvent::AgentEnd);
-        assert!(app.open_editor_requested, "completing generation should request the editor");
+        assert_eq!(app.open_editor_requested, Some(EditorTarget::CommitMessage), "completing generation should request the editor");
         assert!(app.commit_message_status.is_none());
         assert!(!app.agent_running);
 
@@ -1665,7 +1702,7 @@ mod tests {
         app.apply_agent_event(AgentEvent::Error("pi exploded".to_string()));
         assert!(app.commit_message_status.as_deref().unwrap().contains("pi exploded"));
         assert_eq!(app.transcript.len(), transcript_len_before);
-        assert!(!app.open_editor_requested, "an error shouldn't open the editor");
+        assert_eq!(app.open_editor_requested, None, "an error shouldn't open the editor");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1690,9 +1727,9 @@ mod tests {
 
         app.on_key(key(KeyCode::Enter));
         assert!(app.overlay == Overlay::None);
-        assert!(app.mode == Mode::Navigate);
+        assert!(app.mode == Mode::Review);
         assert_eq!(app.nav_file.file_name().unwrap(), "main.rs");
-        assert!(app.nav_focus == NavFocus::Source);
+        assert!(app.nav_focus == NavFocus::Content);
 
         let _ = fs::remove_dir_all(&dir);
     }

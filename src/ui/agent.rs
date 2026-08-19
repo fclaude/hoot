@@ -91,12 +91,21 @@ fn build_transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     for tl in &app.transcript {
         let fg = Style::default().fg(theme::FG);
+        let dim = Style::default().fg(theme::DIM);
         let mut wrapped_lines = match tl.kind {
-            AgentLineKind::Done => wrapped("\u{2714} ", theme::GREEN, &tl.text, fg, width),
+            AgentLineKind::Done => wrapped("\u{2714} ", theme::GREEN, &tl.text, dim, width),
             AgentLineKind::InProgress => wrapped("\u{21bb} ", theme::ORANGE, &tl.text, fg, width),
-            AgentLineKind::ToolCall => wrapped("\u{29d6} ", theme::ORANGE, &tl.text, fg, width),
+            AgentLineKind::ToolCall => wrapped("\u{29d6} ", theme::ORANGE, &tl.text, dim, width),
             AgentLineKind::Proposal => {
                 wrapped("\u{1f4dd} ", theme::FG, &tl.text, fg.add_modifier(Modifier::BOLD), width)
+            }
+            AgentLineKind::UserPrompt => wrapped("\u{276f} ", theme::CYAN, &tl.text, fg.add_modifier(Modifier::BOLD), width),
+            AgentLineKind::Thinking => {
+                if tl.text.is_empty() {
+                    vec![Line::raw("")]
+                } else {
+                    wrap_text(&tl.text, width.max(4)).into_iter().map(|c| Line::from(Span::styled(c, dim))).collect()
+                }
             }
             AgentLineKind::Text | AgentLineKind::Blank => {
                 if tl.text.is_empty() {
@@ -130,34 +139,21 @@ fn build_transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
 pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
     let status = if app.agent_running { "running\u{2026}" } else { "idle" };
     let status_color = if app.agent_running { theme::ORANGE } else { theme::DIM };
-    let (mode_label, mode_color) = if app.edit_mode { ("Edit (writes to the repo)", theme::ORANGE) } else { ("Chat (read-only)", theme::CYAN) };
 
-    let header = vec![
-        Line::from(vec![
-            Span::styled("Backend: ", Style::default().fg(theme::CYAN)),
-            Span::styled(app.backend.label(), Style::default().fg(theme::FG)),
-            Span::raw("        "),
-            Span::styled("Model: ", Style::default().fg(theme::CYAN)),
-            Span::styled(
-                app.agent_model_live.clone().unwrap_or_else(|| "\u{2014}".to_string()),
-                Style::default().fg(theme::FG),
-            ),
-            Span::raw("        "),
-            Span::styled("Status: ", Style::default().fg(theme::CYAN)),
-            Span::styled(status, Style::default().fg(status_color)),
-        ]),
-        Line::from(vec![
-            Span::styled("Mode: ", Style::default().fg(theme::CYAN)),
-            Span::styled(mode_label, Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
-            Span::raw("        "),
-            Span::styled("Dir: ", Style::default().fg(theme::CYAN)),
-            Span::styled(app.target_dir.display().to_string(), Style::default().fg(theme::FG)),
-        ]),
-    ];
+    let header = vec![Line::from(vec![
+        Span::styled("pi", Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(
+            app.agent_model_live.clone().unwrap_or_else(|| "\u{2014}".to_string()),
+            Style::default().fg(theme::DIM),
+        ),
+        Span::raw("        "),
+        Span::styled(status, Style::default().fg(status_color)),
+        Span::raw("        "),
+        Span::styled(app.target_dir.display().to_string(), Style::default().fg(theme::DIM)),
+    ])];
 
     let hints = vec![super::key_hints(&[
-        ("Ctrl+E", "Edit mode"),
-        ("Ctrl+B", "Backend"),
         ("PgUp/PgDn", "Scroll"),
         ("Enter", "Send"),
     ])];

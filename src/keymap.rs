@@ -20,37 +20,31 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Action {
     Quit,
-    SwitchSteer,
-    SwitchNavigate,
+    SwitchReview,
     SwitchAgent,
     SwitchCurate,
     OpenSymbolJump,
     OpenFileFinder,
 
-    SteerUp,
-    SteerDown,
-    SteerNextFile,
-    SteerToggleSelect,
-    SteerMarkGood,
-    SteerFlagRework,
-    SteerComment,
-    SteerSplitView,
-    SteerUnifiedView,
-    SteerIterate,
-
-    NavUp,
-    NavDown,
-    NavPageUp,
-    NavPageDown,
-    NavHome,
-    NavEnd,
-    NavOpen,
-    NavToggleFocus,
-    NavScrollLeft,
-    NavScrollRight,
-    NavToggleHover,
-    NavOpenSymbolJump,
-    NavComment,
+    ReviewUp,
+    ReviewDown,
+    ReviewPageUp,
+    ReviewPageDown,
+    ReviewHome,
+    ReviewEnd,
+    ReviewOpen,
+    ReviewToggleFocus,
+    ReviewScrollLeft,
+    ReviewScrollRight,
+    ReviewToggleHover,
+    ReviewOpenSymbolJump,
+    ReviewToggleView,
+    ReviewMarkGood,
+    ReviewFlagRework,
+    ReviewComment,
+    ReviewSplitView,
+    ReviewUnifiedView,
+    ReviewIterate,
 
     SymbolUp,
     SymbolDown,
@@ -66,8 +60,6 @@ pub enum Action {
     NoteCancel,
 
     AgentSend,
-    AgentSwitchBackend,
-    AgentToggleEditMode,
     AgentScrollUp,
     AgentScrollDown,
 
@@ -98,42 +90,36 @@ macro_rules! b {
 
 pub const BINDINGS: &[Binding] = &[
     b!(Action::Quit, "quit", "Quit", "Global", "q", "Exit steer"),
-    b!(Action::SwitchSteer, "switch_steer", "Switch: Steer", "Global", "f1", "Jump to the Steer/Review screen"),
-    b!(Action::SwitchNavigate, "switch_navigate", "Switch: Navigate", "Global", "f2", "Jump to the Navigate screen"),
-    b!(Action::SwitchAgent, "switch_agent", "Switch: Agent", "Global", "f3", "Jump to the Agent screen"),
-    b!(Action::SwitchCurate, "switch_curate", "Switch: Curate", "Global", "f4", "Jump to the Curation screen"),
+    b!(Action::SwitchReview, "switch_review", "Switch: Review", "Global", "f1", "Jump to the Review screen (file tree + diff/source)"),
+    b!(Action::SwitchAgent, "switch_agent", "Switch: Agent", "Global", "f2", "Jump to the Agent screen"),
+    b!(Action::SwitchCurate, "switch_curate", "Switch: Curate", "Global", "f3", "Jump to the Curation screen"),
     b!(Action::OpenSymbolJump, "open_symbol_jump", "Open Symbol Jump", "Global", "ctrl+k", "Open the fuzzy symbol-jump overlay from anywhere"),
     b!(Action::OpenFileFinder, "open_file_finder", "Open File Finder", "Global", "ctrl+f", "Open the fuzzy file finder (with live preview) from anywhere"),
 
-    b!(Action::SteerUp, "steer_up", "Move up", "Steer", "up", "Select the previous file"),
-    b!(Action::SteerDown, "steer_down", "Move down", "Steer", "down", "Select the next file"),
-    b!(Action::SteerNextFile, "steer_next_file", "Next file", "Steer", "tab", "Select the next file"),
-    b!(Action::SteerToggleSelect, "steer_toggle_select", "Toggle select", "Steer", "space", "Toggle the file into/out of the next batch"),
-    b!(Action::SteerMarkGood, "steer_mark_good", "Mark good", "Steer", "g", "Clear notes/flag on this file"),
-    b!(Action::SteerFlagRework, "steer_flag_rework", "Flag rework", "Steer", "x", "Flag this file as needing a redo"),
-    b!(Action::SteerComment, "steer_comment", "Comment", "Steer", "c", "Queue a review note on this file"),
-    b!(Action::SteerSplitView, "steer_split_view", "Split view", "Steer", "s", "Switch the diff panel to before/after columns"),
-    b!(Action::SteerUnifiedView, "steer_unified_view", "Unified view", "Steer", "u", "Switch the diff panel back to unified"),
+    b!(Action::ReviewUp, "review_up", "Move up", "Review", "up", "Move up in whichever pane is focused (k also always works)"),
+    b!(Action::ReviewDown, "review_down", "Move down", "Review", "down", "Move down in whichever pane is focused (j also always works)"),
+    b!(Action::ReviewPageUp, "review_page_up", "Page up", "Review", "pageup", "Move up a page in whichever pane is focused"),
+    b!(Action::ReviewPageDown, "review_page_down", "Page down", "Review", "pagedown", "Move down a page in whichever pane is focused"),
+    b!(Action::ReviewHome, "review_home", "Jump to top", "Review", "home", "Jump to the first entry/line in the focused pane"),
+    b!(Action::ReviewEnd, "review_end", "Jump to bottom", "Review", "end", "Jump to the last entry/line in the focused pane"),
+    b!(Action::ReviewOpen, "review_open", "Open file", "Review", "enter", "Open the selected file and focus the content pane"),
+    b!(Action::ReviewToggleFocus, "review_toggle_focus", "Switch pane", "Review", "tab", "Switch focus between the tree and content panes"),
+    b!(Action::ReviewScrollLeft, "review_scroll_left", "Scroll left", "Review", "left", "Scroll the content pane left (source view only, while it's focused)"),
+    b!(Action::ReviewScrollRight, "review_scroll_right", "Scroll right", "Review", "right", "Scroll the content pane right (source view only, while it's focused)"),
+    b!(Action::ReviewToggleHover, "review_toggle_hover", "Toggle hover", "Review", "h", "Show/hide symbol info for the current line (source view only)"),
+    b!(Action::ReviewOpenSymbolJump, "review_open_symbol_jump", "Open symbol jump", "Review", "/", "Open the fuzzy symbol-jump overlay"),
+    b!(Action::ReviewToggleView, "review_toggle_view", "Toggle diff/source", "Review", "v", "Switch the content pane between diff and source (only if the file has changes)"),
+    b!(Action::ReviewMarkGood, "review_mark_good", "Mark good", "Review", "g", "Clear notes/flag on the open file"),
+    b!(Action::ReviewFlagRework, "review_flag_rework", "Flag rework", "Review", "x", "Flag the open file as needing a redo"),
+    b!(Action::ReviewComment, "review_comment", "Comment", "Review", "c", "In source view: comment on the current line. Otherwise: comment on the whole file"),
+    b!(Action::ReviewSplitView, "review_split_view", "Split view", "Review", "s", "Switch the diff view to before/after columns"),
+    b!(Action::ReviewUnifiedView, "review_unified_view", "Unified view", "Review", "u", "Switch the diff view back to unified"),
     // Plain Enter, not Ctrl+Enter: most terminals collapse Ctrl+Enter to the
     // same bare CR byte as Enter (no modifier bit survives), so a chord that
     // requires the Ctrl modifier silently never matches outside terminals
-    // with the Kitty keyboard protocol enabled. Steer has no other use for
-    // bare Enter, so it's free to mean "iterate" here.
-    b!(Action::SteerIterate, "steer_iterate", "Iterate", "Steer", "enter", "Send queued notes to the real pi agent"),
-
-    b!(Action::NavUp, "nav_up", "Move up", "Navigate", "up", "Move up in whichever pane is focused (k also always works)"),
-    b!(Action::NavDown, "nav_down", "Move down", "Navigate", "down", "Move down in whichever pane is focused (j also always works)"),
-    b!(Action::NavPageUp, "nav_page_up", "Page up", "Navigate", "pageup", "Move up a page in whichever pane is focused"),
-    b!(Action::NavPageDown, "nav_page_down", "Page down", "Navigate", "pagedown", "Move down a page in whichever pane is focused"),
-    b!(Action::NavHome, "nav_home", "Jump to top", "Navigate", "home", "Jump to the first entry/line in the focused pane"),
-    b!(Action::NavEnd, "nav_end", "Jump to bottom", "Navigate", "end", "Jump to the last entry/line in the focused pane"),
-    b!(Action::NavOpen, "nav_open", "Open file", "Navigate", "enter", "Open the selected file and focus the source pane"),
-    b!(Action::NavToggleFocus, "nav_toggle_focus", "Switch pane", "Navigate", "tab", "Switch focus between the tree and source panes"),
-    b!(Action::NavScrollLeft, "nav_scroll_left", "Scroll left", "Navigate", "left", "Scroll the source pane left (only while it's focused)"),
-    b!(Action::NavScrollRight, "nav_scroll_right", "Scroll right", "Navigate", "right", "Scroll the source pane right (only while it's focused)"),
-    b!(Action::NavToggleHover, "nav_toggle_hover", "Toggle hover", "Navigate", "h", "Show/hide symbol info for the current line"),
-    b!(Action::NavOpenSymbolJump, "nav_open_symbol_jump", "Open symbol jump", "Navigate", "/", "Open the fuzzy symbol-jump overlay"),
-    b!(Action::NavComment, "nav_comment", "Comment", "Navigate", "c", "Leave a real note on the current line, for the next iterate"),
+    // with the Kitty keyboard protocol enabled. Enter already means "open
+    // file" here, so iterate gets its own mnemonic letter instead.
+    b!(Action::ReviewIterate, "review_iterate", "Iterate", "Review", "i", "Send queued notes to the real pi agent"),
 
     b!(Action::SymbolUp, "symbol_up", "Move up", "Symbol Jump", "up", "Move the result selection up"),
     b!(Action::SymbolDown, "symbol_down", "Move down", "Symbol Jump", "down", "Move the result selection down"),
@@ -149,8 +135,6 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::NoteCancel, "note_cancel", "Cancel", "Note", "esc", "Discard and close without saving"),
 
     b!(Action::AgentSend, "agent_send", "Send prompt", "Agent", "enter", "Send the typed prompt to the real pi agent"),
-    b!(Action::AgentSwitchBackend, "agent_switch_backend", "Switch backend", "Agent", "ctrl+b", "Toggle pi \u{2194} pi/openai-codex"),
-    b!(Action::AgentToggleEditMode, "agent_toggle_edit_mode", "Toggle edit mode", "Agent", "ctrl+e", "Chat (read-only) \u{2194} Edit (writes straight to the repo)"),
     b!(Action::AgentScrollUp, "agent_scroll_up", "Scroll up", "Agent", "pageup", "Scroll the transcript up to review history"),
     b!(Action::AgentScrollDown, "agent_scroll_down", "Scroll down", "Agent", "pagedown", "Scroll the transcript back down toward the latest"),
 
@@ -333,8 +317,8 @@ pub fn generate_markdown(keymap: &Keymap) -> String {
          Create `~/.steer.toml` and set any binding name below to a new chord, e.g.:\n\n\
          ```toml\n\
          quit = \"ctrl+q\"\n\
-         steer_comment = \"ctrl+enter\"\n\
-         nav_toggle_hover = \"shift+h\"\n\
+         review_comment = \"ctrl+enter\"\n\
+         review_toggle_hover = \"shift+h\"\n\
          ```\n\n\
          Chords are `mod+mod+key`, e.g. `ctrl+enter`, `shift+tab`, `f1`, `space`, `/`, `g`. \
          Modifiers: `ctrl`, `shift`, `alt`. Unknown binding names or unparsable chords are \
@@ -457,8 +441,8 @@ mod tests {
     fn defaults_is_populated_and_matches_binding_table() {
         let keymap = Keymap::defaults();
         assert_eq!(keymap.chords.len(), BINDINGS.len());
-        let steer_up = keymap.chord(Action::SteerUp);
-        assert_eq!(steer_up, KeyChord::parse("up").unwrap());
+        let review_up = keymap.chord(Action::ReviewUp);
+        assert_eq!(review_up, KeyChord::parse("up").unwrap());
     }
 
     #[test]
@@ -466,7 +450,7 @@ mod tests {
         let keymap = Keymap::defaults();
         let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         assert!(keymap.is(&key, Action::Quit));
-        assert!(!keymap.is(&key, Action::SteerMarkGood));
+        assert!(!keymap.is(&key, Action::ReviewMarkGood));
     }
 
     #[test]

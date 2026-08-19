@@ -78,9 +78,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, target_dir: PathBu
             }
         }
 
-        if app.open_editor_requested {
-            app.open_editor_requested = false;
-            open_external_editor(terminal, &mut app)?;
+        if let Some(target) = app.open_editor_requested.take() {
+            open_external_editor(terminal, &mut app, target)?;
         }
 
         if app.should_quit {
@@ -90,21 +89,25 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, target_dir: PathBu
 }
 
 /// Suspends the TUI (raw mode + alternate screen) so an interactive editor
-/// can draw directly to the real terminal, runs it on `app.commit_message`,
-/// then restores the TUI and forces a full redraw.
-fn open_external_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
+/// can draw directly to the real terminal, runs it on whichever buffer
+/// `target` names, then restores the TUI and forces a full redraw.
+fn open_external_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, target: app::EditorTarget) -> io::Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
-    let result = editor::edit_text(&app.commit_message);
+    let initial = match target {
+        app::EditorTarget::CommitMessage => app.commit_message.clone(),
+        app::EditorTarget::IteratePrompt => app.iterate_draft.clone(),
+    };
+    let result = editor::edit_text(&initial);
 
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
     terminal.clear()?;
 
-    match result {
-        Ok(text) => app.commit_message = text.trim_end().to_string(),
-        Err(e) => app.commit_message_status = Some(e),
+    match target {
+        app::EditorTarget::CommitMessage => app.finish_editing_commit_message(result),
+        app::EditorTarget::IteratePrompt => app.finish_editing_iterate_prompt(result),
     }
 
     Ok(())

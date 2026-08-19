@@ -37,13 +37,12 @@ pub struct Hunk {
     pub note: Option<String>,
 }
 
-/// A file as it appears in the STEER sidebar.
+/// A file as it appears in the Review tree.
 #[derive(Clone, PartialEq)]
 pub struct FileEntry {
     pub path: String,
     pub hunk_count: u32,
     pub notes: u32,
-    pub selected: bool,
     pub flagged: bool,
     pub hunks: Vec<Hunk>,
 }
@@ -104,7 +103,6 @@ pub fn mock_project() -> Project {
             path: "main.rs".to_string(),
             hunk_count: 2,
             notes: 0,
-            selected: true,
             flagged: false,
             hunks: vec![],
         },
@@ -112,7 +110,6 @@ pub fn mock_project() -> Project {
             path: "lib.rs".to_string(),
             hunk_count: 1,
             notes: 0,
-            selected: true,
             flagged: false,
             hunks: vec![],
         },
@@ -120,7 +117,6 @@ pub fn mock_project() -> Project {
             path: "index/mod.rs".to_string(),
             hunk_count: 3,
             notes: 0,
-            selected: false,
             flagged: false,
             hunks: vec![],
         },
@@ -128,7 +124,6 @@ pub fn mock_project() -> Project {
             path: "index/postings.rs".to_string(),
             hunk_count: 5,
             notes: 2,
-            selected: true,
             flagged: true,
             hunks: postings_hunks,
         },
@@ -136,7 +131,6 @@ pub fn mock_project() -> Project {
             path: "query/parser.rs".to_string(),
             hunk_count: 6,
             notes: 1,
-            selected: false,
             flagged: false,
             hunks: parser_hunks,
         },
@@ -144,7 +138,6 @@ pub fn mock_project() -> Project {
             path: "tests/integration_test.rs".to_string(),
             hunk_count: 3,
             notes: 0,
-            selected: false,
             flagged: false,
             hunks: vec![],
         },
@@ -207,9 +200,16 @@ impl SymbolResult {
 pub enum AgentLineKind {
     Done,
     InProgress,
+    /// The agent's final answer — rendered at full brightness.
     Text,
+    /// The agent's private reasoning, shown dimmed so it reads as
+    /// clearly secondary to the actual answer instead of blending into it.
+    Thinking,
     ToolCall,
     Proposal,
+    /// A line the user typed and sent, prefixed with `>` and shown bold so
+    /// it stands out as the human side of the conversation.
+    UserPrompt,
     Blank,
 }
 

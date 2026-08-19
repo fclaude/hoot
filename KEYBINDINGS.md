@@ -8,8 +8,8 @@ Create `~/.steer.toml` and set any binding name below to a new chord, e.g.:
 
 ```toml
 quit = "ctrl+q"
-steer_comment = "ctrl+enter"
-nav_toggle_hover = "shift+h"
+review_comment = "ctrl+enter"
+review_toggle_hover = "shift+h"
 ```
 
 Chords are `mod+mod+key`, e.g. `ctrl+enter`, `shift+tab`, `f1`, `space`, `/`, `g`. Modifiers: `ctrl`, `shift`, `alt`. Unknown binding names or unparsable chords are reported as warnings on startup and otherwise ignored — they never prevent steer from starting.
@@ -23,45 +23,35 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | Binding name | Action | Default | Current | Description |
 |---|---|---|---|---|
 | `quit` | Quit | `q` |  | Exit steer |
-| `switch_steer` | Switch: Steer | `F1` |  | Jump to the Steer/Review screen |
-| `switch_navigate` | Switch: Navigate | `F2` |  | Jump to the Navigate screen |
-| `switch_agent` | Switch: Agent | `F3` |  | Jump to the Agent screen |
-| `switch_curate` | Switch: Curate | `F4` |  | Jump to the Curation screen |
+| `switch_review` | Switch: Review | `F1` |  | Jump to the Review screen (file tree + diff/source) |
+| `switch_agent` | Switch: Agent | `F2` |  | Jump to the Agent screen |
+| `switch_curate` | Switch: Curate | `F3` |  | Jump to the Curation screen |
 | `open_symbol_jump` | Open Symbol Jump | `Ctrl+k` |  | Open the fuzzy symbol-jump overlay from anywhere |
 | `open_file_finder` | Open File Finder | `Ctrl+f` |  | Open the fuzzy file finder (with live preview) from anywhere |
 
-## Steer
+## Review
 
 | Binding name | Action | Default | Current | Description |
 |---|---|---|---|---|
-| `steer_up` | Move up | `↑` |  | Select the previous file |
-| `steer_down` | Move down | `↓` |  | Select the next file |
-| `steer_next_file` | Next file | `Tab` |  | Select the next file |
-| `steer_toggle_select` | Toggle select | `Space` |  | Toggle the file into/out of the next batch |
-| `steer_mark_good` | Mark good | `g` |  | Clear notes/flag on this file |
-| `steer_flag_rework` | Flag rework | `x` |  | Flag this file as needing a redo |
-| `steer_comment` | Comment | `c` |  | Queue a review note on this file |
-| `steer_split_view` | Split view | `s` |  | Switch the diff panel to before/after columns |
-| `steer_unified_view` | Unified view | `u` |  | Switch the diff panel back to unified |
-| `steer_iterate` | Iterate | `Enter` |  | Send queued notes to the real pi agent |
-
-## Navigate
-
-| Binding name | Action | Default | Current | Description |
-|---|---|---|---|---|
-| `nav_up` | Move up | `↑` |  | Move up in whichever pane is focused (k also always works) |
-| `nav_down` | Move down | `↓` |  | Move down in whichever pane is focused (j also always works) |
-| `nav_page_up` | Page up | `PgUp` |  | Move up a page in whichever pane is focused |
-| `nav_page_down` | Page down | `PgDn` |  | Move down a page in whichever pane is focused |
-| `nav_home` | Jump to top | `Home` |  | Jump to the first entry/line in the focused pane |
-| `nav_end` | Jump to bottom | `End` |  | Jump to the last entry/line in the focused pane |
-| `nav_open` | Open file | `Enter` |  | Open the selected file and focus the source pane |
-| `nav_toggle_focus` | Switch pane | `Tab` |  | Switch focus between the tree and source panes |
-| `nav_scroll_left` | Scroll left | `←` |  | Scroll the source pane left (only while it's focused) |
-| `nav_scroll_right` | Scroll right | `→` |  | Scroll the source pane right (only while it's focused) |
-| `nav_toggle_hover` | Toggle hover | `h` |  | Show/hide symbol info for the current line |
-| `nav_open_symbol_jump` | Open symbol jump | `/` |  | Open the fuzzy symbol-jump overlay |
-| `nav_comment` | Comment | `c` |  | Leave a real note on the current line, for the next iterate |
+| `review_up` | Move up | `↑` |  | Move up in whichever pane is focused (k also always works) |
+| `review_down` | Move down | `↓` |  | Move down in whichever pane is focused (j also always works) |
+| `review_page_up` | Page up | `PgUp` |  | Move up a page in whichever pane is focused |
+| `review_page_down` | Page down | `PgDn` |  | Move down a page in whichever pane is focused |
+| `review_home` | Jump to top | `Home` |  | Jump to the first entry/line in the focused pane |
+| `review_end` | Jump to bottom | `End` |  | Jump to the last entry/line in the focused pane |
+| `review_open` | Open file | `Enter` |  | Open the selected file and focus the content pane |
+| `review_toggle_focus` | Switch pane | `Tab` |  | Switch focus between the tree and content panes |
+| `review_scroll_left` | Scroll left | `←` |  | Scroll the content pane left (source view only, while it's focused) |
+| `review_scroll_right` | Scroll right | `→` |  | Scroll the content pane right (source view only, while it's focused) |
+| `review_toggle_hover` | Toggle hover | `h` |  | Show/hide symbol info for the current line (source view only) |
+| `review_open_symbol_jump` | Open symbol jump | `/` |  | Open the fuzzy symbol-jump overlay |
+| `review_toggle_view` | Toggle diff/source | `v` |  | Switch the content pane between diff and source (only if the file has changes) |
+| `review_mark_good` | Mark good | `g` |  | Clear notes/flag on the open file |
+| `review_flag_rework` | Flag rework | `x` |  | Flag the open file as needing a redo |
+| `review_comment` | Comment | `c` |  | In source view: comment on the current line. Otherwise: comment on the whole file |
+| `review_split_view` | Split view | `s` |  | Switch the diff view to before/after columns |
+| `review_unified_view` | Unified view | `u` |  | Switch the diff view back to unified |
+| `review_iterate` | Iterate | `i` |  | Send queued notes to the real pi agent |
 
 ## Symbol Jump
 
@@ -93,8 +83,6 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | Binding name | Action | Default | Current | Description |
 |---|---|---|---|---|
 | `agent_send` | Send prompt | `Enter` |  | Send the typed prompt to the real pi agent |
-| `agent_switch_backend` | Switch backend | `Ctrl+b` |  | Toggle pi ↔ pi/openai-codex |
-| `agent_toggle_edit_mode` | Toggle edit mode | `Ctrl+e` |  | Chat (read-only) ↔ Edit (writes straight to the repo) |
 | `agent_scroll_up` | Scroll up | `PgUp` |  | Scroll the transcript up to review history |
 | `agent_scroll_down` | Scroll down | `PgDn` |  | Scroll the transcript back down toward the latest |
 

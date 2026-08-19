@@ -1,9 +1,8 @@
 mod agent;
 mod curation;
 mod file_finder;
-mod navigate;
 mod note_input;
-mod steer;
+mod review;
 mod symbol_jump;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -32,8 +31,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_status_line(f, app, chunks[0], narrow);
 
     match app.mode {
-        Mode::Steer => steer::draw(f, app, chunks[1], narrow),
-        Mode::Navigate => navigate::draw(f, app, chunks[1], narrow),
+        Mode::Review => review::draw(f, app, chunks[1], narrow),
         Mode::Agent => agent::draw(f, app, chunks[1], narrow),
         Mode::Curation => curation::draw(f, app, chunks[1], narrow),
     }
@@ -48,8 +46,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
-        Mode::Steer => "steer",
-        Mode::Navigate => "navigate",
+        Mode::Review => "review",
         Mode::Agent => "agent",
         Mode::Curation => "curate",
     }
@@ -59,21 +56,18 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let left = format!(" {} — {}", mode_label(app.mode), app.project.name);
 
     let center = match app.mode {
-        Mode::Steer => {
-            if narrow {
-                format!("{}/{} sel", app.files_selected(), app.project.files.len())
-            } else {
-                format!("{} notes queued · {} files selected", app.notes_queued(), app.files_selected())
-            }
-        }
-        Mode::Navigate => {
+        Mode::Review => {
             let name = app.nav_file.strip_prefix(&app.target_dir).unwrap_or(&app.nav_file).display().to_string();
-            format!("{name}:{}", app.nav_line + 1)
+            if narrow {
+                format!("{} changed", app.project.files.len())
+            } else {
+                format!("{name}:{}  \u{b7}  {} changed  \u{b7}  {} notes", app.nav_line + 1, app.project.files.len(), app.notes_queued())
+            }
         }
         Mode::Agent => {
             let model = app.agent_model_live.as_deref().unwrap_or("\u{2014}");
             let status = if app.agent_running { "running" } else { "idle" };
-            format!("backend: {}   model: {}   {}", app.backend.label(), model, status)
+            format!("pi   model: {}   {}", model, status)
         }
         Mode::Curation => {
             let (sel, total): (u32, u32) =
@@ -83,8 +77,7 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     };
 
     let right = match app.mode {
-        Mode::Steer => "Enter iterate".to_string(),
-        Mode::Navigate => format!("{} symbols scanned", app.symbols.len()),
+        Mode::Review => format!("{} symbols scanned", app.symbols.len()),
         _ => String::new(),
     };
 
@@ -229,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn steer_screen_shows_real_file_and_diff() {
+    fn review_screen_shows_real_file_and_diff() {
         let dir = scratch_repo("steer");
         commit_file(&dir, "f.txt", "line1\nline2\n");
         fs::write(dir.join("f.txt"), "line1-changed\nline2\n").unwrap();
@@ -243,24 +236,30 @@ mod tests {
     }
 
     #[test]
-    fn steer_screen_reports_honest_empty_state_on_a_clean_repo() {
+    fn review_screen_falls_back_to_source_browsing_on_a_clean_repo() {
+        // Unlike the old separate Steer screen (which showed a blocking
+        // "nothing to review" message), the merged screen stays useful on a
+        // clean repo: there's no diff to show, so the content pane falls
+        // back to plain source browsing instead of going empty.
         let dir = scratch_repo("steer-clean");
         commit_file(&dir, "f.txt", "line1\n");
 
         let app = App::new(dir.clone(), Keymap::defaults());
         let screen = render(&app, 120, 30);
-        assert!(screen.contains("No uncommitted changes"), "{screen}");
+        assert!(screen.contains("f.txt"), "{screen}");
+        assert!(screen.contains("line1"), "{screen}");
+        assert!(!screen.contains("[x]") && !screen.contains("[ ]"), "no diff, so no select checkbox: {screen}");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn navigate_screen_shows_real_source_via_f2() {
+    fn review_screen_shows_real_source_via_f1() {
         let dir = scratch_repo("nav");
         commit_file(&dir, "main.rs", "fn main() {\n    println!(\"hi\");\n}\n");
 
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         let screen = render(&app, 120, 30);
         assert!(screen.contains("main.rs"), "{screen}");
         assert!(screen.contains("println"), "{screen}");
@@ -275,7 +274,7 @@ mod tests {
         commit_file(&dir, "big.rs", &content);
 
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // focus source
 
         // Before jumping: line 1 is visible, line 150 is nowhere near the
@@ -297,13 +296,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_screen_shows_backend_and_chat_mode_via_f3() {
+    fn agent_screen_shows_pi_status_via_f2() {
         let dir = scratch_repo("agent");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         let screen = render(&app, 120, 30);
-        assert!(screen.contains("Backend"), "{screen}");
-        assert!(screen.contains("Chat (read-only)"), "{screen}");
+        assert!(screen.contains("pi"), "{screen}");
+        assert!(screen.contains("idle"), "{screen}");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -314,7 +313,7 @@ mod tests {
 
         let dir = scratch_repo("agent-long");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         app.demo_transcript = false;
         app.transcript = (1..=100)
             .map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") })
@@ -337,7 +336,7 @@ mod tests {
 
         let dir = scratch_repo("agent-scrollback");
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         app.demo_transcript = false;
         app.transcript = (1..=100)
             .map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") })
@@ -354,25 +353,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_edit_mode_toggle_is_reflected_on_screen() {
-        let dir = scratch_repo("agent-edit");
-        let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
-        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-        let screen = render(&app, 120, 30);
-        assert!(screen.contains("Edit (writes to the repo)"), "{screen}");
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn curation_screen_shows_real_hunk_selection_via_f4() {
+    fn curation_screen_shows_real_hunk_selection_via_f3() {
         let dir = scratch_repo("curate");
         commit_file(&dir, "f.txt", "a\nb\n");
         fs::write(dir.join("f.txt"), "a-changed\nb\n").unwrap();
 
         let mut app = App::new(dir.clone(), Keymap::defaults());
-        app.on_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
         let screen = render(&app, 120, 30);
         assert!(screen.contains("f.txt"), "{screen}");
         assert!(screen.contains("1/1 sel"), "{screen}");
@@ -457,24 +444,31 @@ mod tests {
     }
 
     #[test]
-    fn narrow_terminal_uses_compact_steer_header() {
+    fn narrow_terminal_uses_compact_review_header() {
         let dir = scratch_repo("narrow");
         let app = App::new(dir.clone(), Keymap::defaults());
         let screen = render(&app, 80, 30);
-        // Narrow layout abbreviates "N notes queued · N files selected" to "N/N sel".
-        assert!(screen.contains("sel"), "{screen}");
-        assert!(!screen.contains("notes queued"), "{screen}");
+        // Narrow layout abbreviates the status line's full
+        // "path:line · N changed · N notes" center down to just "N changed"
+        // — check the status line (the first rendered row) specifically,
+        // since the tree sidebar's own footer always shows a notes count
+        // regardless of terminal width.
+        let status_line = screen.lines().next().unwrap_or("");
+        assert!(status_line.contains("changed"), "{status_line}");
+        assert!(!status_line.contains("notes"), "{status_line}");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn wide_terminal_uses_full_steer_header() {
+    fn wide_terminal_uses_full_review_header() {
         let dir = scratch_repo("wide");
         let app = App::new(dir.clone(), Keymap::defaults());
         let screen = render(&app, 150, 30);
-        assert!(screen.contains("notes queued"), "{screen}");
-        assert!(screen.contains("Enter iterate"), "{screen}");
+        let status_line = screen.lines().next().unwrap_or("");
+        assert!(status_line.contains("changed"), "{status_line}");
+        assert!(status_line.contains("notes"), "{status_line}");
+        assert!(status_line.contains("symbols scanned"), "{status_line}");
 
         let _ = fs::remove_dir_all(&dir);
     }
