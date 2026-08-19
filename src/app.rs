@@ -143,10 +143,7 @@ pub struct App {
     /// toggle any hunk, not just whichever one happens to be selected.
     pub curation_hunk_index: usize,
     pub commit_message: String,
-    /// Char index into `commit_message` (not a byte offset — see `char_boundary`).
-    pub commit_message_cursor: usize,
     pub commit_message_status: Option<String>,
-    pub editing_commit: bool,
     /// Set to ask main.rs's event loop to suspend the TUI and open $EDITOR
     /// on the buffer named by the target — App itself doesn't own the
     /// Terminal, so it can only request the suspend/resume, not do it.
@@ -267,9 +264,7 @@ impl App {
             // Real diffs get an empty message the user must actually write —
             // the drafted mock text belongs only to the non-git demo path.
             commit_message: if review.is_real { String::new() } else { data::mock_commit_message() },
-            commit_message_cursor: 0,
             commit_message_status: None,
-            editing_commit: false,
             open_editor_requested: None,
             last_commit: None,
         };
@@ -288,7 +283,6 @@ impl App {
         self.curation_index = 0;
         self.curation_hunk_index = 0;
         self.commit_message.clear();
-        self.commit_message_cursor = 0;
         self.commit_message_status = None;
         self.content_view = self.default_content_view();
     }
@@ -668,9 +662,6 @@ impl App {
         }
 
         // Text-entry modes swallow most keys before global shortcuts apply.
-        if self.mode == Mode::Curation && self.editing_commit {
-            return self.on_key_curation_edit(key);
-        }
         if self.mode == Mode::Agent && self.on_key_agent_input(key) {
             return;
         }
@@ -1191,52 +1182,13 @@ impl App {
                 }
             }
         } else if k.is(&key, Action::CurateEditMessage) {
-            self.editing_commit = true;
-            self.commit_message_cursor = self.commit_message.chars().count();
+            // Straight to $EDITOR on the real buffer — no in-TUI editing
+            // mode, same as the post-generation flow below.
+            self.open_editor_requested = Some(EditorTarget::CommitMessage);
         } else if k.is(&key, Action::CurateGenerateMessage) {
             self.generate_commit_message();
         } else if k.is(&key, Action::CurateCommit) {
             self.commit_selected();
-        }
-    }
-
-    fn on_key_curation_edit(&mut self, key: KeyEvent) {
-        if self.keymap.is(&key, Action::CurateStopEditing) {
-            self.editing_commit = false;
-            return;
-        }
-        let char_count = self.commit_message.chars().count();
-        match key.code {
-            KeyCode::Enter => {
-                let byte = char_boundary(&self.commit_message, self.commit_message_cursor);
-                self.commit_message.insert(byte, '\n');
-                self.commit_message_cursor += 1;
-            }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let byte = char_boundary(&self.commit_message, self.commit_message_cursor);
-                self.commit_message.insert(byte, c);
-                self.commit_message_cursor += 1;
-            }
-            KeyCode::Backspace => {
-                if self.commit_message_cursor > 0 {
-                    let start = char_boundary(&self.commit_message, self.commit_message_cursor - 1);
-                    let end = char_boundary(&self.commit_message, self.commit_message_cursor);
-                    self.commit_message.replace_range(start..end, "");
-                    self.commit_message_cursor -= 1;
-                }
-            }
-            KeyCode::Delete => {
-                if self.commit_message_cursor < char_count {
-                    let start = char_boundary(&self.commit_message, self.commit_message_cursor);
-                    let end = char_boundary(&self.commit_message, self.commit_message_cursor + 1);
-                    self.commit_message.replace_range(start..end, "");
-                }
-            }
-            KeyCode::Left => self.commit_message_cursor = self.commit_message_cursor.saturating_sub(1),
-            KeyCode::Right => self.commit_message_cursor = (self.commit_message_cursor + 1).min(char_count),
-            KeyCode::Home => self.commit_message_cursor = 0,
-            KeyCode::End => self.commit_message_cursor = char_count,
-            _ => {}
         }
     }
 }
@@ -1647,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn curation_navigation_and_edit_message_typing() {
+    fn curation_navigation_and_edit_message_requests_the_editor() {
         let (mut app, dir) = two_file_app("curate-edit");
         app.mode = Mode::Curation;
         assert_eq!(app.curation_index, 0);
@@ -1661,44 +1613,12 @@ mod tests {
         let now_fully_selected = app.curation_files[0].selected() == app.curation_files[0].total();
         assert_eq!(now_fully_selected, !was_fully_selected);
 
-        assert!(!app.editing_commit);
+        // 'e' opens $EDITOR directly on the real buffer — no in-TUI typing
+        // mode; main.rs's event loop is what actually suspends the TUI and
+        // runs the editor, so here we just check the request was made.
+        assert_eq!(app.open_editor_requested, None);
         app.on_key(key(KeyCode::Char('e')));
-        assert!(app.editing_commit);
-        app.on_key(key(KeyCode::Char('h')));
-        app.on_key(key(KeyCode::Char('i')));
-        assert_eq!(app.commit_message, "hi");
-        app.on_key(key(KeyCode::Backspace));
-        assert_eq!(app.commit_message, "h");
-        app.on_key(key(KeyCode::Esc));
-        assert!(!app.editing_commit);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn commit_message_editing_supports_cursor_movement_not_just_append() {
-        let (mut app, dir) = two_file_app("curate-cursor");
-        app.mode = Mode::Curation;
-        app.on_key(key(KeyCode::Char('e')));
-        for c in "helo".chars() {
-            app.on_key(key(KeyCode::Char(c)));
-        }
-        assert_eq!(app.commit_message_cursor, 4);
-        // cursor is after "helo"; move left once and insert 'l' -> "hello"
-        app.on_key(key(KeyCode::Left));
-        app.on_key(key(KeyCode::Char('l')));
-        assert_eq!(app.commit_message, "hello");
-        assert_eq!(app.commit_message_cursor, 4);
-
-        app.on_key(key(KeyCode::Home));
-        assert_eq!(app.commit_message_cursor, 0);
-        app.on_key(key(KeyCode::Delete));
-        assert_eq!(app.commit_message, "ello");
-
-        app.on_key(key(KeyCode::End));
-        assert_eq!(app.commit_message_cursor, 4);
-        app.on_key(key(KeyCode::Enter));
-        assert_eq!(app.commit_message, "ello\n");
+        assert_eq!(app.open_editor_requested, Some(EditorTarget::CommitMessage));
 
         let _ = fs::remove_dir_all(&dir);
     }

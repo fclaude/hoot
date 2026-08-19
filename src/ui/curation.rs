@@ -7,8 +7,6 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::theme;
 
-use super::agent::input_spans;
-
 pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -32,10 +30,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     draw_hunk_box(f, app, right[1]);
 
     let hints = super::key_hints(&[
-        ("\u{2190}\u{2192}", "Hunk"),
+        ("\u{2191}\u{2193}", "File"),
+        ("\u{2190}\u{2192}", "Prev/next hunk"),
         ("Space", "Toggle hunk"),
         ("g", "Generate message"),
-        ("e", "Quick edit"),
+        ("e", "Edit in $EDITOR"),
         ("c", "Commit"),
     ]);
     let mut spans = vec![Span::styled("\u{258c} ", Style::default().fg(theme::DIM))];
@@ -100,47 +99,18 @@ fn draw_commit_box(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(status.clone(), Style::default().fg(theme::ORANGE))));
         lines.push(Line::raw(""));
     }
-    if app.commit_message.is_empty() && !app.editing_commit {
+    if app.commit_message.is_empty() {
         lines.push(Line::from(Span::styled(
             "(empty — press g to draft one with pi, or e to write your own)",
             Style::default().fg(theme::DIM),
         )));
-    } else if app.editing_commit {
-        lines.extend(commit_message_lines_with_cursor(&app.commit_message, app.commit_message_cursor));
     } else {
         for l in app.commit_message.split('\n') {
             lines.push(Line::from(Span::styled(l.to_string(), Style::default().fg(theme::FG))));
         }
     }
-    let hints = if app.editing_commit {
-        vec![super::key_hints(&[("\u{2190}\u{2192}", "Move"), ("Home/End", "Line start/end"), ("Enter", "Newline"), ("Esc", "Stop editing")])]
-    } else {
-        vec![super::key_hints(&[("g", "Generate + open $EDITOR"), ("e", "Quick edit")])]
-    };
+    let hints = vec![super::key_hints(&[("g", "Generate + open $EDITOR"), ("e", "Edit in $EDITOR")])];
     super::draw_panel(f, area, title, Paragraph::new(lines), &hints);
-}
-
-/// Renders `text` as one `Line` per `\n`-separated row, with a visible
-/// block cursor on whichever row `cursor` (a char index into the whole
-/// buffer, not just one row) actually falls on — everything else in
-/// plain text.
-fn commit_message_lines_with_cursor(text: &str, cursor: usize) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    let mut offset = 0usize;
-    let mut placed = false;
-    let rows: Vec<&str> = text.split('\n').collect();
-    for row in &rows {
-        let row_char_count = row.chars().count();
-        let row_end = offset + row_char_count;
-        if !placed && cursor >= offset && cursor <= row_end {
-            out.push(Line::from(input_spans(row, cursor - offset)));
-            placed = true;
-        } else {
-            out.push(Line::from(Span::styled(row.to_string(), Style::default().fg(theme::FG))));
-        }
-        offset = row_end + 1; // +1 skips the '\n' consumed between rows
-    }
-    out
 }
 
 fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {

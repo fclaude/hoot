@@ -29,10 +29,13 @@ fn edit_text_with(editor: &str, initial: &str) -> Result<String, String> {
 }
 
 fn run_and_read(editor: &str, path: &Path) -> Result<String, String> {
-    let status = Command::new(editor).arg(path).status();
-    match status {
-        Ok(s) if s.success() => std::fs::read_to_string(path).map_err(|e| e.to_string()),
-        Ok(s) => Err(format!("{editor} exited with {s}")),
+    // Exit status isn't a reliable signal here — real editors (vim in
+    // particular) can return nonzero after a perfectly good save for all
+    // sorts of benign reasons. Whatever ended up on disk is the source of
+    // truth, so always read it back rather than discarding the user's edit
+    // over an exit code.
+    match Command::new(editor).arg(path).status() {
+        Ok(_) => std::fs::read_to_string(path).map_err(|e| e.to_string()),
         Err(e) => Err(format!("couldn't launch {editor}: {e}")),
     }
 }
@@ -71,9 +74,21 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_exit_is_an_error() {
-        let err = edit_text_with("false", "whatever").unwrap_err();
-        assert!(err.contains("exited"), "{err}");
+    fn nonzero_exit_still_returns_whatever_is_on_disk() {
+        // `false` never touches the file, but a nonzero exit shouldn't turn
+        // that into an error — it should just report the file unchanged.
+        let result = edit_text_with("false", "whatever").unwrap();
+        assert_eq!(result, "whatever");
+    }
+
+    #[test]
+    fn nonzero_exit_after_a_real_save_keeps_the_edit() {
+        // Simulates an editor (e.g. vim) that saves successfully but still
+        // exits nonzero for unrelated reasons — the save must not be lost.
+        let editor = script(r#"printf 'edited content' > "$1"; exit 1"#);
+        let result = edit_text_with(editor.to_str().unwrap(), "original").unwrap();
+        assert_eq!(result, "edited content");
+        let _ = std::fs::remove_file(&editor);
     }
 
     #[test]

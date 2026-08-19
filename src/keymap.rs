@@ -71,7 +71,6 @@ pub enum Action {
     CurateEditMessage,
     CurateGenerateMessage,
     CurateCommit,
-    CurateStopEditing,
 }
 
 pub struct Binding {
@@ -145,10 +144,9 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::CurateHunkPrev, "curate_hunk_prev", "Previous hunk", "Curate", "left", "View the previous hunk in this file"),
     b!(Action::CurateHunkNext, "curate_hunk_next", "Next hunk", "Curate", "right", "View the next hunk in this file"),
     b!(Action::CurateToggleHunk, "curate_toggle_hunk", "Toggle hunk", "Curate", "space", "Select/deselect the hunk currently shown"),
-    b!(Action::CurateEditMessage, "curate_edit_message", "Quick edit", "Curate", "e", "In-TUI quick edit of the commit message"),
+    b!(Action::CurateEditMessage, "curate_edit_message", "Edit message", "Curate", "e", "Open the commit message in $EDITOR"),
     b!(Action::CurateGenerateMessage, "curate_generate_message", "Generate message", "Curate", "g", "Draft a message from the real diff with pi, then open it in $EDITOR for a last pass"),
     b!(Action::CurateCommit, "curate_commit", "Commit", "Curate", "c", "git commit the selected hunks with the drafted message"),
-    b!(Action::CurateStopEditing, "curate_stop_editing", "Stop editing", "Curate", "esc", "Stop editing the commit message"),
 ];
 
 fn binding_by_name(name: &str) -> Option<&'static Binding> {
