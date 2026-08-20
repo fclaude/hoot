@@ -178,7 +178,7 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
             )),
             Line::raw(""),
             Line::from(Span::styled(
-                super::truncate_with_ellipsis("Switch to Review (F1) or Agent (F2) to make some changes first.", body_width),
+                super::truncate_with_ellipsis("Switch to Review (F1) or Agent (F3) to make some changes first.", body_width),
                 Style::default().fg(theme::DIM),
             )),
         ];

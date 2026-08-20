@@ -9,37 +9,47 @@
 //! the Agent screen. A marker file under `$HOME` remembers that the prompt
 //! has already been shown and confirmed once, so it doesn't nag on every
 //! turn after that.
+//!
+//! Tracked separately per backend, not one flag for "Agent" as a whole:
+//! `--approve` (pi) and `--auto` (opencode) are genuinely different trust
+//! grants (see the doc comments referenced above) — acknowledging one
+//! backend's prompt shouldn't silently wave through the other's the first
+//! time someone switches `--agent`.
 
 use std::path::{Path, PathBuf};
 
-fn marker_path(home: &Path) -> PathBuf {
-    home.join(".hoot-agent-trust-ack")
+use crate::agent_client::AgentBackend;
+
+fn marker_path(home: &Path, backend: AgentBackend) -> PathBuf {
+    home.join(format!(".hoot-agent-trust-ack-{}", backend.label()))
 }
 
-/// True once the user has confirmed the trust prompt at least once on this
-/// machine. A missing `$HOME` (unusual, but not impossible) is treated as
-/// "not yet acknowledged" rather than erroring the whole app over a
-/// one-time confirmation dialog — worst case, the prompt shows again.
-pub fn is_acknowledged() -> bool {
+/// True once the user has confirmed `backend`'s trust prompt at least once
+/// on this machine. A missing `$HOME` (unusual, but not impossible) is
+/// treated as "not yet acknowledged" rather than erroring the whole app
+/// over a one-time confirmation dialog — worst case, the prompt shows
+/// again.
+pub fn is_acknowledged(backend: AgentBackend) -> bool {
     let Some(home) = std::env::var_os("HOME") else { return false };
-    is_acknowledged_at(Path::new(&home))
+    is_acknowledged_at(Path::new(&home), backend)
 }
 
-fn is_acknowledged_at(home: &Path) -> bool {
-    marker_path(home).exists()
+fn is_acknowledged_at(home: &Path, backend: AgentBackend) -> bool {
+    marker_path(home, backend).exists()
 }
 
-/// Records that the user has confirmed the trust prompt, so it won't show
-/// again. Best-effort: if `$HOME` isn't set or the file can't be written,
-/// the prompt just shows again next launch — annoying, not unsafe, so
-/// errors here are silently swallowed rather than surfaced.
-pub fn acknowledge() {
+/// Records that the user has confirmed `backend`'s trust prompt, so it
+/// won't show again for that backend. Best-effort: if `$HOME` isn't set or
+/// the file can't be written, the prompt just shows again next launch —
+/// annoying, not unsafe, so errors here are silently swallowed rather than
+/// surfaced.
+pub fn acknowledge(backend: AgentBackend) {
     let Some(home) = std::env::var_os("HOME") else { return };
-    acknowledge_at(Path::new(&home));
+    acknowledge_at(Path::new(&home), backend);
 }
 
-fn acknowledge_at(home: &Path) {
-    let _ = std::fs::write(marker_path(home), "acknowledged\n");
+fn acknowledge_at(home: &Path, backend: AgentBackend) {
+    let _ = std::fs::write(marker_path(home, backend), "acknowledged\n");
 }
 
 #[cfg(test)]
@@ -59,16 +69,28 @@ mod tests {
     #[test]
     fn unacknowledged_by_default() {
         let dir = scratch_dir("missing");
-        assert!(!is_acknowledged_at(&dir));
+        assert!(!is_acknowledged_at(&dir, AgentBackend::OpenCode));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn acknowledging_persists_across_checks() {
         let dir = scratch_dir("ack");
-        assert!(!is_acknowledged_at(&dir));
-        acknowledge_at(&dir);
-        assert!(is_acknowledged_at(&dir));
+        assert!(!is_acknowledged_at(&dir, AgentBackend::Pi));
+        acknowledge_at(&dir, AgentBackend::Pi);
+        assert!(is_acknowledged_at(&dir, AgentBackend::Pi));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn acknowledging_one_backend_does_not_acknowledge_the_other() {
+        // pi's --approve and opencode's --auto are different trust grants
+        // — confirming one shouldn't silently wave the other through the
+        // first time someone switches --agent.
+        let dir = scratch_dir("per-backend");
+        acknowledge_at(&dir, AgentBackend::OpenCode);
+        assert!(is_acknowledged_at(&dir, AgentBackend::OpenCode));
+        assert!(!is_acknowledged_at(&dir, AgentBackend::Pi));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

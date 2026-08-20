@@ -1359,7 +1359,7 @@ impl App {
         match key.code {
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.agent_trust_acknowledged = true;
-                crate::trust::acknowledge();
+                crate::trust::acknowledge(self.agent_backend);
                 self.overlay = Overlay::None;
                 if let Some((prompt, cwd, tools, purpose)) = self.pending_turn.take() {
                     self.spawn_turn_now(prompt, cwd, tools, purpose);

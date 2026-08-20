@@ -211,7 +211,7 @@ fn run(
     let mut app = App::new(target_dir, keymap, agent_backend);
     // Only the real production entry point reads real on-disk state for
     // this — see the field's doc comment on why App::new itself doesn't.
-    app.agent_trust_acknowledged = trust::is_acknowledged();
+    app.agent_trust_acknowledged = trust::is_acknowledged(agent_backend);
 
     loop {
         app.poll_agent();
