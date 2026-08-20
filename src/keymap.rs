@@ -1,4 +1,4 @@
-//! Named key bindings, with defaults and `~/.steer.toml` overrides.
+//! Named key bindings, with defaults and `~/.hoot.toml` overrides.
 //!
 //! Every *command* key (mode switches, navigation, toggles, submit actions)
 //! goes through here. Raw text entry — typing into the agent prompt, the
@@ -8,7 +8,7 @@
 //! fixed outside the keymap, as a safety net that can't be remapped away.
 //!
 //! [`BINDINGS`] is the single source of truth: it drives the runtime
-//! defaults, the `~/.steer.toml` override parser, and the generated
+//! defaults, the `~/.hoot.toml` override parser, and the generated
 //! `KEYBINDINGS.md` (see `--print-keymap`), so the doc can't drift from the
 //! code.
 
@@ -78,7 +78,7 @@ pub enum Action {
 
 pub struct Binding {
     pub action: Action,
-    /// snake_case key used in ~/.steer.toml
+    /// snake_case key used in ~/.hoot.toml
     pub name: &'static str,
     pub label: &'static str,
     pub group: &'static str,
@@ -93,7 +93,7 @@ macro_rules! b {
 }
 
 pub const BINDINGS: &[Binding] = &[
-    b!(Action::Quit, "quit", "Quit", "Global", "q", "Exit steer"),
+    b!(Action::Quit, "quit", "Quit", "Global", "q", "Exit hoot"),
     // Two chords each: F-keys are the traditional binding, but laptop
     // keyboards (MacBooks especially) map F1-F3 to brightness/Mission
     // Control/etc by default and need Fn held to send the real F-key, so a
@@ -105,12 +105,32 @@ pub const BINDINGS: &[Binding] = &[
     // the modifier intact at all. Ctrl+letter avoids both problems: it's
     // real C0 range (0x01-0x1A), universally supported, and distinct from
     // every other key.)
-    b!(Action::SwitchReview, "switch_review", "Switch: Review", "Global", "f1,ctrl+r", "Jump to the Review screen (file tree + diff/source)"),
+    b!(
+        Action::SwitchReview,
+        "switch_review",
+        "Switch: Review",
+        "Global",
+        "f1,ctrl+r",
+        "Jump to the Review screen (file tree + diff/source)"
+    ),
     b!(Action::SwitchAgent, "switch_agent", "Switch: Agent", "Global", "f2,ctrl+a", "Jump to the Agent screen"),
     b!(Action::SwitchCurate, "switch_curate", "Switch: Curate", "Global", "f3,ctrl+u", "Jump to the Curation screen"),
-    b!(Action::OpenSymbolJump, "open_symbol_jump", "Open Symbol Jump", "Global", "ctrl+k", "Open the fuzzy symbol-jump overlay from anywhere"),
-    b!(Action::OpenFileFinder, "open_file_finder", "Open File Finder", "Global", "ctrl+f", "Open the fuzzy file finder (with live preview) from anywhere"),
-
+    b!(
+        Action::OpenSymbolJump,
+        "open_symbol_jump",
+        "Open Symbol Jump",
+        "Global",
+        "ctrl+k",
+        "Open the fuzzy symbol-jump overlay from anywhere"
+    ),
+    b!(
+        Action::OpenFileFinder,
+        "open_file_finder",
+        "Open File Finder",
+        "Global",
+        "ctrl+f",
+        "Open the fuzzy file finder (with live preview) from anywhere"
+    ),
     b!(Action::ReviewUp, "review_up", "Move up", "Review", "up", "Move up in whichever pane is focused (k also always works)"),
     b!(Action::ReviewDown, "review_down", "Move down", "Review", "down", "Move down in whichever pane is focused (j also always works)"),
     b!(Action::ReviewPageUp, "review_page_up", "Page up", "Review", "pageup", "Move up a page in whichever pane is focused"),
@@ -119,22 +139,71 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::ReviewEnd, "review_end", "Jump to bottom", "Review", "end", "Jump to the last entry/line in the focused pane"),
     b!(Action::ReviewOpen, "review_open", "Open file", "Review", "enter", "Open the selected file and focus the content pane"),
     b!(Action::ReviewToggleFocus, "review_toggle_focus", "Switch pane", "Review", "tab", "Switch focus between the tree and content panes"),
-    b!(Action::ReviewScrollLeft, "review_scroll_left", "Scroll left", "Review", "left", "Scroll the content pane left, while it's focused (source or diff view; not the before/after split)"),
-    b!(Action::ReviewScrollRight, "review_scroll_right", "Scroll right", "Review", "right", "Scroll the content pane right, while it's focused (source or diff view; not the before/after split)"),
-    b!(Action::ReviewToggleHover, "review_toggle_hover", "Toggle hover", "Review", "h", "Show/hide symbol info for the current line (source view only)"),
+    b!(
+        Action::ReviewScrollLeft,
+        "review_scroll_left",
+        "Scroll left",
+        "Review",
+        "left",
+        "Scroll the content pane left, while it's focused (source or diff view; not the before/after split)"
+    ),
+    b!(
+        Action::ReviewScrollRight,
+        "review_scroll_right",
+        "Scroll right",
+        "Review",
+        "right",
+        "Scroll the content pane right, while it's focused (source or diff view; not the before/after split)"
+    ),
+    b!(
+        Action::ReviewToggleHover,
+        "review_toggle_hover",
+        "Toggle hover",
+        "Review",
+        "h",
+        "Show/hide symbol info for the current line (source view only)"
+    ),
     b!(Action::ReviewOpenSymbolJump, "review_open_symbol_jump", "Open symbol jump", "Review", "/", "Open the fuzzy symbol-jump overlay"),
-    b!(Action::ReviewToggleView, "review_toggle_view", "Toggle diff/source", "Review", "v", "Switch the content pane between diff and source (only if the file has changes)"),
+    b!(
+        Action::ReviewToggleView,
+        "review_toggle_view",
+        "Toggle diff/source",
+        "Review",
+        "v",
+        "Switch the content pane between diff and source (only if the file has changes)"
+    ),
     b!(Action::ReviewMarkGood, "review_mark_good", "Mark good", "Review", "g", "Clear notes/flag on the open file"),
     b!(Action::ReviewFlagRework, "review_flag_rework", "Flag rework", "Review", "x", "Flag the open file as needing a redo"),
-    b!(Action::ReviewClearFileNotes, "review_clear_file_notes", "Clear file notes", "Review", "d", "Clear notes on the open file, without touching its flag (unlike Mark Good)"),
+    b!(
+        Action::ReviewClearFileNotes,
+        "review_clear_file_notes",
+        "Clear file notes",
+        "Review",
+        "d",
+        "Clear notes on the open file, without touching its flag (unlike Mark Good)"
+    ),
     // "D" (the literal uppercase character), not "shift+d" — crossterm
     // reports Shift+letter as the uppercase Char code itself with no
     // separate Shift modifier bit set on most terminals, so a chord that
     // requires the modifier bit would never match. Same class of gotcha as
     // the ctrl+enter one below, just easier to miss since it doesn't error,
     // it just silently never fires.
-    b!(Action::ReviewClearAllNotes, "review_clear_all_notes", "Clear all notes", "Review", "D", "Clear every queued note across the whole tree"),
-    b!(Action::ReviewComment, "review_comment", "Comment", "Review", "c", "In source view: comment on the current line. Otherwise: comment on the whole file"),
+    b!(
+        Action::ReviewClearAllNotes,
+        "review_clear_all_notes",
+        "Clear all notes",
+        "Review",
+        "D",
+        "Clear every queued note across the whole tree"
+    ),
+    b!(
+        Action::ReviewComment,
+        "review_comment",
+        "Comment",
+        "Review",
+        "c",
+        "In source view: comment on the current line. Otherwise: comment on the whole file"
+    ),
     b!(Action::ReviewSplitView, "review_split_view", "Split view", "Review", "s", "Switch the diff view to before/after columns"),
     b!(Action::ReviewUnifiedView, "review_unified_view", "Unified view", "Review", "u", "Switch the diff view back to unified"),
     // Plain Enter, not Ctrl+Enter: most terminals collapse Ctrl+Enter to the
@@ -143,32 +212,48 @@ pub const BINDINGS: &[Binding] = &[
     // with the Kitty keyboard protocol enabled. Enter already means "open
     // file" here, so iterate gets its own mnemonic letter instead.
     b!(Action::ReviewIterate, "review_iterate", "Iterate", "Review", "i", "Send queued notes to the real pi agent"),
-    b!(Action::ReviewCopyPrompt, "review_copy_prompt", "Copy prompt", "Review", "y", "Copy the same assembled review prompt to the system clipboard, for pasting into an agent running elsewhere"),
-
+    b!(
+        Action::ReviewCopyPrompt,
+        "review_copy_prompt",
+        "Copy prompt",
+        "Review",
+        "y",
+        "Copy the same assembled review prompt to the system clipboard, for pasting into an agent running elsewhere"
+    ),
     b!(Action::SymbolUp, "symbol_up", "Move up", "Symbol Jump", "up", "Move the result selection up"),
     b!(Action::SymbolDown, "symbol_down", "Move down", "Symbol Jump", "down", "Move the result selection down"),
     b!(Action::SymbolJumpTo, "symbol_jump_to", "Jump", "Symbol Jump", "enter", "Jump to the selected symbol's definition"),
     b!(Action::SymbolClose, "symbol_close", "Close", "Symbol Jump", "esc", "Close the overlay without jumping"),
-
     b!(Action::FinderUp, "finder_up", "Move up", "File Finder", "up", "Move the result selection up"),
     b!(Action::FinderDown, "finder_down", "Move down", "File Finder", "down", "Move the result selection down"),
     b!(Action::FinderOpen, "finder_open", "Open", "File Finder", "enter", "Open the selected file"),
     b!(Action::FinderClose, "finder_close", "Close", "File Finder", "esc", "Close the overlay without opening"),
-
     b!(Action::NoteConfirm, "note_confirm", "Save note", "Note", "enter", "Save the note and close the overlay"),
     b!(Action::NoteCancel, "note_cancel", "Cancel", "Note", "esc", "Discard and close without saving"),
-
     b!(Action::AgentSend, "agent_send", "Send prompt", "Agent", "enter", "Send the typed prompt to the real pi agent"),
     b!(Action::AgentScrollUp, "agent_scroll_up", "Scroll up", "Agent", "pageup", "Scroll the transcript up to review history"),
-    b!(Action::AgentScrollDown, "agent_scroll_down", "Scroll down", "Agent", "pagedown", "Scroll the transcript back down toward the latest"),
-
+    b!(
+        Action::AgentScrollDown,
+        "agent_scroll_down",
+        "Scroll down",
+        "Agent",
+        "pagedown",
+        "Scroll the transcript back down toward the latest"
+    ),
     b!(Action::CurateUp, "curate_up", "Move up", "Curate", "up", "Select the previous file"),
     b!(Action::CurateDown, "curate_down", "Move down", "Curate", "down", "Select the next file"),
     b!(Action::CurateHunkPrev, "curate_hunk_prev", "Previous hunk", "Curate", "left", "View the previous hunk in this file"),
     b!(Action::CurateHunkNext, "curate_hunk_next", "Next hunk", "Curate", "right", "View the next hunk in this file"),
     b!(Action::CurateToggleHunk, "curate_toggle_hunk", "Toggle hunk", "Curate", "space", "Select/deselect the hunk currently shown"),
     b!(Action::CurateEditMessage, "curate_edit_message", "Edit message", "Curate", "e", "Open the commit message in $EDITOR"),
-    b!(Action::CurateGenerateMessage, "curate_generate_message", "Generate message", "Curate", "g", "Draft a message from the real diff with pi, then open it in $EDITOR for a last pass"),
+    b!(
+        Action::CurateGenerateMessage,
+        "curate_generate_message",
+        "Generate message",
+        "Curate",
+        "g",
+        "Draft a message from the real diff with pi, then open it in $EDITOR for a last pass"
+    ),
     b!(Action::CurateCommit, "curate_commit", "Commit", "Curate", "c", "git commit the selected hunks with the drafted message"),
 ];
 
@@ -238,9 +323,7 @@ impl KeyChord {
             "pagedown" | "pgdn" => KeyCode::PageDown,
             "home" => KeyCode::Home,
             "end" => KeyCode::End,
-            f if f.len() >= 2 && f.starts_with('f') && f[1..].chars().all(|c| c.is_ascii_digit()) => {
-                KeyCode::F(f[1..].parse().ok()?)
-            }
+            f if f.len() >= 2 && f.starts_with('f') && f[1..].chars().all(|c| c.is_ascii_digit()) => KeyCode::F(f[1..].parse().ok()?),
             _ if key_part.chars().count() == 1 => KeyCode::Char(key_part.chars().next().unwrap()),
             _ => return None,
         };
@@ -295,14 +378,13 @@ impl Keymap {
     pub fn defaults() -> Keymap {
         let mut chords = HashMap::new();
         for b in BINDINGS {
-            let list = KeyChord::parse_list(b.default)
-                .unwrap_or_else(|| panic!("bad default chord {:?} for {}", b.default, b.name));
+            let list = KeyChord::parse_list(b.default).unwrap_or_else(|| panic!("bad default chord {:?} for {}", b.default, b.name));
             chords.insert(b.action, list);
         }
         Keymap { chords }
     }
 
-    /// Loads defaults, then applies `~/.steer.toml` overrides on top. Returns
+    /// Loads defaults, then applies `~/.hoot.toml` overrides on top. Returns
     /// warnings for unknown action names or unparseable chord strings —
     /// invalid entries are skipped rather than failing the whole load.
     pub fn load() -> (Keymap, Vec<String>) {
@@ -310,7 +392,7 @@ impl Keymap {
         let mut warnings = Vec::new();
 
         let Some(home) = std::env::var_os("HOME") else { return (keymap, warnings) };
-        let path = std::path::Path::new(&home).join(".steer.toml");
+        let path = std::path::Path::new(&home).join(".hoot.toml");
         let Ok(content) = std::fs::read_to_string(&path) else { return (keymap, warnings) };
 
         let table = match content.parse::<toml::Table>() {
@@ -350,7 +432,7 @@ impl Keymap {
     }
 
     /// Overrides a binding programmatically to a single chord. The
-    /// `~/.steer.toml` loader doesn't need this (it builds the map
+    /// `~/.hoot.toml` loader doesn't need this (it builds the map
     /// directly) — it exists so tests can exercise a specific remap without
     /// touching the real filesystem.
     #[cfg(test)]
@@ -363,14 +445,14 @@ impl Keymap {
 /// possibly-overridden chords) so the doc can never drift from the code.
 pub fn generate_markdown(keymap: &Keymap) -> String {
     let mut out = String::new();
-    out.push_str("# steer keybindings\n\n");
+    out.push_str("# hoot keybindings\n\n");
     out.push_str(
-        "This is generated from `src/keymap.rs` (run `steer --print-keymap` to regenerate) — \
+        "This is generated from `src/keymap.rs` (run `hoot --print-keymap` to regenerate) — \
          it always matches what the binary actually does.\n\n",
     );
     out.push_str(
         "## Overriding\n\n\
-         Create `~/.steer.toml` and set any binding name below to a new chord, e.g.:\n\n\
+         Create `~/.hoot.toml` and set any binding name below to a new chord, e.g.:\n\n\
          ```toml\n\
          quit = \"ctrl+q\"\n\
          review_comment = \"ctrl+e\"\n\
@@ -380,13 +462,13 @@ pub fn generate_markdown(keymap: &Keymap) -> String {
          uppercase letter like `H`. Modifiers: `ctrl`, `shift`, `alt`. Bind more than one chord \
          to the same action with a comma, e.g. `f1,ctrl+r`. Unknown binding names or unparsable \
          chords are reported as warnings on startup and otherwise ignored — they never prevent \
-         steer from starting.\n\n\
+         hoot from starting.\n\n\
          Not overridable: `Ctrl+C` (always gets you out — same quit-confirmation as `q` if there's \
          unsent work, but a second `Ctrl+C` always confirms immediately), and raw text entry \
          (typing/Backspace) in the agent prompt, symbol filter, and commit message editor.\n\n\
          Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don't work \
          in most terminals — the terminal collapses them to the same byte sequence as the bare \
-         key, so no modifier survives for steer to see. Prefer a plain letter or `ctrl+<letter>` \
+         key, so no modifier survives for hoot to see. Prefer a plain letter or `ctrl+<letter>` \
          chord instead. `shift+<letter>` has the same problem for a different reason: most \
          terminals report Shift+letter as the uppercase character itself, not as a separate \
          Shift bit — so write the literal uppercase letter (`\"H\"`) rather than `\"shift+h\"`.\n\n",
@@ -412,10 +494,7 @@ pub fn generate_markdown(keymap: &Keymap) -> String {
             } else {
                 current.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" / ")
             };
-            out.push_str(&format!(
-                "| `{}` | {} | `{}` | {} | {} |\n",
-                b.name, b.label, default_str, current_col, b.help
-            ));
+            out.push_str(&format!("| `{}` | {} | `{}` | {} | {} |\n", b.name, b.label, default_str, current_col, b.help));
         }
         out.push('\n');
     }

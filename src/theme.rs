@@ -28,9 +28,9 @@ pub enum FileStatus {
 impl FileStatus {
     pub fn glyph(self) -> &'static str {
         match self {
-            FileStatus::Clean => "\u{2714}",     // ✔
-            FileStatus::HasNotes => "\u{29d6}",  // ⧖
-            FileStatus::Flagged => "\u{2717}",   // ✗
+            FileStatus::Clean => "\u{2714}",    // ✔
+            FileStatus::HasNotes => "\u{29d6}", // ⧖
+            FileStatus::Flagged => "\u{2717}",  // ✗
         }
     }
 

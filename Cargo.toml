@@ -1,10 +1,10 @@
 [package]
-name = "steer"
+name = "hoot"
 version = "0.1.0"
 edition = "2021"
 description = "A terminal UI for reviewing a git working tree alongside the pi coding agent"
 license = "MIT"
-repository = "https://github.com/fclaude/steer"
+repository = "https://github.com/fclaude/hoot"
 readme = "README.md"
 
 [dependencies]
@@ -13,6 +13,7 @@ crossterm = "0.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+tempfile = "3"
 
 # Built with `cargo install cargo-deb` + `cargo deb`. See packaging/README.md.
 [package.metadata.deb]
@@ -26,9 +27,9 @@ depends = "$auto, git"
 section = "utils"
 priority = "optional"
 assets = [
-    ["target/release/steer", "usr/bin/", "755"],
-    ["README.md", "usr/share/doc/steer/README.md", "644"],
-    ["KEYBINDINGS.md", "usr/share/doc/steer/KEYBINDINGS.md", "644"],
+    ["target/release/hoot", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/hoot/README.md", "644"],
+    ["KEYBINDINGS.md", "usr/share/doc/hoot/KEYBINDINGS.md", "644"],
 ]
 
 # Built with `cargo install cargo-generate-rpm` + `cargo build --release`
@@ -36,9 +37,9 @@ assets = [
 [package.metadata.generate-rpm]
 license = "MIT"
 assets = [
-    { source = "target/release/steer", dest = "/usr/bin/steer", mode = "755" },
-    { source = "README.md", dest = "/usr/share/doc/steer/README.md", mode = "644", doc = true },
-    { source = "KEYBINDINGS.md", dest = "/usr/share/doc/steer/KEYBINDINGS.md", mode = "644", doc = true },
+    { source = "target/release/hoot", dest = "/usr/bin/hoot", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/hoot/README.md", mode = "644", doc = true },
+    { source = "KEYBINDINGS.md", dest = "/usr/share/doc/hoot/KEYBINDINGS.md", mode = "644", doc = true },
 ]
 
 [package.metadata.generate-rpm.requires]

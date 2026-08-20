@@ -112,7 +112,7 @@ mod tests {
 
     fn scratch_repo(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "steer-gitcommit-test-{label}-{}-{:?}",
+            "hoot-gitcommit-test-{label}-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));

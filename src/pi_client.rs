@@ -1,4 +1,4 @@
-//! Drives a real `pi` coding-agent subprocess (https://github.com/earendil-works/pi)
+//! Drives a real `pi` coding-agent subprocess (<https://github.com/earendil-works/pi>)
 //! and streams its `--mode json` NDJSON event log back as [`AgentEvent`]s.
 //!
 //! `--approve` is used unconditionally: pi has no native "pause and wait
@@ -8,7 +8,7 @@
 //! Steer's diff view and plain `git` are the review/undo mechanism instead,
 //! same as any other change made to the repo.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -25,9 +25,16 @@ fn tools_arg(profile: ToolProfile) -> &'static str {
     }
 }
 
-/// Spawns `pi --mode json --print --session <file> --tools <profile>
-/// <prompt>` in `cwd` and streams parsed events back over a channel.
-/// Non-blocking: stdout and stderr are each read on their own thread.
+/// Spawns `pi --mode json --print --session <file> --tools <profile>` in
+/// `cwd`, writes `prompt` to its stdin, and streams parsed events back over
+/// a channel. Non-blocking: stdout and stderr are each read on their own
+/// thread.
+///
+/// The prompt goes over stdin rather than as a trailing CLI argument
+/// (confirmed pi supports this — it reads the message from stdin when no
+/// positional prompt is given) so it never shows up in `ps`/`/proc/*/cmdline`
+/// for other users on the same machine, and never risks the OS's
+/// argument-length limit on a large pasted diff.
 ///
 /// `session_file` (not `--session-id`) is what makes cross-turn memory
 /// actually work: `pi` scopes `--session-id <id>` lookups by *both* the id
@@ -47,15 +54,24 @@ pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) 
         .arg(session_file)
         .arg("--tools")
         .arg(tools_arg(tools))
-        .arg(prompt)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+        .stdin(Stdio::piped());
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
+
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let prompt = prompt.to_string();
+    thread::spawn(move || {
+        // A closed read end (pi exits before reading, e.g. bad flags) would
+        // otherwise surface as a SIGPIPE-driven write error here — ignored,
+        // since the stdout/stderr threads already report anything that
+        // actually went wrong.
+        let _ = stdin.write_all(prompt.as_bytes());
+    });
 
     let (tx, rx) = mpsc::channel();
 
@@ -110,10 +126,7 @@ fn parse_line(line: &str) -> Option<AgentEvent> {
                 "toolcall_end" => {
                     let tc = ev.get("toolCall")?;
                     let name = tc.get("name")?.as_str()?.to_string();
-                    let args = tc
-                        .get("arguments")
-                        .map(|a| a.to_string())
-                        .unwrap_or_default();
+                    let args = tc.get("arguments").map(|a| a.to_string()).unwrap_or_default();
                     Some(AgentEvent::ToolCall { name, args })
                 }
                 _ => None,
@@ -133,11 +146,7 @@ fn parse_line(line: &str) -> Option<AgentEvent> {
 fn summarize_result(result: Option<&Value>) -> String {
     let Some(result) = result else { return "done".to_string() };
     if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-        let text_len: usize = content
-            .iter()
-            .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
-            .map(|t| t.len())
-            .sum();
+        let text_len: usize = content.iter().filter_map(|c| c.get("text").and_then(|t| t.as_str())).map(|t| t.len()).sum();
         if text_len > 0 {
             return format!("[{text_len} bytes]");
         }

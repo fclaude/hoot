@@ -17,19 +17,13 @@ pub struct ReviewData {
 
 pub fn load(root: &Path) -> ReviewData {
     if !is_git_repo(root) {
-        return ReviewData {
-            project: data::mock_project(),
-            curation_files: data::mock_curation_files(),
-            is_real: false,
-        };
+        return ReviewData { project: data::mock_project(), curation_files: data::mock_curation_files(), is_real: false };
     }
 
     let files = diff_files(root);
 
-    let curation_files = files
-        .iter()
-        .map(|f| CurationFile { path: f.path.clone(), hunk_selected: vec![true; f.hunks.len()], status: None })
-        .collect();
+    let curation_files =
+        files.iter().map(|f| CurationFile { path: f.path.clone(), hunk_selected: vec![true; f.hunks.len()], status: None }).collect();
 
     let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.display().to_string());
     let project = Project { name: name.clone(), root: name, files };
@@ -56,34 +50,91 @@ fn is_git_repo(root: &Path) -> bool {
 /// falls back to a plain working-tree diff (e.g. a repo with zero commits).
 /// Appends untracked files too — plain `git diff` never shows those (they
 /// aren't in the index at all), which would otherwise make a file the
-/// agent just created invisible to Steer until it's staged. Uses git's
+/// agent just created invisible to Hoot until it's staged. Uses git's
 /// default (small) context window — this is the canonical hunk breakdown
 /// Curation's per-hunk selection and partial commits rely on, so it needs
 /// real, separate hunk boundaries, not one hunk spanning the whole file.
 /// See `file_diff_in_context` for the Review screen's whole-file view.
 fn run_git_diff(root: &Path) -> String {
     let has_head = git(root, &["rev-parse", "--verify", "-q", "HEAD"]).map(|o| o.status.success()).unwrap_or(false);
-    let args: &[&str] = if has_head { &["diff", "HEAD", "--no-color"] } else { &["diff", "--no-color"] };
-    let mut diff = git(root, args).map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    // `--find-renames`: off by default for `git diff` (unlike `git status`)
+    // unless `diff.renames` is configured. Without it, a plain `git mv`
+    // shows as an unrelated delete-of-the-old-name + add-of-the-new-name
+    // pair — each with the *entire* file's content duplicated as
+    // removed/added lines — instead of the single, contentless "rename
+    // from/to" entry `parse_unified_diff`'s unsupported-change handling
+    // expects and Curation has nothing useful to do with either way.
+    let mut diff = if has_head {
+        git(root, &["diff", "HEAD", "--no-color", "--find-renames"])
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    } else {
+        // Plain `git diff` alone only shows index-vs-worktree (unstaged)
+        // changes — with no HEAD to compare against, anything already
+        // staged (`git add`ed) would otherwise never show up at all, since
+        // for a staged-but-unmodified-since file the index and worktree
+        // agree. `git diff --cached` fills that gap: git special-cases a
+        // HEAD-less repo there and diffs the index against the empty tree,
+        // so staged content shows as a normal "new file" diff (confirmed
+        // by testing) — same union of staged+unstaged that `git diff HEAD`
+        // gives once a commit exists.
+        let staged = git(root, &["diff", "--cached", "--no-color", "--find-renames"])
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let unstaged = git(root, &["diff", "--no-color", "--find-renames"])
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        staged + &unstaged
+    };
     diff.push_str(&untracked_files_diff(root));
     diff
 }
 
-/// Diffs each untracked, non-ignored file against `/dev/null` individually
-/// and concatenates the results — real unified-diff text in exactly the
-/// same format `parse_unified_diff` already handles, so no separate
-/// "new file" code path is needed on the parsing side.
+/// Builds a "new file" unified diff for each untracked, non-ignored file
+/// directly (no git subprocess involved) and concatenates the results —
+/// text in exactly the same format `parse_unified_diff` already handles,
+/// so no separate "new file" code path is needed on the parsing side.
+///
+/// Used to shell out to `git diff --no-index` once per file instead —
+/// correct, but this runs on every `sync_from_disk` poll tick (every
+/// second), so a tree with hundreds of untracked files (a generated build
+/// output dir not yet gitignored, say) meant hundreds of subprocess spawns
+/// a second and a visibly stalling UI. One `ls-files` plus reading each
+/// file directly is the same information without the fork-per-file cost.
 fn untracked_files_diff(root: &Path) -> String {
     let Some(listing) = git(root, &["ls-files", "--others", "--exclude-standard"]) else {
         return String::new();
     };
     let mut diff = String::new();
     for path in String::from_utf8_lossy(&listing.stdout).lines().filter(|l| !l.is_empty()) {
-        if let Some(out) = git(root, &["diff", "--no-color", "--no-index", "/dev/null", path]) {
-            diff.push_str(&String::from_utf8_lossy(&out.stdout));
-        }
+        diff.push_str(&synthetic_new_file_diff(root, path));
     }
     diff
+}
+
+/// A `diff --git a/<path> b/<path>` "new file" entry for `rel_path`,
+/// exactly the shape `git diff --no-index /dev/null <path>` would produce
+/// for a plain-text file. Binary content gets git's own "Binary files ...
+/// differ" marker line instead of being diffed line-by-line (matches
+/// `parse_unified_diff`'s existing binary-file handling) rather than
+/// risking garbage output from treating arbitrary bytes as UTF-8 text.
+fn synthetic_new_file_diff(root: &Path, rel_path: &str) -> String {
+    let Ok(bytes) = std::fs::read(root.join(rel_path)) else {
+        return String::new();
+    };
+    let header = format!("diff --git a/{rel_path} b/{rel_path}\nnew file mode 100644\n");
+    if bytes.contains(&0) {
+        return format!("{header}Binary files /dev/null and b/{rel_path} differ\n");
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let line_count = text.lines().count();
+    let mut out = format!("{header}--- /dev/null\n+++ b/{rel_path}\n@@ -0,0 +1,{line_count} @@\n");
+    for line in text.lines() {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// A context window comfortably larger than any real source file, so a
@@ -119,30 +170,49 @@ fn parse_unified_diff(diff: &str) -> Vec<FileEntry> {
     let mut files: Vec<FileEntry> = Vec::new();
     let mut current: Option<FileEntry> = None;
     let mut current_hunk: Option<Hunk> = None;
+    // Set when a header line names a change class with no hunk lines at
+    // all (binary, pure rename, mode-only, submodule) — see `flush_file`.
+    let mut unsupported_reason: Option<&'static str> = None;
 
     let flush_hunk = |file: &mut FileEntry, hunk: &mut Option<Hunk>| {
         if let Some(h) = hunk.take() {
             file.hunks.push(h);
         }
     };
-    let flush_file = |files: &mut Vec<FileEntry>, file: &mut Option<FileEntry>, hunk: &mut Option<Hunk>| {
-        if let Some(mut f) = file.take() {
-            flush_hunk(&mut f, hunk);
-            f.hunk_count = f.hunks.len() as u32;
-            files.push(f);
-        }
-    };
+    let flush_file =
+        |files: &mut Vec<FileEntry>, file: &mut Option<FileEntry>, hunk: &mut Option<Hunk>, reason: &mut Option<&'static str>| {
+            if let Some(mut f) = file.take() {
+                flush_hunk(&mut f, hunk);
+                f.hunk_count = f.hunks.len() as u32;
+                // Only worth flagging if it really did leave nothing to
+                // curate — a rename *with* content changes still gets its
+                // real hunks and has plenty to select, `rename from`/`rename
+                // to` notwithstanding.
+                if f.hunks.is_empty() {
+                    f.unsupported = reason.take();
+                }
+                files.push(f);
+            }
+            *reason = None;
+        };
 
     for line in diff.lines() {
         if let Some(path) = line.strip_prefix("diff --git ").map(parse_diff_git_path) {
-            flush_file(&mut files, &mut current, &mut current_hunk);
-            current = Some(FileEntry { path, hunk_count: 0, notes: 0, flagged: false, hunks: Vec::new() });
+            flush_file(&mut files, &mut current, &mut current_hunk, &mut unsupported_reason);
+            current = Some(FileEntry { path, hunk_count: 0, notes: 0, flagged: false, hunks: Vec::new(), unsupported: None });
+        } else if line.starts_with("Binary files ") && line.ends_with(" differ") {
+            unsupported_reason = Some("binary file");
+        } else if line.starts_with("rename from ") {
+            unsupported_reason = Some("renamed, no content change");
+        } else if line.starts_with("old mode ") {
+            unsupported_reason = Some("file mode changed only");
+        } else if line.starts_with("Subproject commit ") {
+            unsupported_reason = Some("submodule pointer changed");
         } else if line.starts_with("@@ ") {
             if let Some(f) = current.as_mut() {
                 flush_hunk(f, &mut current_hunk);
             }
-            current_hunk =
-                Some(Hunk { lines: vec![DiffLine { kind: DiffLineKind::HunkHeader, text: line.to_string() }], note: None });
+            current_hunk = Some(Hunk { lines: vec![DiffLine { kind: DiffLineKind::HunkHeader, text: line.to_string() }], note: None });
         } else if let Some(h) = current_hunk.as_mut() {
             let kind = if line.starts_with('+') && !line.starts_with("+++") {
                 DiffLineKind::Added
@@ -156,17 +226,101 @@ fn parse_unified_diff(diff: &str) -> Vec<FileEntry> {
             h.lines.push(DiffLine { kind, text: line.to_string() });
         }
     }
-    flush_file(&mut files, &mut current, &mut current_hunk);
+    flush_file(&mut files, &mut current, &mut current_hunk, &mut unsupported_reason);
 
     files
 }
 
-/// "a/path/to/file b/path/to/file" -> "path/to/file"
+/// "a/path/to/file b/path/to/file" -> "path/to/file". Also handles git's
+/// C-style quoted form — `"a/<escaped>" "b/<escaped>"` — which it switches
+/// to for a path containing a quote, backslash, or (with the default
+/// `core.quotePath=true`) any non-ASCII byte. Confirmed against real git
+/// output, not assumed: a plain space in a name isn't quoted at all
+/// (`a/weird file.txt b/weird file.txt`, handled by the plain rfind
+/// below), but `"` or non-ASCII bytes are, e.g. `"a/\303\251motion.txt"
+/// "b/\303\251motion.txt"` for `émotion.txt`. The naive rfind alone
+/// would return that literal quoted-and-escaped garbage as the "path".
 fn parse_diff_git_path(rest: &str) -> String {
+    let rest = rest.trim_end();
+    if let Some(after_first_quote) = rest.strip_prefix('"') {
+        if let Some(first_end) = find_unescaped_quote(after_first_quote) {
+            let remainder = after_first_quote[first_end + 1..].trim_start();
+            if let Some(second) = remainder.strip_prefix('"') {
+                if let Some(second_end) = find_unescaped_quote(second) {
+                    let b_side = unquote_c_style(&second[..second_end]);
+                    return b_side.strip_prefix("b/").unwrap_or(&b_side).to_string();
+                }
+            }
+        }
+        // Malformed/unexpected quoting shape — fall through rather than
+        // silently mangling it further; better a visibly-off path (the
+        // leading '"' will look wrong) than a panic.
+    }
     match rest.rfind(" b/") {
         Some(idx) => rest[idx + 3..].to_string(),
         None => rest.to_string(),
     }
+}
+
+/// Byte index of the first `"` in `s` that isn't itself escaped (not
+/// preceded by a backslash that's part of the quoted content).
+fn find_unescaped_quote(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return Some(i),
+            b'\\' => i += 2, // skip the escaped byte, whatever it is
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Un-escapes git's C-style quoting: `\\`, `\"`, `\t`, `\n`, and `\NNN`
+/// octal byte escapes (used for non-ASCII bytes — each byte of a multi-byte
+/// UTF-8 character gets its own `\NNN`, so these are collected as raw bytes
+/// and decoded together, not one at a time).
+fn unquote_c_style(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'\\' => {
+                    out.push(b'\\');
+                    i += 2;
+                }
+                b'"' => {
+                    out.push(b'"');
+                    i += 2;
+                }
+                b't' => {
+                    out.push(b'\t');
+                    i += 2;
+                }
+                b'n' => {
+                    out.push(b'\n');
+                    i += 2;
+                }
+                b'0'..=b'7' if bytes.len() >= i + 4 && bytes[i + 1..i + 4].iter().all(|b| matches!(b, b'0'..=b'7')) => {
+                    let octal = std::str::from_utf8(&bytes[i + 1..i + 4]).unwrap();
+                    out.push(u8::from_str_radix(octal, 8).unwrap_or(b'?'));
+                    i += 4;
+                }
+                other => {
+                    out.push(b'\\');
+                    out.push(other);
+                    i += 2;
+                }
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -264,11 +418,35 @@ index 111..222 100644
         assert_eq!(parse_diff_git_path("a/nested/dir/file.py b/nested/dir/file.py"), "nested/dir/file.py");
     }
 
+    #[test]
+    fn parse_diff_git_path_handles_an_unquoted_space_in_the_name() {
+        // Confirmed via real git output: a plain space alone doesn't
+        // trigger quoting.
+        assert_eq!(parse_diff_git_path("a/weird file.txt b/weird file.txt"), "weird file.txt");
+    }
+
+    #[test]
+    fn parse_diff_git_path_handles_a_quoted_path_with_embedded_quotes() {
+        // Exact real git output for a file named `file"with"quotes.txt`.
+        let rest = r#""a/file\"with\"quotes.txt" "b/file\"with\"quotes.txt""#;
+        assert_eq!(parse_diff_git_path(rest), "file\"with\"quotes.txt");
+    }
+
+    #[test]
+    fn parse_diff_git_path_handles_octal_escaped_non_ascii_bytes() {
+        // Exact real git output (core.quotePath=true, the default) for a
+        // file named `émotion.txt` — \303\251 is é's two UTF-8 bytes,
+        // escaped individually and must be recombined, not decoded byte by
+        // byte.
+        let rest = r#""a/\303\251motion.txt" "b/\303\251motion.txt""#;
+        assert_eq!(parse_diff_git_path(rest), "\u{e9}motion.txt");
+    }
+
     // --- integration: exercises is_git_repo/run_git_diff/load against a real repo ---
 
     fn scratch_repo(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "steer-gitreview-test-{label}-{}-{:?}",
+            "hoot-gitreview-test-{label}-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
@@ -286,13 +464,34 @@ index 111..222 100644
 
     #[test]
     fn load_falls_back_to_mock_outside_a_git_repo() {
-        let dir = std::env::temp_dir().join(format!("steer-gitreview-not-a-repo-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("hoot-gitreview-not-a-repo-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
         let review = load(&dir);
         assert!(!review.is_real);
         assert_eq!(review.project.name, "search-index"); // mock_project's fixed name
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_sees_a_staged_file_in_a_repo_with_no_commits_yet() {
+        // Regression: plain `git diff` (no HEAD to compare against) only
+        // shows index-vs-worktree changes, so a `git add`ed file in a
+        // brand-new repo was invisible — the index and worktree already
+        // agree for it, and there's no earlier commit to diff against.
+        let dir = scratch_repo("no-head-staged");
+        fs::write(dir.join("new.txt"), "brand new content\n").unwrap();
+        run(&dir, &["add", "new.txt"]);
+
+        let review = load(&dir);
+        assert!(review.is_real);
+        assert!(
+            review.project.files.iter().any(|f| f.path == "new.txt"),
+            "{:?}",
+            review.project.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -342,17 +541,93 @@ index 111..222 100644
         let review = load(&dir);
         assert_eq!(review.project.files.len(), 1, "should pick up the untracked file");
         assert_eq!(review.project.files[0].path, "new.txt");
-        let (added, removed) = review.project.files[0]
-            .hunks
-            .iter()
-            .flat_map(|h| &h.lines)
-            .fold((0, 0), |(a, r), l| match l.kind {
-                DiffLineKind::Added => (a + 1, r),
-                DiffLineKind::Removed => (r, r + 1),
-                _ => (a, r),
-            });
+        let (added, removed) = review.project.files[0].hunks.iter().flat_map(|h| &h.lines).fold((0, 0), |(a, r), l| match l.kind {
+            DiffLineKind::Added => (a + 1, r),
+            DiffLineKind::Removed => (r, r + 1),
+            _ => (a, r),
+        });
         assert_eq!(added, 2, "both lines of a brand-new file should show as added");
         assert_eq!(removed, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_handles_an_untracked_file_whose_name_starts_with_a_dash() {
+        // Regression: `git diff --no-index /dev/null <path>` without a `--`
+        // separator would parse a path like `-weird.txt` as a flag instead
+        // of a positional argument.
+        let dir = scratch_repo("dash-filename");
+        run(&dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        fs::write(dir.join("-weird.txt"), "hello\n").unwrap();
+
+        let review = load(&dir);
+        assert_eq!(review.project.files.len(), 1, "should still pick up the dash-prefixed file");
+        assert_eq!(review.project.files[0].path, "-weird.txt");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_flags_a_binary_file_as_unsupported_instead_of_silently_zero_hunks() {
+        let dir = scratch_repo("binary-change");
+        fs::write(dir.join("data.bin"), [0u8, 159, 146, 150, 1, 2, 3]).unwrap();
+        run(&dir, &["add", "-A"]);
+
+        let review = load(&dir);
+        assert_eq!(review.project.files.len(), 1);
+        assert!(review.project.files[0].hunks.is_empty());
+        assert_eq!(review.project.files[0].unsupported, Some("binary file"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn untracked_binary_file_gets_a_synthetic_binary_marker_not_garbled_text_hunks() {
+        // Untracked files are diffed by reading them directly rather than
+        // shelling out to `git diff --no-index` per file (see
+        // `synthetic_new_file_diff`) — confirms that path also recognizes
+        // binary content instead of feeding raw bytes through as if they
+        // were UTF-8 text lines.
+        let dir = scratch_repo("untracked-binary");
+        run(&dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        fs::write(dir.join("data.bin"), [0u8, 159, 146, 150, 1, 2, 3]).unwrap();
+
+        let review = load(&dir);
+        assert_eq!(review.project.files.len(), 1);
+        assert!(review.project.files[0].hunks.is_empty());
+        assert_eq!(review.project.files[0].unsupported, Some("binary file"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_flags_a_pure_rename_as_unsupported_but_not_a_rename_with_content_changes() {
+        // A longer file, so a one-line edit still leaves similarity well
+        // above git's default 50% rename-detection threshold (confirmed
+        // empirically — a short 3-line file with one line changed fell
+        // *below* that threshold and stopped being recognized as a rename
+        // at all, which would've made this test flaky on the exact
+        // content rather than testing what it means to).
+        let content: String = (1..=30).map(|n| format!("line{n}\n")).collect();
+        let dir = scratch_repo("rename-only");
+        fs::write(dir.join("old.txt"), &content).unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "init"]);
+        run(&dir, &["mv", "old.txt", "new.txt"]);
+
+        let review = load(&dir);
+        assert_eq!(review.project.files.len(), 1);
+        assert!(review.project.files[0].hunks.is_empty(), "a pure rename has no content diff");
+        assert_eq!(review.project.files[0].unsupported, Some("renamed, no content change"));
+
+        // A rename that *also* changes content gets real hunks, and must
+        // NOT be flagged unsupported — there's plenty here to curate.
+        fs::write(dir.join("new.txt"), content.replacen("line1\n", "line1-CHANGED\n", 1)).unwrap();
+        let review = load(&dir);
+        assert_eq!(review.project.files.len(), 1);
+        assert!(!review.project.files[0].hunks.is_empty(), "rename+edit should still produce real hunks");
+        assert_eq!(review.project.files[0].unsupported, None);
 
         let _ = fs::remove_dir_all(&dir);
     }

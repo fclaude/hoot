@@ -18,10 +18,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let risk = app.quit_risk().unwrap_or_default();
 
     let lines: Vec<Line<'static>> = vec![
-        Line::from(Span::styled(
-            "Quitting now loses:",
-            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
-        )),
+        Line::from(Span::styled("Quitting now loses:", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD))),
         Line::from(Span::styled(risk, Style::default().fg(theme::ORANGE))),
         Line::raw(""),
         super::key_hints(&[("Enter/q/Ctrl+C", "Quit anyway"), ("Esc", "Cancel")]),

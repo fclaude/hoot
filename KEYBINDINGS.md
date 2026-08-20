@@ -1,10 +1,10 @@
-# steer keybindings
+# hoot keybindings
 
-This is generated from `src/keymap.rs` (run `steer --print-keymap` to regenerate) — it always matches what the binary actually does.
+This is generated from `src/keymap.rs` (run `hoot --print-keymap` to regenerate) — it always matches what the binary actually does.
 
 ## Overriding
 
-Create `~/.steer.toml` and set any binding name below to a new chord, e.g.:
+Create `~/.hoot.toml` and set any binding name below to a new chord, e.g.:
 
 ```toml
 quit = "ctrl+q"
@@ -12,17 +12,17 @@ review_comment = "ctrl+e"
 review_toggle_hover = "H"
 ```
 
-Chords are `mod+mod+key`, e.g. `ctrl+e`, `f1`, `space`, `/`, `g`, or a single uppercase letter like `H`. Modifiers: `ctrl`, `shift`, `alt`. Bind more than one chord to the same action with a comma, e.g. `f1,ctrl+r`. Unknown binding names or unparsable chords are reported as warnings on startup and otherwise ignored — they never prevent steer from starting.
+Chords are `mod+mod+key`, e.g. `ctrl+e`, `f1`, `space`, `/`, `g`, or a single uppercase letter like `H`. Modifiers: `ctrl`, `shift`, `alt`. Bind more than one chord to the same action with a comma, e.g. `f1,ctrl+r`. Unknown binding names or unparsable chords are reported as warnings on startup and otherwise ignored — they never prevent hoot from starting.
 
 Not overridable: `Ctrl+C` (always gets you out — same quit-confirmation as `q` if there's unsent work, but a second `Ctrl+C` always confirms immediately), and raw text entry (typing/Backspace) in the agent prompt, symbol filter, and commit message editor.
 
-Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don't work in most terminals — the terminal collapses them to the same byte sequence as the bare key, so no modifier survives for steer to see. Prefer a plain letter or `ctrl+<letter>` chord instead. `shift+<letter>` has the same problem for a different reason: most terminals report Shift+letter as the uppercase character itself, not as a separate Shift bit — so write the literal uppercase letter (`"H"`) rather than `"shift+h"`.
+Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don't work in most terminals — the terminal collapses them to the same byte sequence as the bare key, so no modifier survives for hoot to see. Prefer a plain letter or `ctrl+<letter>` chord instead. `shift+<letter>` has the same problem for a different reason: most terminals report Shift+letter as the uppercase character itself, not as a separate Shift bit — so write the literal uppercase letter (`"H"`) rather than `"shift+h"`.
 
 ## Global
 
 | Binding name | Action | Default | Current | Description |
 |---|---|---|---|---|
-| `quit` | Quit | `q` |  | Exit steer |
+| `quit` | Quit | `q` |  | Exit hoot |
 | `switch_review` | Switch: Review | `F1 / Ctrl+r` |  | Jump to the Review screen (file tree + diff/source) |
 | `switch_agent` | Switch: Agent | `F2 / Ctrl+a` |  | Jump to the Agent screen |
 | `switch_curate` | Switch: Curate | `F3 / Ctrl+u` |  | Jump to the Curation screen |

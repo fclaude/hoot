@@ -73,18 +73,13 @@ fn draw_results(f: &mut Frame, app: &App, results: &[&crate::data::TreeEntry], a
 
 fn draw_preview(f: &mut Frame, app: &App, entry: Option<&crate::data::TreeEntry>, area: Rect) {
     let Some(entry) = entry else {
-        f.render_widget(
-            Paragraph::new(Span::styled("(no file selected)", Style::default().fg(theme::DIM))),
-            area,
-        );
+        f.render_widget(Paragraph::new(Span::styled("(no file selected)", Style::default().fg(theme::DIM))), area);
         return;
     };
 
     let rel = entry.path.strip_prefix(&app.target_dir).unwrap_or(&entry.path).display().to_string();
-    let mut lines: Vec<Line<'static>> = vec![
-        Line::from(Span::styled(rel, Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD))),
-        Line::raw(""),
-    ];
+    let mut lines: Vec<Line<'static>> =
+        vec![Line::from(Span::styled(rel, Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD))), Line::raw("")];
 
     let ext = crate::syntax::ext_for(&entry.path);
     let content = crate::fsnav::read_file(&entry.path);

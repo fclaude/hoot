@@ -46,10 +46,8 @@ fn scroll_offset(selected: usize, total: usize, visible: usize) -> usize {
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let sidebar_width = if narrow { 24 } else { 38 };
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(sidebar_width), Constraint::Min(0)])
-        .split(area);
+    let chunks =
+        Layout::default().direction(Direction::Horizontal).constraints([Constraint::Length(sidebar_width), Constraint::Min(0)]).split(area);
 
     draw_tree(f, app, chunks[0], narrow);
     draw_content(f, app, chunks[1], narrow);
@@ -65,17 +63,12 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let scroll = scroll_offset(app.tree_index, app.tree.len(), visible);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        app.target_dir.display().to_string(),
-        Style::default().fg(theme::FG),
-    )));
+    lines.push(Line::from(Span::styled(app.target_dir.display().to_string(), Style::default().fg(theme::FG))));
 
     for (i, entry) in app.tree.iter().enumerate().skip(scroll).take(visible) {
         let indent = "\u{2502}  ".repeat(entry.depth as usize);
-        let mut spans = vec![
-            Span::styled("\u{258c} ", Style::default().fg(tick_color)),
-            Span::styled(indent, Style::default().fg(theme::DIM)),
-        ];
+        let mut spans =
+            vec![Span::styled("\u{258c} ", Style::default().fg(tick_color)), Span::styled(indent, Style::default().fg(theme::DIM))];
 
         let diff_idx = if entry.is_dir { None } else { app.diff_index_for(&entry.path) };
         if diff_idx.is_some() {
@@ -193,16 +186,14 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
         ContentView::Context => "context",
         ContentView::Focused => "focused",
     };
-    let title = format!("{} \u{2014} {mode_label} \u{2014} line {}/{}", file.path, (app.nav_line + 1).min(numbered.len().max(1)), numbered.len());
+    let title =
+        format!("{} \u{2014} {mode_label} \u{2014} line {}/{}", file.path, (app.nav_line + 1).min(numbered.len().max(1)), numbered.len());
     let view_toggle_label = match app.content_view {
         ContentView::Context => "Focused",
         ContentView::Focused => "Context",
     };
     let hints = if narrow {
-        vec![
-            super::key_hints(&[("c", "Comment"), ("v", view_toggle_label)]),
-            super::key_hints(&[("i", "Iterate"), ("y", "Copy prompt")]),
-        ]
+        vec![super::key_hints(&[("c", "Comment"), ("v", view_toggle_label)]), super::key_hints(&[("i", "Iterate"), ("y", "Copy prompt")])]
     } else {
         vec![
             super::key_hints(&[
@@ -309,9 +300,8 @@ fn draw_diff_split(f: &mut Frame, area: Rect, file: &FileEntry) {
     after_full.extend(after);
 
     f.render_widget(Paragraph::new(before_full), cols[0]);
-    let rule_lines: Vec<Line<'static>> = (0..cols[1].height)
-        .map(|_| Line::from(Span::styled("\u{2502}", Style::default().fg(theme::DIM))))
-        .collect();
+    let rule_lines: Vec<Line<'static>> =
+        (0..cols[1].height).map(|_| Line::from(Span::styled("\u{2502}", Style::default().fg(theme::DIM)))).collect();
     f.render_widget(Paragraph::new(rule_lines), cols[1]);
     f.render_widget(Paragraph::new(after_full), cols[2]);
 
@@ -326,12 +316,7 @@ fn draw_diff_split(f: &mut Frame, area: Rect, file: &FileEntry) {
 }
 
 fn draw_source(f: &mut Frame, app: &App, area: Rect) {
-    let name = app
-        .nav_file
-        .strip_prefix(&app.target_dir)
-        .unwrap_or(&app.nav_file)
-        .display()
-        .to_string();
+    let name = app.nav_file.strip_prefix(&app.target_dir).unwrap_or(&app.nav_file).display().to_string();
 
     let focused = app.nav_focus == NavFocus::Content;
     let scroll_x = app.nav_scroll_x as usize;

@@ -38,7 +38,7 @@ fn main() -> io::Result<()> {
         if arg == "--print-keymap" {
             let (keymap, warnings) = Keymap::load();
             for w in &warnings {
-                eprintln!("~/.steer.toml: {w}");
+                eprintln!("~/.hoot.toml: {w}");
             }
             print!("{}", keymap::generate_markdown(&keymap));
             return Ok(());
@@ -63,7 +63,7 @@ fn main() -> io::Result<()> {
 
     let (keymap, warnings) = Keymap::load();
     for w in &warnings {
-        eprintln!("~/.steer.toml: {w}");
+        eprintln!("~/.hoot.toml: {w}");
     }
     if !warnings.is_empty() {
         eprintln!("(continuing with defaults for the above)");
@@ -84,7 +84,12 @@ fn main() -> io::Result<()> {
     result
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, target_dir: PathBuf, keymap: Keymap, agent_backend: AgentBackend) -> io::Result<()> {
+fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    target_dir: PathBuf,
+    keymap: Keymap,
+    agent_backend: AgentBackend,
+) -> io::Result<()> {
     let mut app = App::new(target_dir, keymap, agent_backend);
 
     loop {

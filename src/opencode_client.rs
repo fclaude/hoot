@@ -1,4 +1,4 @@
-//! Drives a real `opencode` coding-agent subprocess (https://opencode.ai)
+//! Drives a real `opencode` coding-agent subprocess (<https://opencode.ai>)
 //! and streams its `run --format json` NDJSON event log back as
 //! [`AgentEvent`]s — the same event type `pi_client` produces, so the rest
 //! of the app doesn't need to know which backend is actually running.
@@ -21,6 +21,18 @@
 //! back a server-generated `sessionID` only *after* a turn runs, which then
 //! has to be threaded back in via `--session <id>` on every later call —
 //! see `Session` in `AgentEvent`.
+//!
+//! Unlike `pi_client`, the prompt here is a trailing CLI argument, not
+//! piped over stdin — and that's not a shortcut, it's a real limitation of
+//! `opencode run` confirmed by testing, not assumed: with no positional
+//! message, `opencode run` hangs waiting on stdin rather than reading a
+//! prompt from it, and `--file` only attaches a file to a message that
+//! still has to be provided separately (tried it: `opencode run --file
+//! prompt.txt` with no message errors with "You must provide a message or
+//! a command"). So the prompt — which can include a full selected diff —
+//! is visible in `ps`/`/proc/*/cmdline` for this backend, and long prompts
+//! risk the OS's argument-length limit. There's no workaround on hoot's
+//! side until opencode itself adds a stdin or file-as-message mode.
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -47,28 +59,13 @@ fn agent_arg(profile: ToolProfile) -> &'static str {
 /// `session_id` is `None` for the first turn of a run (opencode assigns
 /// one, surfaced back to the caller as `AgentEvent::Session`) and
 /// `Some(id)` for every turn after, to resume it.
-pub fn spawn(
-    prompt: &str,
-    cwd: &Path,
-    session_id: Option<&str>,
-    tools: ToolProfile,
-) -> std::io::Result<AgentSession> {
+pub fn spawn(prompt: &str, cwd: &Path, session_id: Option<&str>, tools: ToolProfile) -> std::io::Result<AgentSession> {
     let mut cmd = Command::new("opencode");
-    cmd.arg("run")
-        .arg("--format")
-        .arg("json")
-        .arg("--auto")
-        .arg("--agent")
-        .arg(agent_arg(tools))
-        .arg("--dir")
-        .arg(cwd);
+    cmd.arg("run").arg("--format").arg("json").arg("--auto").arg("--agent").arg(agent_arg(tools)).arg("--dir").arg(cwd);
     if let Some(id) = session_id {
         cmd.arg("--session").arg(id);
     }
-    cmd.arg(prompt)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+    cmd.arg(prompt).stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
@@ -127,32 +124,22 @@ fn parse_event(v: &Value) -> Option<AgentEvent> {
             let msg = v
                 .get("error")
                 .and_then(|e| {
-                    e.get("data")
-                        .and_then(|d| d.get("message"))
-                        .and_then(|m| m.as_str())
-                        .or_else(|| e.get("name").and_then(|n| n.as_str()))
+                    e.get("data").and_then(|d| d.get("message")).and_then(|m| m.as_str()).or_else(|| e.get("name").and_then(|n| n.as_str()))
                 })
                 .unwrap_or("unknown error");
             Some(AgentEvent::Error(msg.to_string()))
         }
-        "reasoning" => Some(AgentEvent::Thinking(
-            v.get("part")?.get("text")?.as_str()?.to_string(),
-        )),
-        "text" => Some(AgentEvent::Text(
-            v.get("part")?.get("text")?.as_str()?.to_string(),
-        )),
+        "reasoning" => Some(AgentEvent::Thinking(v.get("part")?.get("text")?.as_str()?.to_string())),
+        "text" => Some(AgentEvent::Text(v.get("part")?.get("text")?.as_str()?.to_string())),
         "tool_use" => {
             let part = v.get("part")?;
             let name = part.get("tool")?.as_str()?.to_string();
             let state = part.get("state")?;
             let status = state.get("status")?.as_str()?;
-            let args = state
-                .get("input")
-                .map(|i| i.to_string())
-                .unwrap_or_default();
+            let args = state.get("input").map(|i| i.to_string()).unwrap_or_default();
             match status {
                 // Local, fast tools routinely resolve within the single
-                // line steer sees — there's no separate "call" line to
+                // line hoot sees — there's no separate "call" line to
                 // catch first — so a completed call gets a ToolResult
                 // synthesized straight from the one event, without a
                 // preceding ToolCall line, whereas a slow tool (still
@@ -163,10 +150,7 @@ fn parse_event(v: &Value) -> Option<AgentEvent> {
                     Some(AgentEvent::ToolResult { name, summary })
                 }
                 "error" => {
-                    let msg = state
-                        .get("output")
-                        .and_then(|o| o.as_str())
-                        .unwrap_or("tool call failed");
+                    let msg = state.get("output").and_then(|o| o.as_str()).unwrap_or("tool call failed");
                     Some(AgentEvent::Error(format!("{name}: {msg}")))
                 }
                 _ => Some(AgentEvent::ToolCall { name, args }),
@@ -213,7 +197,8 @@ mod tests {
 
     #[test]
     fn completed_tool_use_becomes_a_tool_result() {
-        let json = r#"{"type":"tool_use","part":{"tool":"read","state":{"status":"completed","input":{"filePath":"a.rs"},"output":"fn a() {}"}}}"#;
+        let json =
+            r#"{"type":"tool_use","part":{"tool":"read","state":{"status":"completed","input":{"filePath":"a.rs"},"output":"fn a() {}"}}}"#;
         match line(json) {
             AgentEvent::ToolResult { name, summary } => {
                 assert_eq!(name, "read");

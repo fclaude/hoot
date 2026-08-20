@@ -118,16 +118,24 @@ pub struct App {
     // AGENT
     pub target_dir: PathBuf,
     pub agent_backend: AgentBackend,
-    /// Explicit path to `pi`'s session file for this run — not just a bare
-    /// session id. `pi` scopes `--session-id` lookups by (cwd, id), so a
-    /// bare id would silently lose memory the moment a turn ran from a
-    /// different cwd than the one that created it. Every turn here runs in
-    /// `target_dir`, so that's moot today, but passing this exact file via
-    /// `--session` instead sidesteps the cwd-scoping question entirely — it
-    /// creates the file on first use and resumes it on every call after,
-    /// regardless of cwd. See `pi_client::spawn`. Only used when
-    /// `agent_backend` is `Pi`.
-    pub session_file: PathBuf,
+    /// `pi`'s session file for this run — not just a bare session id. `pi`
+    /// scopes `--session-id` lookups by (cwd, id), so a bare id would
+    /// silently lose memory the moment a turn ran from a different cwd
+    /// than the one that created it. Every turn here runs in `target_dir`,
+    /// so that's moot today, but passing this exact file via `--session`
+    /// instead sidesteps the cwd-scoping question entirely — pi resumes it
+    /// on every call, regardless of cwd. See `pi_client::spawn`.
+    ///
+    /// A `NamedTempFile`, not a bare `PathBuf`: created with a random
+    /// suffix and `O_EXCL` (via the `tempfile` crate) rather than a
+    /// PID-based name, so it can't be pre-planted as a symlink by another
+    /// local user before hoot creates it, and it's 0600 (owner-only) from
+    /// the moment it exists rather than whatever the umask would've given
+    /// a plain `fs::write`. Kept alive in `App` so it's deleted on drop —
+    /// i.e. cleaned up when hoot exits — instead of accumulating in
+    /// `/tmp` (or `$TMPDIR`) forever. Only used when `agent_backend` is
+    /// `Pi`.
+    pub session_file: tempfile::NamedTempFile,
     /// opencode's equivalent of `session_file`, except it can't be decided
     /// upfront — opencode assigns this itself and only hands it back after
     /// the first turn runs (`AgentEvent::Session`), so it starts `None` and
@@ -171,7 +179,7 @@ pub enum EditorTarget {
 }
 
 /// How often `sync_from_disk` re-reads the repo to pick up changes made
-/// outside steer (an external `pi` run, an editor, `git` on the command
+/// outside hoot (an external `pi` run, an editor, `git` on the command
 /// line). A plain poll rather than an OS file-watcher: this app already
 /// re-derives all of its state from disk on demand (git diff, fs reads),
 /// so a cheap periodic re-check reuses that instead of adding a new
@@ -261,7 +269,11 @@ impl App {
 
             target_dir,
             agent_backend,
-            session_file: std::env::temp_dir().join(format!("steer-session-{}.jsonl", std::process::id())),
+            session_file: tempfile::Builder::new()
+                .prefix("hoot-session-")
+                .suffix(".jsonl")
+                .tempfile()
+                .expect("couldn't create a temp file for the pi session"),
             opencode_session_id: None,
             transcript: Vec::new(),
             agent_input: String::new(),
@@ -364,9 +376,9 @@ impl App {
 
     /// Called every event-loop tick; re-reads the repo from disk at most
     /// once per `FS_POLL_INTERVAL` and folds in anything that changed
-    /// outside steer — a `pi` run in another terminal, an editor, `git` on
+    /// outside hoot — a `pi` run in another terminal, an editor, `git` on
     /// the command line. Keeps Review usable as a pure review/browsing
-    /// layer even when whatever's making the changes isn't steer's own
+    /// layer even when whatever's making the changes isn't hoot's own
     /// Agent pane.
     pub fn sync_from_disk(&mut self) {
         if self.last_fs_poll.elapsed() < FS_POLL_INTERVAL {
@@ -456,11 +468,7 @@ impl App {
         self.hover = self.source.get(self.nav_line).and_then(|line| {
             let sym = fsnav::hover_for_line(&self.symbols, line)?;
             let references = fsnav::reference_count(&self.target_dir, &sym.name);
-            Some(HoverInfo {
-                signature: sym.preview.clone(),
-                location: sym.location(&self.target_dir),
-                references,
-            })
+            Some(HoverInfo { signature: sym.preview.clone(), location: sym.location(&self.target_dir), references })
         });
     }
 
@@ -501,7 +509,7 @@ impl App {
         }
 
         let result = match self.agent_backend {
-            AgentBackend::Pi => pi_client::spawn(&prompt, &cwd, &self.session_file, tools),
+            AgentBackend::Pi => pi_client::spawn(&prompt, &cwd, self.session_file.path(), tools),
             AgentBackend::OpenCode => opencode_client::spawn(&prompt, &cwd, self.opencode_session_id.as_deref(), tools),
         };
         match result {
@@ -612,23 +620,19 @@ impl App {
                 self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() });
             }
             Text(t) => self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: t }),
-            ToolCall { name, args } => self.transcript.push(AgentLine {
-                kind: AgentLineKind::ToolCall,
-                text: format!("Calling: {name}({args})"),
-            }),
-            ToolResult { name, summary } => self.transcript.push(AgentLine {
-                kind: AgentLineKind::Done,
-                text: format!("{name}  {summary}"),
-            }),
+            ToolCall { name, args } => {
+                self.transcript.push(AgentLine { kind: AgentLineKind::ToolCall, text: format!("Calling: {name}({args})") })
+            }
+            ToolResult { name, summary } => {
+                self.transcript.push(AgentLine { kind: AgentLineKind::Done, text: format!("{name}  {summary}") })
+            }
             TurnEnd => self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() }),
             // pi sends an explicit AgentEnd right before exiting; opencode
             // has no equivalent event at all. `finish_turn` (fired on the
             // channel disconnecting, i.e. the process actually exiting)
             // covers both uniformly, so this is a no-op either way.
             AgentEnd => {}
-            Error(e) => {
-                self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("stderr: {e}") })
-            }
+            Error(e) => self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: format!("stderr: {e}") }),
         }
     }
 
@@ -641,8 +645,16 @@ impl App {
         self.agent_running = false;
         self.agent_session = None;
         if self.agent_purpose == TurnPurpose::CommitMessage {
-            self.commit_message_status = None;
-            self.open_editor_requested = Some(EditorTarget::CommitMessage);
+            // If the turn errored, `apply_agent_event` already put that
+            // message in `commit_message_status` — leave it there instead
+            // of clobbering it, and don't open $EDITOR on what would be an
+            // empty (or stale) buffer with no indication anything went
+            // wrong. The user can still write one by hand with 'e'.
+            let had_error = self.commit_message_status.as_deref().is_some_and(|s| s.starts_with("Error"));
+            if !had_error {
+                self.commit_message_status = None;
+                self.open_editor_requested = Some(EditorTarget::CommitMessage);
+            }
             return;
         }
         // Every turn writes directly to target_dir now, so whatever's
@@ -933,7 +945,7 @@ impl App {
             self.open_editor_requested = Some(EditorTarget::IteratePrompt);
         } else if k.is(&key, Action::ReviewCopyPrompt) {
             // For running the actual agent in a separate terminal/session
-            // instead of steer's embedded one: builds the exact same
+            // instead of hoot's embedded one: builds the exact same
             // prompt as Iterate, but puts it on the system clipboard
             // instead of sending it anywhere.
             let prompt = self.build_iterate_prompt();
@@ -948,10 +960,15 @@ impl App {
             // With the content pane focused, a comment is scoped to
             // whatever line the cursor is actually on — works the same
             // whether that's plain source or a diff. Otherwise (Tree
-            // focused, or the cursor's on a line with no clean file-line
-            // mapping — a removed line, or a `Focused`-view placeholder)
-            // it falls back to a whole-file comment.
-            let line_target = if self.nav_focus == NavFocus::Content { self.current_content_line_number() } else { None };
+            // focused, split-diff view (its before/after columns don't
+            // track nav_line at all, so there's no visible indication of
+            // which line a comment would even attach to — rather than
+            // silently pick a stale or wrong one, fall back), or the
+            // cursor's on a line with no clean file-line mapping — a
+            // removed line, or a `Focused`-view placeholder — it falls
+            // back to a whole-file comment.
+            let line_target =
+                if self.nav_focus == NavFocus::Content && !self.split_diff { self.current_content_line_number() } else { None };
             if let Some(line) = line_target {
                 let rel = self.nav_file.strip_prefix(&self.target_dir).unwrap_or(&self.nav_file).display().to_string();
                 self.open_note_input(rel, Some(line));
@@ -978,7 +995,13 @@ impl App {
         let mut order: Vec<&str> = Vec::new();
         let mut grouped: std::collections::HashMap<&str, Vec<&Note>> = std::collections::HashMap::new();
         for note in &self.notes {
-            grouped.entry(note.path.as_str()).or_insert_with(|| { order.push(note.path.as_str()); Vec::new() }).push(note);
+            grouped
+                .entry(note.path.as_str())
+                .or_insert_with(|| {
+                    order.push(note.path.as_str());
+                    Vec::new()
+                })
+                .push(note);
         }
         for path in &order {
             any = true;
@@ -1006,12 +1029,7 @@ impl App {
     // SYMBOL JUMP
     // -------------------------------------------------------------
     fn filtered_symbols(&self) -> Vec<usize> {
-        self.symbols
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| fsnav::fuzzy_match(&self.symbol_filter, &s.name))
-            .map(|(i, _)| i)
-            .collect()
+        self.symbols.iter().enumerate().filter(|(_, s)| fsnav::fuzzy_match(&self.symbol_filter, &s.name)).map(|(i, _)| i).collect()
     }
 
     fn on_key_symbol_jump(&mut self, key: KeyEvent) {
@@ -1213,6 +1231,15 @@ impl App {
     /// prompt field (so the caller shouldn't fall through to anything else).
     fn on_key_agent_input(&mut self, key: KeyEvent) -> bool {
         if self.keymap.is(&key, Action::AgentSend) {
+            // Checked here, not just inside spawn_turn: that check happens
+            // after the input's already been taken, so pressing Enter
+            // while a turn is running used to silently clear whatever was
+            // typed — spawn_turn would no-op on `agent_running`, but the
+            // text was already gone by then. Only take (and clear) the
+            // input once a turn will actually start.
+            if self.agent_running || self.agent_input.trim().is_empty() {
+                return true;
+            }
             let prompt = std::mem::take(&mut self.agent_input);
             self.agent_cursor = 0;
             self.start_agent_turn(prompt);
@@ -1316,7 +1343,7 @@ mod tests {
 
     fn scratch_repo(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "steer-app-test-{label}-{}-{:?}",
+            "hoot-app-test-{label}-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
@@ -1340,7 +1367,7 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    /// Two files, each with one hunk, so Steer/Curation navigation and
+    /// Two files, each with one hunk, so Hoot/Curation navigation and
     /// selection have more than one row to move between.
     fn two_file_app(label: &str) -> (App, PathBuf) {
         let dir = scratch_repo(label);
@@ -1439,7 +1466,7 @@ mod tests {
 
     #[test]
     fn review_diff_navigation_and_toggles() {
-        let (mut app, dir) = two_file_app("steer-nav");
+        let (mut app, dir) = two_file_app("hoot-nav");
         assert_eq!(app.tree_index, 0);
         // Both a.txt (index 0) and b.txt (index 1) have changes, so the
         // content pane defaults to Diff — meaning Up/Down move the tree
@@ -1519,9 +1546,9 @@ mod tests {
 
         let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(key(KeyCode::Tab)); // focus content
-        // Rows: line1..line4 (context, 4 rows) then the old "line5"
-        // (removed) then "line5-CHANGED" (added, file line 5) — 5 Downs
-        // from row 0 lands on that added row.
+                                       // Rows: line1..line4 (context, 4 rows) then the old "line5"
+                                       // (removed) then "line5-CHANGED" (added, file line 5) — 5 Downs
+                                       // from row 0 lands on that added row.
         for _ in 0..5 {
             app.on_key(key(KeyCode::Down));
         }
@@ -1530,6 +1557,36 @@ mod tests {
         app.on_key(key(KeyCode::Char('c')));
         assert_eq!(app.overlay, Overlay::NoteInput);
         assert_eq!(app.note_target, Some(("f.rs".to_string(), Some(5))));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn comment_falls_back_to_whole_file_in_split_diff_view() {
+        // Regression: draw_diff_split's before/after columns never track
+        // nav_line at all, so there's no visible indication of which line
+        // a line-scoped comment would attach to — it must fall back to a
+        // whole-file comment there instead of silently (and invisibly)
+        // targeting whatever nav_line happens to still hold from before
+        // split view was turned on.
+        let dir = scratch_repo("split-diff-comment");
+        let content: String = (1..=10).map(|n| format!("line{n}\n")).collect();
+        commit_file(&dir, "f.rs", &content);
+        let mut lines: Vec<String> = (1..=10).map(|n| format!("line{n}")).collect();
+        lines[4] = "line5-CHANGED".to_string();
+        fs::write(dir.join("f.rs"), lines.join("\n") + "\n").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.on_key(key(KeyCode::Tab)); // focus content
+        for _ in 0..5 {
+            app.on_key(key(KeyCode::Down));
+        }
+        assert_eq!(app.current_content_line_number(), Some(5), "sanity check: same cursor position as the unified-view test above");
+
+        app.on_key(key(KeyCode::Char('s'))); // switch to split view
+        app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(app.overlay, Overlay::NoteInput);
+        assert_eq!(app.note_target, Some(("f.rs".to_string(), None)), "should be a whole-file comment, not line 5");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1619,6 +1676,7 @@ mod tests {
             notes: 0,
             flagged: false,
             hunks: vec![],
+            unsupported: None,
         });
         app.nav_file = dir.join("x.rs"); // so current_diff_index() resolves to it
 
@@ -1644,6 +1702,7 @@ mod tests {
             notes: 0,
             flagged: false,
             hunks: vec![],
+            unsupported: None,
         });
         app.nav_file = dir.join("x.rs"); // so current_diff_index() resolves to it
         app.on_key(key(KeyCode::Char('c')));
@@ -1690,7 +1749,7 @@ mod tests {
         // default content pane for any changed file, not an edge case.
         let dir = scratch_repo("navigate-scroll-diff");
         commit_file(&dir, "long.rs", "short\n");
-        fs::write(&dir.join("long.rs"), "a very much longer line than before, changed\n").unwrap();
+        fs::write(dir.join("long.rs"), "a very much longer line than before, changed\n").unwrap();
         let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.mode = Mode::Review;
         assert!(app.current_diff_index().is_some(), "long.rs should have a diff");
@@ -1863,6 +1922,30 @@ mod tests {
     }
 
     #[test]
+    fn enter_while_a_turn_is_running_does_not_discard_the_typed_prompt() {
+        // Regression: the input used to be taken (and thus cleared)
+        // *before* checking whether a turn could actually start, so typing
+        // a follow-up while one was still running silently lost it — Enter
+        // cleared the box, spawn_turn no-op'd on agent_running, and the
+        // text was already gone.
+        let dir = scratch_repo("agent-input-race");
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.mode = Mode::Agent;
+        app.agent_running = true; // simulate a turn already in flight
+
+        for c in "still typing".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.agent_input, "still typing");
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.agent_input, "still typing", "Enter shouldn't clear the prompt while a turn is running");
+        assert!(app.agent_running, "and definitely shouldn't have started a second turn");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn symbol_jump_close_discards_filter_state_choice() {
         let dir = scratch_repo("symjump-close");
         commit_file(&dir, "lib.rs", "fn foo() {}\n");
@@ -1947,7 +2030,7 @@ mod tests {
     #[test]
     fn copy_prompt_key_sets_a_clipboard_status() {
         // For running the real agent in a separate terminal instead of
-        // steer's embedded one: 'y' builds the same prompt as Iterate but
+        // hoot's embedded one: 'y' builds the same prompt as Iterate but
         // copies it instead of sending it. Whether the environment
         // actually has a clipboard tool on PATH varies (CI, headless
         // Linux), so this only checks that the attempt is made and
@@ -2063,7 +2146,7 @@ mod tests {
         app.project.files[0].flagged = true;
         let before = app.project.files[0].hunks[0].lines.len();
 
-        // Simulate a change made outside steer (another `pi` run, an
+        // Simulate a change made outside hoot (another `pi` run, an
         // editor, plain `git`) — a plain fs::write, not through the app.
         fs::write(dir.join("a.txt"), "a1-changed\na2\na3-new-line\n").unwrap();
 
@@ -2107,8 +2190,15 @@ mod tests {
         app.finish_turn();
 
         assert!(!app.agent_running);
-        assert!(app.project.files[0].hunks[0].lines.len() > before, "Review should already reflect the write, no waiting for the next poll");
-        assert!(app.transcript.iter().any(|l| l.text.contains("file") && l.text.contains("changed")), "{:?}", app.transcript.iter().map(|l| &l.text).collect::<Vec<_>>());
+        assert!(
+            app.project.files[0].hunks[0].lines.len() > before,
+            "Review should already reflect the write, no waiting for the next poll"
+        );
+        assert!(
+            app.transcript.iter().any(|l| l.text.contains("file") && l.text.contains("changed")),
+            "{:?}",
+            app.transcript.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2178,6 +2268,32 @@ mod tests {
         assert!(app.commit_message_status.as_deref().unwrap().contains("pi exploded"));
         assert_eq!(app.transcript.len(), transcript_len_before);
         assert_eq!(app.open_editor_requested, None, "an error shouldn't open the editor");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_commit_message_generation_keeps_the_error_visible_and_never_opens_a_blank_editor() {
+        // Regression: finish_turn (fired once the backend process exits)
+        // used to unconditionally clear commit_message_status and open
+        // $EDITOR, even when the turn had just errored out — clobbering
+        // the error the user was still looking at and popping up an editor
+        // on an empty buffer with no explanation.
+        let dir = scratch_repo("purpose-error-finish");
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.agent_purpose = TurnPurpose::CommitMessage;
+        app.agent_running = true;
+
+        app.apply_agent_event(AgentEvent::Error("model unavailable".to_string()));
+        app.finish_turn();
+
+        assert!(!app.agent_running);
+        assert!(
+            app.commit_message_status.as_deref().unwrap_or_default().contains("model unavailable"),
+            "the error should still be visible: {:?}",
+            app.commit_message_status
+        );
+        assert_eq!(app.open_editor_requested, None, "shouldn't open the editor on a failed generation");
 
         let _ = fs::remove_dir_all(&dir);
     }

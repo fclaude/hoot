@@ -71,8 +71,8 @@ mod tests {
     /// "copy" actually received.
     fn script(body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let script_path = std::env::temp_dir().join(format!("steer-clipboard-test-{}-{suffix}", std::process::id()));
-        let capture_path = std::env::temp_dir().join(format!("steer-clipboard-capture-{}-{suffix}", std::process::id()));
+        let script_path = std::env::temp_dir().join(format!("hoot-clipboard-test-{}-{suffix}", std::process::id()));
+        let capture_path = std::env::temp_dir().join(format!("hoot-clipboard-capture-{}-{suffix}", std::process::id()));
         let mut f = std::fs::File::create(&script_path).unwrap();
         writeln!(f, "#!/bin/sh\nCAPTURE={:?}\n{body}", capture_path.to_str().unwrap()).unwrap();
         drop(f);
@@ -95,8 +95,7 @@ mod tests {
     #[test]
     fn falls_through_to_the_next_candidate_when_the_first_is_missing() {
         let (script_path, capture_path) = script("cat > \"$CAPTURE\"");
-        let candidates: Vec<(&str, &[&str])> =
-            vec![("steer-definitely-not-a-real-binary-xyz", &[]), (script_path.to_str().unwrap(), &[])];
+        let candidates: Vec<(&str, &[&str])> = vec![("hoot-definitely-not-a-real-binary-xyz", &[]), (script_path.to_str().unwrap(), &[])];
 
         copy_with(&candidates, "second candidate wins").unwrap();
         assert_eq!(std::fs::read_to_string(&capture_path).unwrap(), "second candidate wins");
@@ -119,7 +118,7 @@ mod tests {
     #[test]
     fn errors_when_no_candidate_is_available() {
         let candidates: Vec<(&str, &[&str])> =
-            vec![("steer-definitely-not-a-real-binary-xyz1", &[]), ("steer-definitely-not-a-real-binary-xyz2", &[])];
+            vec![("hoot-definitely-not-a-real-binary-xyz1", &[]), ("hoot-definitely-not-a-real-binary-xyz2", &[])];
         let err = copy_with(&candidates, "whatever").unwrap_err();
         assert!(err.contains("no clipboard tool found"), "{err}");
     }

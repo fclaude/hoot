@@ -11,8 +11,14 @@ pub enum AgentEvent {
     Model(String),
     Thinking(String),
     Text(String),
-    ToolCall { name: String, args: String },
-    ToolResult { name: String, summary: String },
+    ToolCall {
+        name: String,
+        args: String,
+    },
+    ToolResult {
+        name: String,
+        summary: String,
+    },
     /// A backend-assigned session identifier, for backends (opencode) that
     /// hand one back rather than taking an explicit session file upfront
     /// like pi does. Never fired by pi_client.

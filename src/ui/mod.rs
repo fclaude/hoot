@@ -20,17 +20,11 @@ use crate::agent_client::AgentBackend;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    f.render_widget(
-        ratatui::widgets::Block::default().style(Style::default().bg(theme::BG_OUTER)),
-        area,
-    );
+    f.render_widget(ratatui::widgets::Block::default().style(Style::default().bg(theme::BG_OUTER)), area);
 
     let narrow = area.width < 100;
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(area);
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(0)]).split(area);
 
     draw_status_line(f, app, chunks[0], narrow);
 
@@ -75,8 +69,7 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
             format!("{}   model: {}   {}", app.agent_backend.label(), model, status)
         }
         Mode::Curation => {
-            let (sel, total): (u32, u32) =
-                app.curation_files.iter().fold((0, 0), |(s, t), f| (s + f.selected(), t + f.total()));
+            let (sel, total): (u32, u32) = app.curation_files.iter().fold((0, 0), |(s, t), f| (s + f.selected(), t + f.total()));
             format!("{}/{} hunks selected", sel, total)
         }
     };
@@ -92,13 +85,7 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let left_pad = pad / 2;
     let right_pad = pad - left_pad;
 
-    let text = format!(
-        "{left}{:lw$}{center}{:rw$}{right} ",
-        "",
-        "",
-        lw = left_pad,
-        rw = right_pad
-    );
+    let text = format!("{left}{:lw$}{center}{:rw$}{right} ", "", "", lw = left_pad, rw = right_pad);
 
     let para = Paragraph::new(text).style(Style::default().bg(theme::BG_SELECTION).fg(theme::FG));
     f.render_widget(para, area);
@@ -111,10 +98,7 @@ pub fn key_hints(items: &[(&str, &str)]) -> Line<'static> {
         if i > 0 {
             spans.push(Span::raw("   "));
         }
-        spans.push(Span::styled(
-            key.to_string(),
-            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
-        ));
+        spans.push(Span::styled(key.to_string(), Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(label.to_string(), Style::default().fg(theme::DIM)));
     }
@@ -149,13 +133,7 @@ pub fn diff_line_style(kind: crate::data::DiffLineKind) -> Style {
 
 /// Renders a bordered panel with an optional divider + key-hint footer inside
 /// the border, matching the box-drawn panels throughout the mockups.
-pub fn draw_panel(
-    f: &mut Frame,
-    area: Rect,
-    title: &str,
-    body: Paragraph<'static>,
-    hints: &[Line<'static>],
-) {
+pub fn draw_panel(f: &mut Frame, area: Rect, title: &str, body: Paragraph<'static>, hints: &[Line<'static>]) {
     let block = panel_block(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -163,11 +141,7 @@ pub fn draw_panel(
     if !hints.is_empty() {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(1),
-                Constraint::Length(hints.len() as u16),
-            ])
+            .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Length(hints.len() as u16)])
             .split(inner);
         f.render_widget(body, chunks[0]);
         let divider = "─".repeat(chunks[1].width as usize);
@@ -191,7 +165,7 @@ mod tests {
 
     fn scratch_repo(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "steer-ui-test-{label}-{}-{:?}",
+            "hoot-ui-test-{label}-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
@@ -228,7 +202,7 @@ mod tests {
 
     #[test]
     fn review_screen_shows_real_file_and_diff() {
-        let dir = scratch_repo("steer");
+        let dir = scratch_repo("hoot");
         commit_file(&dir, "f.txt", "line1\nline2\n");
         fs::write(dir.join("f.txt"), "line1-changed\nline2\n").unwrap();
 
@@ -286,7 +260,7 @@ mod tests {
         // "nothing to review" message), the merged screen stays useful on a
         // clean repo: there's no diff to show, so the content pane falls
         // back to plain source browsing instead of going empty.
-        let dir = scratch_repo("steer-clean");
+        let dir = scratch_repo("hoot-clean");
         commit_file(&dir, "f.txt", "line1\n");
 
         let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
@@ -370,9 +344,7 @@ mod tests {
         let dir = scratch_repo("agent-long");
         let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
-        app.transcript = (1..=100)
-            .map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") })
-            .collect();
+        app.transcript = (1..=100).map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") }).collect();
         for c in "MY_TYPED_PROMPT".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
@@ -392,15 +364,16 @@ mod tests {
         let dir = scratch_repo("agent-scrollback");
         let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
         app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
-        app.transcript = (1..=100)
-            .map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") })
-            .collect();
+        app.transcript = (1..=100).map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") }).collect();
 
         for _ in 0..8 {
             app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         }
         let screen = render(&app, 120, 30);
-        assert!(screen.contains("TRANSCRIPT_LINE_1\n") || screen.contains("TRANSCRIPT_LINE_1 "), "scrolling up should reach the start: {screen}");
+        assert!(
+            screen.contains("TRANSCRIPT_LINE_1\n") || screen.contains("TRANSCRIPT_LINE_1 "),
+            "scrolling up should reach the start: {screen}"
+        );
         assert!(screen.contains("scrolled up"), "should indicate we're not pinned to the bottom: {screen}");
 
         let _ = fs::remove_dir_all(&dir);

@@ -8,10 +8,7 @@ use crate::app::App;
 use crate::theme;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(area);
+    let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(0), Constraint::Length(1)]).split(area);
 
     let sidebar_width = if narrow { 20 } else { 30 };
     let cols = Layout::default()
@@ -21,10 +18,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
 
     draw_sidebar(f, app, cols[0]);
 
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(45), Constraint::Min(0)])
-        .split(cols[1]);
+    let right =
+        Layout::default().direction(Direction::Vertical).constraints([Constraint::Percentage(45), Constraint::Min(0)]).split(cols[1]);
 
     draw_commit_box(f, app, right[0]);
     draw_hunk_box(f, app, right[1]);
@@ -42,10 +37,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     match &app.last_commit {
         Some(Ok(summary)) => {
             spans.push(Span::raw("   "));
-            spans.push(Span::styled(
-                format!("\u{2714} {summary}"),
-                Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD),
-            ));
+            spans.push(Span::styled(format!("\u{2714} {summary}"), Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD)));
         }
         Some(Err(e)) => {
             spans.push(Span::raw("   "));
@@ -120,6 +112,26 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let file = app.project.files.iter().find(|f| f.path == cf.path);
+
+    // A binary file, pure rename, mode-only change, or submodule update
+    // has nothing the hunk parser can turn into selectable lines — say so
+    // plainly instead of showing a confusing "hunk 1/0" with no
+    // explanation. Committing it whole is still possible via `git add`
+    // outside hoot; there's just nothing to curate here.
+    if let Some(reason) = file.and_then(|f| f.unsupported) {
+        let title = format!("{} \u{2014} not curatable here", cf.path);
+        let lines = vec![
+            Line::from(Span::styled(format!("This change is {reason}."), Style::default().fg(theme::ORANGE))),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "There's no hunk-level content to select — stage it with plain `git add` instead.",
+                Style::default().fg(theme::DIM),
+            )),
+        ];
+        super::draw_panel(f, area, &title, Paragraph::new(lines), &[]);
+        return;
+    }
+
     let shown_index = app.curation_hunk_index.min(cf.total().saturating_sub(1) as usize);
     let this_selected = cf.hunk_selected.get(shown_index).copied().unwrap_or(false);
 
@@ -141,10 +153,7 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
             }
         }
         None => {
-            lines.push(Line::from(Span::styled(
-                "No cached diff content for this hunk.",
-                Style::default().fg(theme::DIM),
-            )));
+            lines.push(Line::from(Span::styled("No cached diff content for this hunk.", Style::default().fg(theme::DIM))));
         }
     }
 

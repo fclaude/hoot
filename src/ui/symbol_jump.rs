@@ -42,17 +42,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             Span::raw("  "),
             Span::styled(sym.location(&app.target_dir), Style::default().fg(theme::DIM)),
         ]));
-        lines.push(Line::from(vec![
-            Span::raw("    "),
-            Span::styled(sym.preview.clone(), Style::default().fg(theme::FG)),
-        ]));
+        lines.push(Line::from(vec![Span::raw("    "), Span::styled(sym.preview.clone(), Style::default().fg(theme::FG))]));
         lines.push(Line::raw(""));
     }
     if results.len() > 15 {
-        lines.push(Line::from(Span::styled(
-            format!("  \u{2026} and {} more", results.len() - 15),
-            Style::default().fg(theme::DIM),
-        )));
+        lines.push(Line::from(Span::styled(format!("  \u{2026} and {} more", results.len() - 15), Style::default().fg(theme::DIM))));
     }
 
     f.render_widget(Paragraph::new(lines), inner);

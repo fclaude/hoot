@@ -13,12 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::data::{SymbolResult, TreeEntry};
 
-const SKIP_DIRS: &[&str] = &[
-    ".git", "target", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".idea", ".vscode",
-];
-const SOURCE_EXTS: &[&str] = &[
-    "rs", "ts", "tsx", "js", "jsx", "go", "py", "java", "c", "h", "cpp", "hpp", "rb", "swift", "kt",
-];
+const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".idea", ".vscode"];
+const SOURCE_EXTS: &[&str] = &["rs", "ts", "tsx", "js", "jsx", "go", "py", "java", "c", "h", "cpp", "hpp", "rb", "swift", "kt"];
 const TREE_BUDGET: usize = 400;
 const SCAN_FILE_BUDGET: usize = 500;
 const SYMBOL_BUDGET: usize = 500;
@@ -49,13 +45,7 @@ fn walk(dir: &Path, depth: u8, out: &mut Vec<TreeEntry>) {
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
             let child_count = fs::read_dir(&path).map(|d| d.filter_map(|e| e.ok()).count() as u32).unwrap_or(0);
-            out.push(TreeEntry {
-                label: format!("{name}/"),
-                depth,
-                is_dir: true,
-                child_count: Some(child_count),
-                path: path.clone(),
-            });
+            out.push(TreeEntry { label: format!("{name}/"), depth, is_dir: true, child_count: Some(child_count), path: path.clone() });
             walk(&path, depth + 1, out);
         } else {
             out.push(TreeEntry { label: name, depth, is_dir: false, child_count: None, path });
@@ -173,10 +163,7 @@ fn extract_symbol_name(line: &str) -> Option<String> {
 
 /// Finds a symbol whose name appears as a whole word on `line_text`.
 pub fn hover_for_line<'a>(symbols: &'a [SymbolResult], line_text: &str) -> Option<&'a SymbolResult> {
-    let words: Vec<&str> = line_text
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|w| !w.is_empty())
-        .collect();
+    let words: Vec<&str> = line_text.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| !w.is_empty()).collect();
     symbols.iter().find(|s| words.contains(&s.name.as_str()))
 }
 
@@ -209,10 +196,7 @@ pub fn reference_count(root: &Path, name: &str) -> u32 {
     for path in files {
         let Ok(content) = fs::read_to_string(&path) else { continue };
         for line in content.lines() {
-            count += line
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .filter(|w| *w == name)
-                .count() as u32;
+            count += line.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| *w == name).count() as u32;
         }
     }
     count
@@ -224,7 +208,7 @@ mod tests {
 
     fn scratch_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "steer-fsnav-test-{label}-{}-{:?}",
+            "hoot-fsnav-test-{label}-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
@@ -276,9 +260,8 @@ mod tests {
 
     #[test]
     fn hover_for_line_finds_whole_word_matches_only() {
-        let symbols = vec![
-            SymbolResult { name: "parse".to_string(), path: PathBuf::from("a.rs"), line: 1, preview: "fn parse()".to_string() },
-        ];
+        let symbols =
+            vec![SymbolResult { name: "parse".to_string(), path: PathBuf::from("a.rs"), line: 1, preview: "fn parse()".to_string() }];
         assert!(hover_for_line(&symbols, "let x = parse(input);").is_some());
         // "reparse" contains "parse" as a substring but not as a whole word.
         assert!(hover_for_line(&symbols, "let x = reparse(input);").is_none());

@@ -1,16 +1,23 @@
 # Builds release binaries + a .deb and .rpm, and attaches them all to a
 # GitHub Release, whenever a `vX.Y.Z` tag is pushed.
 #
-# Deliberately uses native runners per architecture (macOS Intel/Apple
-# Silicon, Linux x86_64/arm64) instead of `cross` or Docker-based
-# cross-compilation — steer has no C dependencies, so there's nothing a
-# cross toolchain buys here that a native build doesn't already give for
-# free, and native builds are easier to reason about when something breaks.
+# Deliberately uses native runners per architecture where they still exist
+# (Linux x86_64/arm64) instead of `cross` or Docker-based cross-compilation
+# — hoot has no C dependencies, so there's nothing a cross toolchain buys
+# there that a native build doesn't already give for free. macOS is the
+# exception: GitHub retired the free-tier Intel macOS runner (macos-13) in
+# December 2025, so both Mac targets now build on one Apple Silicon runner,
+# cross-compiling to x86_64-apple-darwin — Apple's own toolchain handles
+# that natively, no extra linker needed.
 #
 # What this does NOT do: push to Homebrew, COPR, or the AUR. Those each
 # need their own account/repo that only a human can set up (see
 # packaging/README.md) — this workflow just produces the raw artifacts
 # those live downstream of.
+#
+# Every action is pinned to a commit SHA, not a mutable tag, and each job
+# gets only the permissions it actually needs — see
+# https://docs.github.com/actions/security-guides/security-hardening-for-github-actions.
 
 name: release
 
@@ -18,78 +25,118 @@ on:
   push:
     tags: ["v*.*.*"]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
+  check:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+
+      - name: Tag matches Cargo.toml version
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::tag v$tag_version doesn't match Cargo.toml version $cargo_version"
+            exit 1
+          fi
+
   build:
+    needs: check
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
-          - os: macos-13
-            target: x86_64-apple-darwin
           - os: macos-14
             target: aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: ${{ matrix.target }}
 
-      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package tarball
         run: |
           set -euo pipefail
-          stage="steer-${{ github.ref_name }}-${{ matrix.target }}"
+          stage="hoot-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir "$stage"
-          cp target/${{ matrix.target }}/release/steer "$stage/"
-          cp README.md KEYBINDINGS.md "$stage/"
+          cp target/${{ matrix.target }}/release/hoot "$stage/"
+          cp README.md KEYBINDINGS.md LICENSE "$stage/"
           tar czf "$stage.tar.gz" "$stage"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: steer-${{ matrix.target }}
-          path: steer-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          name: hoot-${{ matrix.target }}
+          path: hoot-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
 
   package-linux:
     # .deb and .rpm are x86_64-only for now — see packaging/README.md for
     # adding an arm64 pass if it's ever worth the extra CI time.
+    needs: check
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
-      - run: cargo install cargo-deb cargo-generate-rpm
+      - run: cargo install cargo-deb cargo-generate-rpm --locked
 
-      - run: cargo build --release
+      - run: cargo build --release --locked
 
       - run: cargo deb --no-build
       - run: cargo generate-rpm
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: steer-deb-rpm
+          name: hoot-deb-rpm
           path: |
             target/debian/*.deb
             target/generate-rpm/*.rpm
 
   release:
     needs: [build, package-linux]
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/*
+
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           generate_release_notes: true

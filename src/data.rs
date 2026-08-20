@@ -1,4 +1,4 @@
-//! Mock data for the `steer` demo. Content mirrors the worked example used
+//! Mock data for the `hoot` demo. Content mirrors the worked example used
 //! throughout the source design mockups (a fictional `search-index` crate).
 
 use crate::theme::FileStatus;
@@ -45,6 +45,12 @@ pub struct FileEntry {
     pub notes: u32,
     pub flagged: bool,
     pub hunks: Vec<Hunk>,
+    /// Set when the diff parser found a real change here but nothing it
+    /// can turn into selectable hunks — binary content, a pure rename, a
+    /// mode-only change, or a submodule pointer update. `hunks` is empty
+    /// in that case; this is why, so the UI can say so plainly instead of
+    /// silently showing "0/0 hunks" with no explanation.
+    pub unsupported: Option<&'static str>,
 }
 
 /// `hunks` flattened into one line sequence and paired with the
@@ -79,7 +85,7 @@ pub fn diff_lines_with_file_line_numbers(hunks: &[Hunk]) -> Vec<(Option<usize>, 
 /// `@@ -12,7 +18,11 @@ impl Foo {` — the `18` after the `+`.
 fn parse_hunk_new_start(header: &str) -> Option<usize> {
     let plus = header.split('+').nth(1)?;
-    let num = plus.split(|c: char| c == ',' || c == ' ').next()?;
+    let num = plus.split([',', ' ']).next()?;
     num.parse().ok()
 }
 
@@ -90,8 +96,12 @@ fn parse_hunk_new_start(header: &str) -> Option<usize> {
 /// style, derived from the same full-context, numbered lines the
 /// whole-file view uses rather than a second, separately-loaded diff.
 pub fn focus_diff_lines(lines: &[(Option<usize>, DiffLine)], context: usize) -> Vec<(Option<usize>, DiffLine)> {
-    let changed: Vec<usize> =
-        lines.iter().enumerate().filter(|(_, (_, l))| matches!(l.kind, DiffLineKind::Added | DiffLineKind::Removed)).map(|(i, _)| i).collect();
+    let changed: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, l))| matches!(l.kind, DiffLineKind::Added | DiffLineKind::Removed))
+        .map(|(i, _)| i)
+        .collect();
     if changed.is_empty() {
         return Vec::new();
     }
@@ -174,47 +184,25 @@ pub fn mock_project() -> Project {
     }];
 
     let files = vec![
-        FileEntry {
-            path: "main.rs".to_string(),
-            hunk_count: 2,
-            notes: 0,
-            flagged: false,
-            hunks: vec![],
-        },
-        FileEntry {
-            path: "lib.rs".to_string(),
-            hunk_count: 1,
-            notes: 0,
-            flagged: false,
-            hunks: vec![],
-        },
-        FileEntry {
-            path: "index/mod.rs".to_string(),
-            hunk_count: 3,
-            notes: 0,
-            flagged: false,
-            hunks: vec![],
-        },
+        FileEntry { path: "main.rs".to_string(), hunk_count: 2, notes: 0, flagged: false, hunks: vec![], unsupported: None },
+        FileEntry { path: "lib.rs".to_string(), hunk_count: 1, notes: 0, flagged: false, hunks: vec![], unsupported: None },
+        FileEntry { path: "index/mod.rs".to_string(), hunk_count: 3, notes: 0, flagged: false, hunks: vec![], unsupported: None },
         FileEntry {
             path: "index/postings.rs".to_string(),
             hunk_count: 5,
             notes: 2,
             flagged: true,
             hunks: postings_hunks,
+            unsupported: None,
         },
-        FileEntry {
-            path: "query/parser.rs".to_string(),
-            hunk_count: 6,
-            notes: 1,
-            flagged: false,
-            hunks: parser_hunks,
-        },
+        FileEntry { path: "query/parser.rs".to_string(), hunk_count: 6, notes: 1, flagged: false, hunks: parser_hunks, unsupported: None },
         FileEntry {
             path: "tests/integration_test.rs".to_string(),
             hunk_count: 3,
             notes: 0,
             flagged: false,
             hunks: vec![],
+            unsupported: None,
         },
     ];
 
@@ -234,9 +222,9 @@ pub struct TreeEntry {
     pub path: std::path::PathBuf,
 }
 
-/// A real, free-text review note — from Steer (file-level, `line: None`) or
+/// A real, free-text review note — from Hoot (file-level, `line: None`) or
 /// Navigate (a specific line while browsing). Feeds into the real prompt
-/// Steer's "iterate" sends to `pi`.
+/// Hoot's "iterate" sends to `pi`.
 pub struct Note {
     pub path: String,
     pub line: Option<usize>,

@@ -56,10 +56,7 @@ pub(crate) fn input_spans(text: &str, cursor: usize) -> Vec<Span<'static>> {
     let before: String = chars.iter().take(cursor).collect();
     let mut spans = vec![Span::styled(before, Style::default().fg(theme::FG))];
     if cursor < chars.len() {
-        spans.push(Span::styled(
-            chars[cursor].to_string(),
-            Style::default().fg(theme::BG_PANEL).bg(theme::CYAN),
-        ));
+        spans.push(Span::styled(chars[cursor].to_string(), Style::default().fg(theme::BG_PANEL).bg(theme::CYAN)));
         let after: String = chars.iter().skip(cursor + 1).collect();
         spans.push(Span::styled(after, Style::default().fg(theme::FG)));
     } else {
@@ -95,9 +92,7 @@ fn build_transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         let mut wrapped_lines = match tl.kind {
             AgentLineKind::Done => wrapped("\u{2714} ", theme::GREEN, &tl.text, dim, width),
             AgentLineKind::ToolCall => wrapped("\u{29d6} ", theme::ORANGE, &tl.text, dim, width),
-            AgentLineKind::Proposal => {
-                wrapped("\u{1f4dd} ", theme::FG, &tl.text, fg.add_modifier(Modifier::BOLD), width)
-            }
+            AgentLineKind::Proposal => wrapped("\u{1f4dd} ", theme::FG, &tl.text, fg.add_modifier(Modifier::BOLD), width),
             AgentLineKind::UserPrompt => wrapped("\u{276f} ", theme::CYAN, &tl.text, fg.add_modifier(Modifier::BOLD), width),
             AgentLineKind::Thinking => {
                 if tl.text.is_empty() {
@@ -126,20 +121,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
     let header = vec![Line::from(vec![
         Span::styled(app.agent_backend.label(), Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled(
-            app.agent_model_live.clone().unwrap_or_else(|| "\u{2014}".to_string()),
-            Style::default().fg(theme::DIM),
-        ),
+        Span::styled(app.agent_model_live.clone().unwrap_or_else(|| "\u{2014}".to_string()), Style::default().fg(theme::DIM)),
         Span::raw("        "),
         Span::styled(status, Style::default().fg(status_color)),
         Span::raw("        "),
         Span::styled(app.target_dir.display().to_string(), Style::default().fg(theme::DIM)),
     ])];
 
-    let hints = vec![super::key_hints(&[
-        ("PgUp/PgDn", "Scroll"),
-        ("Enter", "Send"),
-    ])];
+    let hints = vec![super::key_hints(&[("PgUp/PgDn", "Scroll"), ("Enter", "Send")])];
 
     let title = if app.agent_running { "agent \u{2014} running" } else { "agent" };
     let block = super::panel_block(title);
@@ -184,7 +173,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
     } else {
         String::new()
     };
-    let divider = format!("{divider_text}{}", "\u{2500}".repeat(rows[3].width.saturating_sub(divider_text.chars().count() as u16) as usize));
+    let divider =
+        format!("{divider_text}{}", "\u{2500}".repeat(rows[3].width.saturating_sub(divider_text.chars().count() as u16) as usize));
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(divider, Style::default().fg(if scrolled_up { theme::ORANGE } else { theme::DIM })))),
         rows[3],
