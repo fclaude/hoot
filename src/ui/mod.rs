@@ -141,6 +141,41 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Expands tab characters to spaces, advancing to the next multiple-of-4
+/// column — matching how a real terminal renders a tab, not a fixed-width
+/// substitution that would misalign wherever a tab isn't at the very start
+/// of the line. Diff line text carries raw tabs straight from `git diff`'s
+/// output (tab-indented source is extremely common — Go, Makefiles, ...)
+/// and is kept byte-exact in `DiffLine.text` itself —
+/// `gitcommit::stage_partial_hunks` reconstructs a real patch from it for
+/// `git apply`, so mutating the stored text would silently turn tabs into
+/// spaces in a committed file. Expansion only ever happens here, right
+/// before something gets drawn: left as `\t`, the terminal renders each
+/// one as a jump to its own next tab stop while ratatui's cell-buffer math
+/// assumes a fixed, much smaller width, so anything drawn after a tab
+/// lands at the wrong column and visually overlaps whatever was already
+/// there (confirmed — this is exactly what a real tab-indented Go diff
+/// looked like before this existed).
+pub fn expand_tabs_for_display(s: &str) -> String {
+    const TAB_WIDTH: usize = 4;
+    if !s.contains('\t') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut col = 0usize;
+    for c in s.chars() {
+        if c == '\t' {
+            let spaces = TAB_WIDTH - (col % TAB_WIDTH);
+            out.push_str(&" ".repeat(spaces));
+            col += spaces;
+        } else {
+            out.push(c);
+            col += 1;
+        }
+    }
+    out
+}
+
 /// Truncates `s` to at most `max_width` display columns, replacing the
 /// tail with an ellipsis if it doesn't fit — so a too-narrow area loses a
 /// clearly-marked suffix of the text instead of silently having it cut off
@@ -263,6 +298,28 @@ mod tests {
     fn wrap_text_short_text_is_a_single_line() {
         assert_eq!(wrap_text("hi", 80), vec!["hi"]);
     }
+
+    #[test]
+    fn expand_tabs_for_display_advances_to_the_next_stop() {
+        // Regression: a real tab-indented Go diff rendered as visibly
+        // garbled, overlapping text — ratatui doesn't expand or specially
+        // measure a raw '\t', so its cell-buffer math assumed a much
+        // smaller width than the terminal actually used once it hit the
+        // tab, and everything after landed at the wrong column.
+        assert_eq!(expand_tabs_for_display("\tif true {"), "    if true {");
+        assert_eq!(expand_tabs_for_display("\t\treturn"), "        return");
+        // A tab mid-line still advances to *its own* next stop, not a
+        // flat substitution — "ab" occupies columns 0-1, so the tab here
+        // only needs 2 spaces to reach column 4, not 4.
+        assert_eq!(expand_tabs_for_display("ab\tc"), "ab  c");
+    }
+
+    #[test]
+    fn expand_tabs_for_display_leaves_tab_free_text_untouched() {
+        assert_eq!(expand_tabs_for_display("no tabs here"), "no tabs here");
+        assert_eq!(expand_tabs_for_display(""), "");
+    }
+
     use std::process::Command;
 
     fn scratch_repo(label: &str) -> PathBuf {
@@ -304,6 +361,30 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, app)).unwrap();
+        flatten(&terminal)
+    }
+
+    /// Draws `app` once, applies `mutate`, then draws it again on the
+    /// *same* `Terminal` and flattens that second frame. A one-shot
+    /// `render()` always starts from a freshly zero-initialized buffer, so
+    /// it can't reproduce a bug that only shows up between two real
+    /// consecutive frames: `Terminal::draw` diffs the newly-rendered
+    /// buffer against the *previous* one and only sends the real backend
+    /// (a real terminal, or `TestBackend` here — both go through the same
+    /// diffing) writes for cells that actually changed. A widget that
+    /// doesn't fill its whole render area leaves the untouched cells
+    /// exactly as the previous frame left them — invisible to a
+    /// single-draw test, real on screen and in a two-draw test alike.
+    fn render_after_transition(app: &mut App, width: u16, height: u16, mutate: impl FnOnce(&mut App)) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        mutate(app);
+        terminal.draw(|f| draw(f, app)).unwrap();
+        flatten(&terminal)
+    }
+
+    fn flatten(terminal: &Terminal<TestBackend>) -> String {
         let buf = terminal.backend().buffer();
         let mut out = String::new();
         for y in 0..buf.area.height {
@@ -505,6 +586,106 @@ mod tests {
         let screen = render(&app, 120, 30);
         assert!(screen.contains("f.txt"), "{screen}");
         assert!(screen.contains("1/1 sel"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curation_hunk_view_renders_tab_indented_source_without_garbling() {
+        // Regression: a real tab-indented Go diff rendered as visibly
+        // corrupted, overlapping text in Curate's hunk box — ratatui
+        // doesn't expand a raw '\t' before measuring/drawing it, so its
+        // cell-buffer math landed everything after the tab at the wrong
+        // column. Reproduces the exact shape (nested tabs, a removed
+        // block, unchanged context above and below) and checks the
+        // rendered screen for the tell-tale garbling instead of just
+        // exercising the tab-expansion helper in isolation.
+        let dir = scratch_repo("curate-tabs");
+        let original = "func f() {\n\tif true {\n\t\thttp.NotFound(w, r)\n\t\treturn\n\t}\n\tbefore := 1\n\tif err != nil {\n\t}\n}\n";
+        commit_file(&dir, "f.go", original);
+        let changed = "func f() {\n\tif true {\n\t\thttp.NotFound(w, r)\n\t\treturn\n\t}\n\tif item.ContentType == \"static\" {\n\t\thttp.Error(w, \"x\", 1)\n\t\treturn\n\t}\n\tbefore := 1\n\tif err != nil {\n\t}\n}\n";
+        fs::write(dir.join("f.go"), changed).unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        let screen = render(&app, 178, 40);
+
+        // Every line should render as clean, correctly-indented source —
+        // no character-level overlap from a mispositioned tab. (git's
+        // default 3-line context window means the hunk starts at
+        // http.NotFound, not the enclosing "if true {" two lines above.)
+        assert!(screen.contains("        http.NotFound(w, r)"), "{screen}");
+        assert!(screen.contains("        return"), "{screen}");
+        // Added lines keep their '+' diff marker ahead of the expanded tab.
+        assert!(screen.contains("+   if item.ContentType == \"static\""), "{screen}");
+        assert!(screen.contains("    before := 1"), "{screen}");
+        assert!(screen.contains("    if err != nil {"), "{screen}");
+        // The exact garbled fragments this bug used to produce.
+        assert!(!screen.contains("return             a"), "{screen}");
+        assert!(!screen.contains("iferr !=}nil {"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn symbol_jump_hint_row_has_no_background_bleed_through() {
+        // Regression: the hint line rendered just above the overlay's own
+        // box sat outside that box's `Clear` — a Paragraph only overwrites
+        // cells its own text actually reaches, so whatever the screen
+        // underneath had drawn at that row kept showing past wherever the
+        // hint text ended. Looked exactly like real content from the
+        // screen behind the overlay spliced in right after "Esc Close".
+        let dir = scratch_repo("symjump-hint-bleed");
+        // Every visible row needs its own full-width, distinctive content
+        // — a single long line only fills the one row it's on, and
+        // whichever row the hint lands on (depends on exact layout math)
+        // would otherwise just be blank already, with nothing to bleed
+        // through regardless of whether the bug is present.
+        let content: String = (0..60).map(|i| format!("{}\n", "x".repeat(60) + &i.to_string())).collect();
+        commit_file(&dir, "lib.rs", &content);
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.on_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        // First frame: the long background line, no overlay. Second frame
+        // (after mutate): the overlay open on top of it — the exact
+        // sequence a real keypress produces, and the only way this bug
+        // shows up at all.
+        let screen = render_after_transition(&mut app, 178, 50, |app| {
+            app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        });
+
+        let mut found_hint_row = false;
+        for line in screen.lines() {
+            if let Some(after) = line.split("Esc Close").nth(1) {
+                found_hint_row = true;
+                assert!(after.trim().trim_end_matches('\u{2502}').trim().is_empty(), "hint row has leftover background content: {line:?}");
+            }
+        }
+        assert!(found_hint_row, "the hint row should have rendered at all: {screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_finder_hint_row_has_no_background_bleed_through() {
+        let dir = scratch_repo("filefinder-hint-bleed");
+        let content: String = (0..60).map(|i| format!("{}\n", "x".repeat(60) + &i.to_string())).collect();
+        commit_file(&dir, "lib.rs", &content);
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.on_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        let screen = render_after_transition(&mut app, 178, 50, |app| {
+            app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        });
+
+        let mut found_hint_row = false;
+        for line in screen.lines() {
+            if let Some(after) = line.split("Esc Close").nth(1) {
+                found_hint_row = true;
+                assert!(after.trim().trim_end_matches('\u{2502}').trim().is_empty(), "hint row has leftover background content: {line:?}");
+            }
+        }
+        assert!(found_hint_row, "the hint row should have rendered at all: {screen}");
 
         let _ = fs::remove_dir_all(&dir);
     }

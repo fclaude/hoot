@@ -240,7 +240,7 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
     match file.and_then(|f| f.hunks.get(shown_index)) {
         Some(hunk) => {
             for dl in &hunk.lines {
-                lines.push(Line::from(Span::styled(dl.text.clone(), super::diff_line_style(dl.kind))));
+                lines.push(Line::from(Span::styled(super::expand_tabs_for_display(&dl.text), super::diff_line_style(dl.kind))));
             }
         }
         None => {

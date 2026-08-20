@@ -14,6 +14,15 @@ pub(crate) fn highlighted_line(ext: &str, src_line: &str, bg: Option<ratatui::st
         Some(bg) => Style::default().bg(bg),
         None => Style::default(),
     };
+    // Expanded before tokenizing, not after: a tab only ever falls inside a
+    // whitespace/punctuation run (see syntax::highlight_line), so widening
+    // it to spaces here can't shift where a string/keyword/number token
+    // starts. Source lines carry raw tabs (tab-indented code is extremely
+    // common — Go, Makefiles, ...) and ratatui doesn't expand or specially
+    // measure them, so left as '\t' they render at the wrong column and
+    // visually overlap whatever else is on the line.
+    let src_line = super::expand_tabs_for_display(src_line);
+    let src_line = src_line.as_str();
     if !crate::syntax::supported(ext) {
         return Line::from(Span::styled(src_line.to_string(), base.fg(theme::FG)));
     }
@@ -240,7 +249,7 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
         if line_no.is_some_and(|n| app.notes.iter().any(|note| note.path == rel && note.line == Some(n))) {
             spans.push(Span::styled("\u{1f4cc}", Style::default().fg(theme::PINK).bg(bg.unwrap_or(theme::BG_PANEL))));
         }
-        let visible_text: String = dl.text.chars().skip(scroll_x).collect();
+        let visible_text: String = super::expand_tabs_for_display(&dl.text).chars().skip(scroll_x).collect();
         spans.push(Span::styled(visible_text, style));
         lines.push(Line::from(spans).style(Style::default().bg(bg.unwrap_or(theme::BG_PANEL))));
     }
@@ -262,16 +271,17 @@ fn draw_diff_split(f: &mut Frame, area: Rect, file: &FileEntry) {
 
     for hunk in &file.hunks {
         for dl in &hunk.lines {
+            let text = super::expand_tabs_for_display(&dl.text);
             match dl.kind {
                 DiffLineKind::HunkHeader | DiffLineKind::Context => {
-                    before.push(Line::from(Span::styled(dl.text.clone(), super::diff_line_style(dl.kind))));
-                    after.push(Line::from(Span::styled(dl.text.clone(), super::diff_line_style(dl.kind))));
+                    before.push(Line::from(Span::styled(text.clone(), super::diff_line_style(dl.kind))));
+                    after.push(Line::from(Span::styled(text, super::diff_line_style(dl.kind))));
                 }
                 DiffLineKind::Removed => {
-                    before.push(Line::from(Span::styled(dl.text.clone(), super::diff_line_style(dl.kind))));
+                    before.push(Line::from(Span::styled(text, super::diff_line_style(dl.kind))));
                 }
                 DiffLineKind::Added => {
-                    after.push(Line::from(Span::styled(dl.text.clone(), super::diff_line_style(dl.kind))));
+                    after.push(Line::from(Span::styled(text, super::diff_line_style(dl.kind))));
                 }
             }
         }
@@ -350,7 +360,11 @@ fn draw_source(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (i, src_line) in app.source.iter().enumerate().skip(scroll_y).take(visible_height) {
         let bg = if i == app.nav_line { Some(theme::BG_SELECTION) } else { None };
-        let visible_line: String = src_line.chars().skip(scroll_x).collect();
+        // Expanded before the horizontal-scroll skip, not after: scroll_x
+        // counts visual columns, and a raw tab counts as one character but
+        // several columns — skipping first would leave the viewport
+        // misaligned on any tab-indented line.
+        let visible_line: String = super::expand_tabs_for_display(src_line).chars().skip(scroll_x).collect();
         let mut line = highlighted_line(&ext, &visible_line, bg);
         if app.notes.iter().any(|n| n.path == name && n.line == Some(i + 1)) {
             let marker_bg = bg.unwrap_or(theme::BG_PANEL);

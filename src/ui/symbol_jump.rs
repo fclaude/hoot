@@ -53,6 +53,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     let hint_area = Rect { x: rect.x, y: rect.y.saturating_sub(1).max(area.y), width: rect.width, height: 1 };
     if hint_area.y < rect.y {
+        // This row sits just above `rect`, outside the `Clear` above — a
+        // Paragraph only overwrites cells its own text actually reaches,
+        // so without its own `Clear` here, whatever the screen underneath
+        // drew at this row shows through past wherever the hint text ends.
+        f.render_widget(Clear, hint_area);
         f.render_widget(
             Paragraph::new(super::key_hints(&[("/", "Filter"), ("\u{2191}\u{2193}", "Navigate"), ("Enter", "Jump"), ("Esc", "Close")])),
             hint_area,
