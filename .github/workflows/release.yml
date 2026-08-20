@@ -4,11 +4,12 @@
 # Deliberately uses native runners per architecture where they still exist
 # (Linux x86_64/arm64) instead of `cross` or Docker-based cross-compilation
 # — hoot has no C dependencies, so there's nothing a cross toolchain buys
-# there that a native build doesn't already give for free. macOS is the
-# exception: GitHub retired the free-tier Intel macOS runner (macos-13) in
-# December 2025, so both Mac targets now build on one Apple Silicon runner,
-# cross-compiling to x86_64-apple-darwin — Apple's own toolchain handles
-# that natively, no extra linker needed.
+# there that a native build doesn't already give for free. macOS: GitHub
+# retired the free-tier Intel macOS runner (macos-13) in December 2025, and
+# macos-14's deprecation is already underway (unsupported November 2, 2026)
+# — both Mac rows use macos-15 (arm64) / macos-15-intel (x64) instead of
+# building both on one Apple Silicon runner, so neither target needs
+# cross-compilation at all.
 #
 # What this does NOT do: push to Homebrew, COPR, or the AUR. Those each
 # need their own account/repo that only a human can set up (see
@@ -58,9 +59,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-14
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -108,12 +109,19 @@ jobs:
       - run: cargo deb --no-build
       - run: cargo generate-rpm
 
+      # Staged into one flat directory before upload: upload-artifact uses
+      # the *least common ancestor* of multiple path inputs as the
+      # artifact root, so uploading target/debian/*.deb and
+      # target/generate-rpm/*.rpm directly would nest them as
+      # debian/*.deb and generate-rpm/*.rpm inside the artifact instead of
+      # top-level files — which the release job's `sha256sum *` and
+      # `files: dist/*` glob wouldn't pick up correctly.
+      - run: mkdir dist-stage && cp target/debian/*.deb target/generate-rpm/*.rpm dist-stage/
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hoot-deb-rpm
-          path: |
-            target/debian/*.deb
-            target/generate-rpm/*.rpm
+          path: dist-stage/*
 
   release:
     needs: [build, package-linux]

@@ -13,7 +13,13 @@ use std::path::{Path, PathBuf};
 
 use crate::data::{SymbolResult, TreeEntry};
 
-const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".idea", ".vscode"];
+// Everything here is skipped by exact name, not by a blanket "starts with
+// a dot" rule — that used to hide every dotfile from Review, including
+// ones very much worth reviewing (.github/workflows/*, .gitignore,
+// .env.example, ...). `.git` itself and a handful of known-noise
+// directories/files are the only things that never belong in the tree.
+const SKIP_DIRS: &[&str] =
+    &[".git", "target", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".idea", ".vscode", ".DS_Store"];
 const SOURCE_EXTS: &[&str] = &["rs", "ts", "tsx", "js", "jsx", "go", "py", "java", "c", "h", "cpp", "hpp", "rb", "swift", "kt"];
 const TREE_BUDGET: usize = 400;
 const SCAN_FILE_BUDGET: usize = 500;
@@ -38,7 +44,7 @@ fn walk(dir: &Path, depth: u8, out: &mut Vec<TreeEntry>) {
             return;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
+        if SKIP_DIRS.contains(&name.as_str()) {
             continue;
         }
         let path = entry.path();
@@ -74,7 +80,7 @@ fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
             return;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
+        if SKIP_DIRS.contains(&name.as_str()) {
             continue;
         }
         let path = entry.path();
@@ -299,8 +305,27 @@ mod tests {
         let labels: Vec<&str> = tree.iter().map(|e| e.label.as_str()).collect();
         assert!(labels.contains(&"src/"), "labels = {labels:?}");
         assert!(labels.contains(&"main.rs"), "labels = {labels:?}");
-        assert!(!labels.iter().any(|l| l.starts_with('.')), "labels = {labels:?}");
+        assert!(!labels.contains(&".git/"), "labels = {labels:?}");
         assert!(!labels.contains(&"target/"), "labels = {labels:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_tree_does_not_hide_every_dotfile() {
+        // Regression: dotfiles used to be excluded wholesale, hiding real,
+        // important content like .github/workflows/*.yml — only `.git`
+        // itself and the explicit noise list should ever be skipped.
+        let dir = scratch_dir("tree-dotfiles");
+        fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+        fs::write(dir.join(".gitignore"), "/target\n").unwrap();
+        fs::write(dir.join(".github/workflows/release.yml"), "name: release\n").unwrap();
+
+        let tree = build_tree(&dir);
+        let labels: Vec<&str> = tree.iter().map(|e| e.label.as_str()).collect();
+        assert!(labels.contains(&".gitignore"), "labels = {labels:?}");
+        assert!(labels.contains(&".github/"), "labels = {labels:?}");
+        assert!(labels.contains(&"release.yml"), "labels = {labels:?}");
 
         let _ = fs::remove_dir_all(&dir);
     }

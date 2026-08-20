@@ -226,7 +226,16 @@ impl App {
         let review = crate::gitreview::load(&target_dir);
         let tree = fsnav::build_tree(&target_dir);
         let symbols = fsnav::scan_symbols(&target_dir);
-        let nav_file = tree.iter().find(|e| !e.is_dir).map(|e| e.path.clone()).unwrap_or_else(|| target_dir.clone());
+        // Opens on the first *changed* file when there is one, rather than
+        // wherever alphabetical tree order happens to land — a file with
+        // an actual diff to look at is a far more useful place to start
+        // than an arbitrary unchanged file. Falls back to the first tree
+        // entry (matching the old behavior) only when nothing's changed.
+        let first_changed_file =
+            review.project.files.first().map(|f| target_dir.join(&f.path)).filter(|p| tree.iter().any(|e| &e.path == p));
+        let nav_file =
+            first_changed_file.or_else(|| tree.iter().find(|e| !e.is_dir).map(|e| e.path.clone())).unwrap_or_else(|| target_dir.clone());
+        let tree_index = tree.iter().position(|e| e.path == nav_file).unwrap_or(0);
         let source = fsnav::read_file(&nav_file);
         let diff_context = diff_context_for(&target_dir, &nav_file);
 
@@ -242,7 +251,7 @@ impl App {
             split_diff: false,
 
             tree,
-            tree_index: 0,
+            tree_index,
             nav_focus: NavFocus::Tree,
             content_view: ContentView::Context,
             nav_file,
@@ -410,6 +419,31 @@ impl App {
                 f.notes = old.notes;
             }
         }
+        // Preserve each file's curation selection when that file's own
+        // hunks are unchanged. Regression: this used to replace
+        // curation_files wholesale on *any* diff change anywhere in the
+        // repo — so a background edit to one file (another pi/opencode run,
+        // an editor, plain `git`) silently reselected every hunk in every
+        // *other* file too, including ones the user had deliberately
+        // deselected. Only a file whose hunks actually shifted shape needs
+        // resetting — that's the one case index-for-index selection
+        // genuinely can't be trusted.
+        for cf in &mut review.curation_files {
+            let unchanged_hunks = self
+                .project
+                .files
+                .iter()
+                .find(|f| f.path == cf.path)
+                .zip(review.project.files.iter().find(|f| f.path == cf.path))
+                .is_some_and(|(old, new)| old.hunks == new.hunks);
+            if unchanged_hunks {
+                if let Some(old_cf) = self.curation_files.iter().find(|c| c.path == cf.path) {
+                    if old_cf.hunk_selected.len() == cf.hunk_selected.len() {
+                        cf.hunk_selected = old_cf.hunk_selected.clone();
+                    }
+                }
+            }
+        }
         self.project = review.project;
         self.review_is_real = review.is_real;
         self.curation_files = review.curation_files;
@@ -472,8 +506,15 @@ impl App {
         });
     }
 
+    /// The real count of queued notes. Deliberately `self.notes.len()`, not
+    /// a sum over `FileEntry.notes` — that counter only exists on files
+    /// that currently have a diff, but a line-scoped comment can be left
+    /// on *any* file being browsed in source view, changed or not. Summing
+    /// the per-file counters used to undercount (silently missing notes on
+    /// clean files), which let `quit_risk` decide there was nothing to
+    /// confirm about even with real queued notes still unsent.
     pub fn notes_queued(&self) -> u32 {
-        self.project.files.iter().map(|f| f.notes).sum()
+        self.notes.len() as u32
     }
 
     pub fn files_flagged(&self) -> usize {
@@ -1819,6 +1860,25 @@ mod tests {
     }
 
     #[test]
+    fn app_new_opens_on_the_first_changed_file_not_the_alphabetically_first_tree_entry() {
+        // Regression: nav_file used to just be the first tree entry
+        // (alphabetical order), regardless of whether it had any changes
+        // — so Review could easily open on a completely unrelated,
+        // unchanged file instead of the one thing actually worth looking
+        // at first.
+        let dir = scratch_repo("open-on-changed-file");
+        commit_file(&dir, "a-unchanged.rs", "fn a() {}\n"); // alphabetically first, but clean
+        commit_file(&dir, "z-changed.rs", "fn z() {}\n");
+        fs::write(dir.join("z-changed.rs"), "fn z() { /* edited */ }\n").unwrap();
+
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        assert_eq!(app.nav_file, dir.join("z-changed.rs"));
+        assert_eq!(app.tree[app.tree_index].path, dir.join("z-changed.rs"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn navigate_enter_opens_the_selected_tree_file() {
         let dir = scratch_repo("navigate-open");
         commit_file(&dir, "a.rs", "fn a() {}\n");
@@ -2141,6 +2201,24 @@ mod tests {
     }
 
     #[test]
+    fn notes_queued_counts_a_note_on_a_file_with_no_diff() {
+        // Regression: notes_queued() used to sum FileEntry.notes, a
+        // counter that only exists on files currently in self.project.files
+        // (i.e. ones with an active diff) — but a line-scoped comment can
+        // be left on any file browsed in source view, changed or not. That
+        // silently undercounted, which let quit_risk (and the "N notes
+        // queued" status line) miss real queued notes on clean files.
+        let (mut app, dir) = two_file_app("notes-queued-clean-file");
+        assert_eq!(app.notes_queued(), 0);
+
+        app.notes.push(Note { path: "clean-file-with-no-diff.txt".to_string(), line: Some(3), text: "a note".to_string() });
+        assert_eq!(app.notes_queued(), 1, "should count a note even on a file with no active diff");
+        assert!(app.quit_risk().is_some(), "and quit_risk should see it too");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sync_review_from_disk_picks_up_an_external_change_and_keeps_flags() {
         let (mut app, dir) = two_file_app("sync-review");
         app.project.files[0].flagged = true;
@@ -2166,6 +2244,26 @@ mod tests {
         app.sync_review_from_disk();
 
         assert!(!app.curation_files[0].hunk_selected[0], "an unchanged diff shouldn't reset curation toggles");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_review_from_disk_preserves_a_deselected_hunk_in_a_file_that_did_not_change() {
+        // Regression: any diff change anywhere in the repo used to replace
+        // curation_files wholesale, silently reselecting every hunk in
+        // every file — including ones a user had deliberately deselected
+        // in a file the external change never touched at all.
+        let (mut app, dir) = two_file_app("sync-review-preserve-selection");
+        assert_eq!(app.curation_files[1].path, "b.txt");
+        app.curation_files[1].hunk_selected[0] = false; // deselect b.txt's hunk
+
+        // Change only a.txt externally — b.txt's hunks are untouched.
+        fs::write(dir.join("a.txt"), "a1-changed\na2\na3-new-line\n").unwrap();
+        app.sync_review_from_disk();
+
+        assert_eq!(app.curation_files[1].path, "b.txt");
+        assert!(!app.curation_files[1].hunk_selected[0], "b.txt's deselected hunk should survive a.txt changing");
 
         let _ = fs::remove_dir_all(&dir);
     }

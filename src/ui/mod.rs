@@ -52,7 +52,11 @@ fn mode_label(mode: Mode) -> &'static str {
 }
 
 fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
-    let left = format!(" {} — {}", mode_label(app.mode), app.project.name);
+    // `--demo` is the only way to see fake data now (see main.rs — any
+    // other bad/nonexistent target is a hard error instead), but it should
+    // still be unmistakable at a glance that what's on screen isn't real.
+    let demo_tag = if app.review_is_real { "" } else { "\u{26a0} DEMO \u{2014} " };
+    let left = format!(" {demo_tag}{} — {}", mode_label(app.mode), app.project.name);
 
     let center = match app.mode {
         Mode::Review => {
@@ -103,6 +107,46 @@ pub fn key_hints(items: &[(&str, &str)]) -> Line<'static> {
         spans.push(Span::styled(label.to_string(), Style::default().fg(theme::DIM)));
     }
     Line::from(spans)
+}
+
+/// Truncates `s` to at most `max_width` display columns, replacing the
+/// tail with an ellipsis if it doesn't fit — so a too-narrow area loses a
+/// clearly-marked suffix of the text instead of silently having it cut off
+/// mid-character by the renderer with no indication anything's missing.
+pub fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
+    if s.chars().count() <= max_width {
+        return s.to_string();
+    }
+    match max_width {
+        0 => String::new(),
+        1 => "\u{2026}".to_string(),
+        n => s.chars().take(n - 1).collect::<String>() + "\u{2026}",
+    }
+}
+
+/// The span-list equivalent of `truncate_with_ellipsis`, for a styled
+/// footer/hint line built from several differently-styled `Span`s (bold
+/// key glyphs, dim labels, an appended status message, ...) rather than one
+/// plain string — keeps each span's own style for whatever fits, and
+/// ellipsis-marks the one span that got cut instead of losing all styling
+/// by flattening to plain text first.
+pub fn truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let span_width = span.content.chars().count();
+        if used + span_width <= max_width {
+            used += span_width;
+            out.push(span);
+            continue;
+        }
+        let remaining = max_width.saturating_sub(used);
+        if remaining > 0 {
+            out.push(Span::styled(truncate_with_ellipsis(&span.content, remaining), span.style));
+        }
+        return out;
+    }
+    out
 }
 
 pub fn panel_block(title: &str) -> Block<'static> {
@@ -180,6 +224,19 @@ mod tests {
         fs::write(dir.join(name), content).unwrap();
         Command::new("git").args(["add", "-A"]).current_dir(dir).status().unwrap();
         Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(dir).status().unwrap();
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_leaves_short_text_alone() {
+        assert_eq!(truncate_with_ellipsis("hi", 10), "hi");
+        assert_eq!(truncate_with_ellipsis("exact", 5), "exact");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_marks_where_text_was_cut() {
+        assert_eq!(truncate_with_ellipsis("hello world", 8), "hello w\u{2026}");
+        assert_eq!(truncate_with_ellipsis("hello world", 1), "\u{2026}");
+        assert_eq!(truncate_with_ellipsis("hello world", 0), "");
     }
 
     /// Renders `app` into an in-memory buffer and flattens it to plain text

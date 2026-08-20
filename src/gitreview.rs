@@ -42,7 +42,7 @@ fn git(root: &Path, args: &[&str]) -> Option<Output> {
     Command::new("git").args(args).current_dir(root).output().ok()
 }
 
-fn is_git_repo(root: &Path) -> bool {
+pub fn is_git_repo(root: &Path) -> bool {
     git(root, &["rev-parse", "--is-inside-work-tree"]).map(|o| o.status.success()).unwrap_or(false)
 }
 
@@ -112,17 +112,52 @@ fn untracked_files_diff(root: &Path) -> String {
     diff
 }
 
+/// Files larger than this are treated like binaries (a marker line, no
+/// content dump) instead of being read in full — protects against a
+/// pathologically large untracked file consuming unbounded memory on every
+/// poll tick. Generous for real source files.
+const MAX_SYNTHETIC_DIFF_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+
 /// A `diff --git a/<path> b/<path>` "new file" entry for `rel_path`,
 /// exactly the shape `git diff --no-index /dev/null <path>` would produce
 /// for a plain-text file. Binary content gets git's own "Binary files ...
 /// differ" marker line instead of being diffed line-by-line (matches
 /// `parse_unified_diff`'s existing binary-file handling) rather than
 /// risking garbage output from treating arbitrary bytes as UTF-8 text.
+///
+/// Uses `symlink_metadata`, not `metadata`/`fs::read` directly — those
+/// follow symlinks, so an untracked symlink pointing outside the repo (a
+/// classic "untracked symlink to ~/.ssh/id_rsa" style trick, or just an
+/// absolute symlink left by some tool) would otherwise read and expose an
+/// arbitrary external file's content in Review — and that content could
+/// end up in a prompt sent to a real agent. A symlink here is shown as git
+/// itself shows one: its target *path text* as one added line, not
+/// whatever the target contains. Anything that isn't a symlink or a
+/// regular file (a FIFO, socket, device node, ...) is skipped outright —
+/// reading one of those could block indefinitely or return nonsense.
 fn synthetic_new_file_diff(root: &Path, rel_path: &str) -> String {
-    let Ok(bytes) = std::fs::read(root.join(rel_path)) else {
+    let full = root.join(rel_path);
+    let Ok(meta) = std::fs::symlink_metadata(&full) else {
         return String::new();
     };
-    let header = format!("diff --git a/{rel_path} b/{rel_path}\nnew file mode 100644\n");
+    let header = format!("diff --git a/{rel_path} b/{rel_path}\n");
+
+    if meta.is_symlink() {
+        let target = std::fs::read_link(&full).map(|p| p.display().to_string()).unwrap_or_default();
+        return format!("{header}new file mode 120000\n--- /dev/null\n+++ b/{rel_path}\n@@ -0,0 +1 @@\n+{target}\n");
+    }
+    if !meta.is_file() {
+        return String::new();
+    }
+
+    let header = format!("{header}new file mode 100644\n");
+    if meta.len() > MAX_SYNTHETIC_DIFF_SIZE {
+        return format!("{header}Binary files /dev/null and b/{rel_path} differ\n");
+    }
+
+    let Ok(bytes) = std::fs::read(&full) else {
+        return String::new();
+    };
     if bytes.contains(&0) {
         return format!("{header}Binary files /dev/null and b/{rel_path} differ\n");
     }
@@ -599,6 +634,38 @@ index 111..222 100644
         assert_eq!(review.project.files[0].unsupported, Some("binary file"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn untracked_symlink_shows_its_target_path_not_the_target_files_content() {
+        // Regression: synthetic_new_file_diff used to `std::fs::read` the
+        // path directly, which follows symlinks — an untracked symlink
+        // pointing outside the repo (or at a sensitive file elsewhere on
+        // disk) would silently read and expose that *other* file's content
+        // in Review, and that content could end up in a prompt sent to a
+        // real agent. Confirms the fix: a symlink shows its target path
+        // text as one added line (exactly what real `git diff` does for a
+        // symlink), and the actual external content never appears at all.
+        let dir = scratch_repo("untracked-symlink");
+        run(&dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+
+        let outside_dir = std::env::temp_dir().join(format!("hoot-gitreview-outside-{}", std::process::id()));
+        fs::create_dir_all(&outside_dir).unwrap();
+        let secret_path = outside_dir.join("secret.txt");
+        fs::write(&secret_path, "TOP_SECRET_SHOULD_NEVER_APPEAR_IN_REVIEW").unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret_path, dir.join("link")).unwrap();
+
+        let review = load(&dir);
+        assert_eq!(review.project.files.len(), 1);
+        assert_eq!(review.project.files[0].path, "link");
+        let text: String = review.project.files[0].hunks.iter().flat_map(|h| &h.lines).map(|l| l.text.as_str()).collect();
+        assert!(!text.contains("TOP_SECRET"), "the linked-to file's content must never appear: {text:?}");
+        assert!(text.contains(&secret_path.display().to_string()), "should show the link's target path instead: {text:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside_dir);
     }
 
     #[test]

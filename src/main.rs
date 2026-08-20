@@ -28,38 +28,96 @@ use agent_client::AgentBackend;
 use app::App;
 use keymap::Keymap;
 
+const HELP: &str = "\
+hoot — a terminal UI for reviewing a git working tree alongside an AI coding agent
+
+Usage:
+  hoot [path]                    review the repo at <path> (default: current directory)
+  hoot --demo                    explore the UI with fake demo data, no git repo needed
+  hoot --agent <pi|opencode>     pick the agent backend (default: opencode)
+  hoot --print-keymap            print the generated keybindings reference and exit
+  hoot --help                    print this message and exit
+  hoot --version                 print the version and exit
+
+<path> must exist and be a git repository, or hoot exits with an error —
+pass --demo instead if you just want to look around the UI.
+";
+
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     let mut target_arg: Option<String> = None;
     // opencode is the default backend — see agent_client.rs for why each
     // is wired the way it is.
     let mut agent_backend = AgentBackend::OpenCode;
+    let mut demo = false;
     while let Some(arg) = args.next() {
-        if arg == "--print-keymap" {
-            let (keymap, warnings) = Keymap::load();
-            for w in &warnings {
-                eprintln!("~/.hoot.toml: {w}");
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print!("{HELP}");
+                return Ok(());
             }
-            print!("{}", keymap::generate_markdown(&keymap));
-            return Ok(());
+            "--version" | "-V" => {
+                println!("hoot {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--demo" => {
+                demo = true;
+                continue;
+            }
+            "--print-keymap" => {
+                let (keymap, warnings) = Keymap::load();
+                for w in &warnings {
+                    eprintln!("~/.hoot.toml: {w}");
+                }
+                print!("{}", keymap::generate_markdown(&keymap));
+                return Ok(());
+            }
+            "--agent" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--agent needs a value: pi or opencode");
+                    std::process::exit(1);
+                };
+                let Some(backend) = AgentBackend::parse(&value) else {
+                    eprintln!("unknown --agent value {value:?}: expected pi or opencode");
+                    std::process::exit(1);
+                };
+                agent_backend = backend;
+                continue;
+            }
+            _ => target_arg = Some(arg),
         }
-        if arg == "--agent" {
-            let Some(value) = args.next() else {
-                eprintln!("--agent needs a value: pi or opencode");
-                std::process::exit(1);
-            };
-            let Some(backend) = AgentBackend::parse(&value) else {
-                eprintln!("unknown --agent value {value:?}: expected pi or opencode");
-                std::process::exit(1);
-            };
-            agent_backend = backend;
-            continue;
-        }
-        target_arg = Some(arg);
     }
 
     let target_dir = target_arg.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    let target_dir = target_dir.canonicalize().unwrap_or(target_dir);
+
+    // A bad or non-existent target used to fall through silently to
+    // gitreview::load's mock-data fallback — meaning a typo'd path, or
+    // even a bare `--help`-shaped typo landing here as a "path", launched
+    // a full TUI full of fabricated demo content with no indication
+    // anything was wrong. Only --demo should ever see fake data now.
+    if !demo {
+        if !target_dir.exists() {
+            eprintln!("error: {} doesn't exist", target_dir.display());
+            std::process::exit(1);
+        }
+        let canonical = target_dir.canonicalize().unwrap_or_else(|_| target_dir.clone());
+        if !gitreview::is_git_repo(&canonical) {
+            eprintln!("error: {} isn't a git repository (pass --demo to explore the UI without one)", canonical.display());
+            std::process::exit(1);
+        }
+    }
+    let target_dir = if demo {
+        // Force gitreview::load's mock-data fallback regardless of what
+        // the real cwd happens to be — otherwise `--demo` run from inside
+        // an actual git repo (this one, say) would just show real data,
+        // since App::new loads whatever target_dir resolves to with no
+        // way to ask for fake data on top of a real repo. A path that
+        // can't possibly be a git repo makes App::new's own `is_git_repo`
+        // check do the rest, same as the old implicit fallback did.
+        std::env::temp_dir().join(format!("hoot-demo-{}", std::process::id()))
+    } else {
+        target_dir.canonicalize().unwrap_or(target_dir)
+    };
 
     let (keymap, warnings) = Keymap::load();
     for w in &warnings {

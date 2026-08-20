@@ -10,7 +10,13 @@ use crate::theme;
 pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(0), Constraint::Length(1)]).split(area);
 
-    let sidebar_width = if narrow { 20 } else { 30 };
+    // Wide enough that the summary line ("Files: N  Selected hunks: N/N")
+    // fits without clipping on its own — it was clipping even at 140
+    // columns total width, since this is a *fixed* width regardless of
+    // how much room the terminal actually has. File paths still get
+    // truncated with an ellipsis in draw_sidebar when they don't fit,
+    // since no fixed width accommodates an arbitrarily long path.
+    let sidebar_width = if narrow { 26 } else { 36 };
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(sidebar_width), Constraint::Min(0)])
@@ -18,8 +24,23 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
 
     draw_sidebar(f, app, cols[0]);
 
-    let right =
-        Layout::default().direction(Direction::Vertical).constraints([Constraint::Percentage(45), Constraint::Min(0)]).split(cols[1]);
+    // Sized to what the message actually needs (status line + message
+    // body + the panel's own border/divider/hint chrome), not a flat 45% —
+    // that wasted most of the screen on an empty box showing one line of
+    // placeholder text, especially on a clean repo with nothing to
+    // curate. Still capped at 60% so a genuinely long drafted message
+    // can't crowd the hunk view out entirely, and never shrinks below
+    // enough room for the placeholder/hint to read cleanly.
+    let message_lines = app.commit_message.split('\n').count().max(1);
+    let status_lines = if app.commit_message_status.is_some() { 2 } else { 0 };
+    const CHROME: usize = 4; // border (2) + divider (1) + hint row (1)
+    let commit_height = (message_lines + status_lines + CHROME) as u16;
+    let commit_height = commit_height.clamp(6, (cols[1].height * 3) / 5);
+
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(commit_height), Constraint::Min(0)])
+        .split(cols[1]);
 
     draw_commit_box(f, app, right[0]);
     draw_hunk_box(f, app, right[1]);
@@ -45,6 +66,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
         }
         None => {}
     }
+    let spans = super::truncate_spans(spans, rows[1].width as usize);
     f.render_widget(Paragraph::new(Line::from(spans)), rows[1]);
 }
 
@@ -53,18 +75,28 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(Span::styled(app.project.root.clone(), Style::default().fg(theme::FG))));
 
     for (i, cf) in app.curation_files.iter().enumerate() {
+        // The selection count/dot matter more than seeing the whole path —
+        // reserve room for them first and truncate the path (which can be
+        // arbitrarily long) into whatever's left, rather than letting a
+        // long path silently push the actually-important count off the
+        // edge of the sidebar.
+        let prefix_width = 4; // "▌ " + glyph-or-two-spaces
+        let suffix = format!(" {}/{} sel", cf.selected(), cf.total());
+        let dot_suffix = if i == app.curation_index { " \u{25cf}" } else { "" };
+        let reserved = prefix_width + suffix.chars().count() + dot_suffix.chars().count();
+        let path_budget = (area.width as usize).saturating_sub(reserved).max(1);
+        let path = super::truncate_with_ellipsis(&cf.path, path_budget);
+
         let mut spans = vec![Span::styled("\u{258c} ", Style::default().fg(theme::DIM))];
         if let Some(status) = cf.status {
             spans.push(Span::styled(format!("{} ", status.glyph()), Style::default().fg(status.color())));
         } else {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled(cf.path.clone(), Style::default().fg(theme::FG)));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(format!("{}/{} sel", cf.selected(), cf.total()), Style::default().fg(theme::DIM)));
+        spans.push(Span::styled(path, Style::default().fg(theme::FG)));
+        spans.push(Span::styled(suffix, Style::default().fg(theme::DIM)));
         if i == app.curation_index {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled("\u{25cf}", Style::default().fg(theme::CYAN)));
+            spans.push(Span::styled(dot_suffix, Style::default().fg(theme::CYAN)));
         }
         let style = if i == app.curation_index { Style::default().bg(theme::BG_SELECTION) } else { Style::default() };
         lines.push(Line::from(spans).style(style));
@@ -76,9 +108,13 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         app.curation_files.iter().map(|f| f.selected()).sum::<u32>(),
         app.curation_files.iter().map(|f| f.total()).sum::<u32>(),
     );
+    let summary = super::truncate_with_ellipsis(
+        &format!("Files: {files}  Selected hunks: {sel}/{total}"),
+        (area.width as usize).saturating_sub(2).max(1),
+    );
     lines.push(Line::from(vec![
         Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
-        Span::styled(format!("Files: {files}  Selected hunks: {sel}/{total}"), Style::default().fg(theme::FG)),
+        Span::styled(summary, Style::default().fg(theme::FG)),
     ]));
 
     f.render_widget(Paragraph::new(lines), area);
@@ -91,9 +127,18 @@ fn draw_commit_box(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(status.clone(), Style::default().fg(theme::ORANGE))));
         lines.push(Line::raw(""));
     }
-    if app.commit_message.is_empty() {
+    let body_width = (area.width as usize).saturating_sub(2);
+    if app.curation_files.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("(empty \u{2014} press g to draft one with {}, or e to write your own)", app.agent_backend.label()),
+            super::truncate_with_ellipsis("Nothing to commit \u{2014} your working tree is clean.", body_width),
+            Style::default().fg(theme::DIM),
+        )));
+    } else if app.commit_message.is_empty() {
+        lines.push(Line::from(Span::styled(
+            super::truncate_with_ellipsis(
+                &format!("(empty \u{2014} press g to draft one with {}, or e to write your own)", app.agent_backend.label()),
+                body_width,
+            ),
             Style::default().fg(theme::DIM),
         )));
     } else {
@@ -107,8 +152,23 @@ fn draw_commit_box(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
     let Some(cf) = app.curation_files.get(app.curation_index) else {
-        let body = Paragraph::new(vec![Line::from(Span::styled("No changes to curate.", Style::default().fg(theme::DIM)))]);
-        super::draw_panel(f, area, "hunk", body, &[]);
+        // Truncated defensively rather than hand-fit to one screen size —
+        // the border eats 2 columns, and this box's width isn't fixed
+        // (the sidebar next to it is), so there's no single width these
+        // sentences are guaranteed to fit at.
+        let body_width = (area.width as usize).saturating_sub(2);
+        let lines = vec![
+            Line::from(Span::styled(
+                super::truncate_with_ellipsis("Nothing to curate \u{2014} the working tree is clean.", body_width),
+                Style::default().fg(theme::FG),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                super::truncate_with_ellipsis("Switch to Review (F1) or Agent (F2) to make some changes first.", body_width),
+                Style::default().fg(theme::DIM),
+            )),
+        ];
+        super::draw_panel(f, area, "Curate", Paragraph::new(lines), &[]);
         return;
     };
     let file = app.project.files.iter().find(|f| f.path == cf.path);
@@ -120,11 +180,18 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
     // outside hoot; there's just nothing to curate here.
     if let Some(reason) = file.and_then(|f| f.unsupported) {
         let title = format!("{} \u{2014} not curatable here", cf.path);
+        let body_width = (area.width as usize).saturating_sub(2);
         let lines = vec![
-            Line::from(Span::styled(format!("This change is {reason}."), Style::default().fg(theme::ORANGE))),
+            Line::from(Span::styled(
+                super::truncate_with_ellipsis(&format!("This change is {reason}."), body_width),
+                Style::default().fg(theme::ORANGE),
+            )),
             Line::raw(""),
             Line::from(Span::styled(
-                "There's no hunk-level content to select — stage it with plain `git add` instead.",
+                super::truncate_with_ellipsis(
+                    "There's no hunk-level content to select \u{2014} stage it with plain `git add` instead.",
+                    body_width,
+                ),
                 Style::default().fg(theme::DIM),
             )),
         ];

@@ -22,19 +22,19 @@
 //! has to be threaded back in via `--session <id>` on every later call —
 //! see `Session` in `AgentEvent`.
 //!
-//! Unlike `pi_client`, the prompt here is a trailing CLI argument, not
-//! piped over stdin — and that's not a shortcut, it's a real limitation of
-//! `opencode run` confirmed by testing, not assumed: with no positional
-//! message, `opencode run` hangs waiting on stdin rather than reading a
-//! prompt from it, and `--file` only attaches a file to a message that
-//! still has to be provided separately (tried it: `opencode run --file
-//! prompt.txt` with no message errors with "You must provide a message or
-//! a command"). So the prompt — which can include a full selected diff —
-//! is visible in `ps`/`/proc/*/cmdline` for this backend, and long prompts
-//! risk the OS's argument-length limit. There's no workaround on hoot's
-//! side until opencode itself adds a stdin or file-as-message mode.
+//! Unlike `pi_client`, `opencode run` genuinely has no stdin-prompt mode —
+//! confirmed by testing, not assumed: with no positional message it just
+//! hangs waiting on stdin rather than reading a prompt from it. But `--file`
+//! *does* work as a workaround once paired with a message, even though a
+//! bare `--file` with no message errors ("You must provide a message or a
+//! command") — confirmed by testing that too: a short, fixed, non-sensitive
+//! instruction as the positional message plus the real prompt content in a
+//! securely-created temp file passed via `--file` gets the model to follow
+//! the file's content correctly. So the real prompt — which can include a
+//! full selected diff — never appears in `ps`/`/proc/*/cmdline` for this
+//! backend either, and doesn't risk the OS's argument-length limit.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -51,21 +51,41 @@ fn agent_arg(profile: ToolProfile) -> &'static str {
     }
 }
 
-/// Spawns `opencode run --format json --auto --agent <plan|build> --dir
-/// <cwd> [--session <id>] <prompt>` and streams parsed events back over a
-/// channel. Non-blocking: stdout and stderr are each read on their own
-/// thread, same shape as `pi_client::spawn`.
+/// Fixed, non-sensitive stand-in for the real prompt on the command line —
+/// see the module doc comment for why this (plus `--file`) is necessary.
+const FILE_PROMPT_INSTRUCTION: &str =
+    "Use the attached file as the full user request. Follow its instructions exactly; don't mention this message.";
+
+/// Spawns `opencode run "<fixed instruction>" --file <tempfile> --format
+/// json --auto --agent <plan|build> --dir <cwd> [--session <id>]` and
+/// streams parsed events back over a channel. Non-blocking: stdout and
+/// stderr are each read on their own thread, same shape as
+/// `pi_client::spawn`.
 ///
 /// `session_id` is `None` for the first turn of a run (opencode assigns
 /// one, surfaced back to the caller as `AgentEvent::Session`) and
 /// `Some(id)` for every turn after, to resume it.
 pub fn spawn(prompt: &str, cwd: &Path, session_id: Option<&str>, tools: ToolProfile) -> std::io::Result<AgentSession> {
+    let mut prompt_file = tempfile::Builder::new().prefix("hoot-prompt-").suffix(".txt").tempfile()?;
+    prompt_file.write_all(prompt.as_bytes())?;
+    prompt_file.flush()?;
+
     let mut cmd = Command::new("opencode");
-    cmd.arg("run").arg("--format").arg("json").arg("--auto").arg("--agent").arg(agent_arg(tools)).arg("--dir").arg(cwd);
+    cmd.arg("run")
+        .arg(FILE_PROMPT_INSTRUCTION)
+        .arg("--file")
+        .arg(prompt_file.path())
+        .arg("--format")
+        .arg("json")
+        .arg("--auto")
+        .arg("--agent")
+        .arg(agent_arg(tools))
+        .arg("--dir")
+        .arg(cwd);
     if let Some(id) = session_id {
         cmd.arg("--session").arg(id);
     }
-    cmd.arg(prompt).stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
@@ -112,6 +132,10 @@ pub fn spawn(prompt: &str, cwd: &Path, session_id: Option<&str>, tools: ToolProf
             }
         }
         let _ = child.wait();
+        // `prompt_file` stays alive (and thus on disk) until here — the
+        // child has now fully exited, so it's definitely done reading it.
+        // Dropping it here deletes it.
+        drop(prompt_file);
     });
 
     Ok(AgentSession { rx })

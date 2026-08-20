@@ -1,12 +1,22 @@
 //! Drives a real `pi` coding-agent subprocess (<https://github.com/earendil-works/pi>)
 //! and streams its `--mode json` NDJSON event log back as [`AgentEvent`]s.
 //!
-//! `--approve` is used unconditionally: pi has no native "pause and wait
-//! for external approval before writing" hook (confirmed by testing —
-//! `write` executes as soon as the model calls it, `--approve` or not), so
-//! there's no filesystem-level gate to stage changes through either way.
-//! Steer's diff view and plain `git` are the review/undo mechanism instead,
-//! same as any other change made to the repo.
+//! `--approve` is used unconditionally. What it actually does, verified
+//! against `pi --help` rather than assumed: "Trust project-local files for
+//! this run" — it's unrelated to `--tools`/tool-call permissions (pi has
+//! no native "pause and wait for approval before writing" hook regardless
+//! — confirmed by testing: `write` executes as soon as the model calls it,
+//! `--approve` or not — so there's no filesystem-level gate to stage
+//! writes through either way). What `--approve` actually controls is
+//! whether pi trusts repo-local config/extension files enough to run them
+//! with the user's privileges — i.e. this is real code execution from
+//! whatever's in the target repo, on *every* turn, including nominally
+//! read-only ones (`--tools read` narrows what the model can call; it
+//! doesn't touch this). That's a materially bigger trust boundary than
+//! "auto-approve tool calls," and worth knowing precisely before pointing
+//! this at an unfamiliar repo. Hoot's diff view and plain `git` are the
+//! review/undo mechanism for whatever the model itself does with its
+//! tools — they have no bearing on this.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
