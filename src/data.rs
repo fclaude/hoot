@@ -139,6 +139,100 @@ pub struct Project {
 }
 
 pub fn mock_project() -> Project {
+    // Every file below carries as many hunks as `mock_curation_files`
+    // claims as its "total" — a real `gitreview::load` always keeps
+    // `hunks.len()` and the curation total in lockstep (both come from the
+    // same parsed diff), and the demo used to fall short of that: four of
+    // these six files had an empty `hunks: vec![]` despite claiming 1-3
+    // selectable hunks, so Curate's hunk viewer had nothing to show past
+    // "No cached diff content for this hunk." Content is illustrative
+    // fiction either way (Review's whole-file Context pane reads the real
+    // placeholder files `write_demo_files` puts on disk instead), but it
+    // should at least be *present* everywhere the UI claims it is.
+    let main_hunks = vec![
+        Hunk {
+            lines: vec![
+                hdr("@@ -1,6 +1,8 @@"),
+                ctx(" mod index;"),
+                ctx(" mod query;"),
+                add("+mod cli;"),
+                ctx(""),
+                ctx(" fn main() {"),
+                rem("-    run_search();"),
+                add("+    let args = cli::parse_args();"),
+                add("+    run_search(&args);"),
+                ctx(" }"),
+            ],
+            note: None,
+        },
+        Hunk {
+            lines: vec![
+                hdr("@@ -14,6 +16,9 @@ fn run_search(args: &Args) {"),
+                ctx("   let index = Index::load(&args.index_path)?;"),
+                ctx("   let query = QueryParser::new(&args.query).parse()?;"),
+                rem("-   let results = index.search(&query);"),
+                add("+   let results = index.search(&query)?;"),
+                add("+   for doc in &results {"),
+                add("+       println!(\"{}\", doc.title);"),
+                add("+   }"),
+            ],
+            note: None,
+        },
+    ];
+
+    let lib_hunks = vec![Hunk {
+        lines: vec![
+            hdr("@@ -1,4 +1,5 @@"),
+            ctx(" pub mod index;"),
+            ctx(" pub mod query;"),
+            add("+pub mod cli;"),
+            ctx(""),
+            ctx(" pub use index::Index;"),
+        ],
+        note: None,
+    }];
+
+    let mod_hunks = vec![
+        Hunk {
+            lines: vec![
+                hdr("@@ -1,5 +1,6 @@"),
+                ctx(" pub mod postings;"),
+                add("+pub mod merge;"),
+                ctx(""),
+                ctx(" pub struct Index {"),
+                ctx("   pub postings: postings::Postings,"),
+                ctx(" }"),
+            ],
+            note: None,
+        },
+        Hunk {
+            lines: vec![
+                hdr("@@ -12,6 +13,10 @@ impl Index {"),
+                ctx("   pub fn search(&self, query: &Query) -> Vec<DocId> {"),
+                rem("-     self.postings.iter().collect()"),
+                add("+     self.postings"),
+                add("+       .iter()"),
+                add("+       .filter(|doc| self.matches(doc, query))"),
+                add("+       .collect()"),
+                ctx("   }"),
+            ],
+            note: None,
+        },
+        Hunk {
+            lines: vec![
+                hdr("@@ -30,4 +35,8 @@ impl Index {"),
+                ctx("   fn matches(&self, doc: &DocId, query: &Query) -> bool {"),
+                ctx("     true"),
+                ctx("   }"),
+                add("+"),
+                add("+  pub fn len(&self) -> usize {"),
+                add("+    self.postings.len()"),
+                add("+  }"),
+            ],
+            note: None,
+        },
+    ];
+
     let postings_hunks = vec![
         Hunk {
             lines: vec![
@@ -170,23 +264,147 @@ pub fn mock_project() -> Project {
             ],
             note: None,
         },
+        Hunk {
+            lines: vec![
+                hdr("@@ -110,6 +118,10 @@ impl Postings {"),
+                ctx("  fn contains_all(&self, terms: &[Term]) -> bool {"),
+                rem("-   terms.iter().all(|t| self.has_term(t))"),
+                add("+   terms.iter().all(|t| self.has_term(t) && self.positions_overlap(t))"),
+                ctx("  }"),
+                add("+"),
+                add("+ fn positions_overlap(&self, term: &Term) -> bool {"),
+                add("+   true"),
+                add("+ }"),
+            ],
+            note: None,
+        },
+        Hunk {
+            lines: vec![
+                hdr("@@ -140,7 +152,9 @@ impl Postings {"),
+                ctx("  pub fn doc_frequency(&self, term: &Term) -> usize {"),
+                rem("-   self.freq.get(term).copied().unwrap_or(0)"),
+                add("+   self.freq"),
+                add("+     .get(term)"),
+                add("+     .copied()"),
+                add("+     .unwrap_or_default()"),
+                ctx("  }"),
+            ],
+            note: None,
+        },
+        Hunk {
+            lines: vec![
+                hdr("@@ -170,4 +185,8 @@ impl Postings {"),
+                ctx("  pub fn len(&self) -> usize {"),
+                ctx("    self.docs.len()"),
+                ctx("  }"),
+                add("+"),
+                add("+ pub fn is_empty(&self) -> bool {"),
+                add("+   self.docs.is_empty()"),
+                add("+ }"),
+            ],
+            note: None,
+        },
     ];
 
-    let parser_hunks = vec![Hunk {
-        lines: vec![
-            hdr("@@ -12,6 +12,9 @@ impl QueryParser {"),
-            ctx("  pub fn parse(&mut self) -> Result<Query, ParseError> {"),
-            rem("-   self.token()?"),
-            add("+   self.token().map_err(|e| e.with_context(self.pos))?"),
-            ctx("  }"),
-        ],
-        note: Some("extract into a named IterState type — reusable from search() too.".to_string()),
-    }];
+    let parser_hunks = vec![
+        Hunk {
+            lines: vec![
+                hdr("@@ -12,6 +12,9 @@ impl QueryParser {"),
+                ctx("  pub fn parse(&mut self) -> Result<Query, ParseError> {"),
+                rem("-   self.token()?"),
+                add("+   self.token().map_err(|e| e.with_context(self.pos))?"),
+                ctx("  }"),
+            ],
+            note: Some("extract into a named IterState type — reusable from search() too.".to_string()),
+        },
+        Hunk {
+            lines: vec![
+                hdr("@@ -25,6 +28,11 @@ impl QueryParser {"),
+                ctx("  fn token(&mut self) -> Result<Token, ParseError> {"),
+                rem("-   self.lexer.next()"),
+                add("+   self.lexer"),
+                add("+     .next()"),
+                add("+     .ok_or_else(|| ParseError::UnexpectedEof)"),
+                ctx("  }"),
+            ],
+            note: None,
+        },
+        Hunk {
+            lines: vec![
+                hdr("@@ -40,7 +48,13 @@ impl QueryParser {"),
+                ctx("  fn parse_phrase(&mut self) -> Result<Phrase, ParseError> {"),
+                ctx("    let terms = self.terms()?;"),
+                add("+   if terms.is_empty() {"),
+                add("+     return Err(ParseError::EmptyPhrase);"),
+                add("+   }"),
+                ctx("    Ok(Phrase { terms })"),
+                ctx("  }"),
+            ],
+            note: None,
+        },
+        Hunk {
+            lines: vec![
+                hdr("@@ -60,4 +72,7 @@ impl ParseError {"),
+                ctx("  pub fn with_context(self, pos: usize) -> Self {"),
+                ctx("    ParseError::At { pos, source: Box::new(self) }"),
+                ctx("  }"),
+                add("+"),
+                add("+ pub fn is_recoverable(&self) -> bool {"),
+                add("+   matches!(self, ParseError::UnexpectedEof)"),
+                add("+ }"),
+            ],
+            note: None,
+        },
+    ];
+
+    let test_hunks = vec![
+        Hunk {
+            lines: vec![
+                hdr("@@ -1,5 +1,6 @@"),
+                ctx(" use search_index::Index;"),
+                add("+use search_index::QueryParser;"),
+                ctx(""),
+                ctx(" #[test]"),
+                ctx(" fn finds_matching_documents() {"),
+            ],
+            note: None,
+        },
+        Hunk {
+            lines: vec![
+                hdr("@@ -10,6 +11,12 @@ fn finds_matching_documents() {"),
+                ctx("  let results = index.search(&query).unwrap();"),
+                ctx("  assert_eq!(results.len(), 1);"),
+                add("+  assert_eq!(results[0].title, \"expected title\");"),
+                add("+}"),
+                add("+"),
+                add("+#[test]"),
+                add("+fn empty_query_returns_no_results() {"),
+                add("+  let index = Index::load(\"fixtures/small\").unwrap();"),
+            ],
+            note: None,
+        },
+        Hunk {
+            lines: vec![
+                hdr("@@ -22,3 +29,9 @@ fn finds_matching_documents() {"),
+                ctx("  let results = index.search(&Query::empty()).unwrap();"),
+                ctx("  assert!(results.is_empty());"),
+                ctx(" }"),
+                add("+"),
+                add("+#[test]"),
+                add("+fn phrase_queries_require_adjacent_terms() {"),
+                add("+  let index = Index::load(\"fixtures/small\").unwrap();"),
+                add("+  let results = index.search(&\"exact phrase\".parse().unwrap()).unwrap();"),
+                add("+  assert!(results.is_empty());"),
+                add("+}"),
+            ],
+            note: None,
+        },
+    ];
 
     let files = vec![
-        FileEntry { path: "main.rs".to_string(), hunk_count: 2, notes: 0, flagged: false, hunks: vec![], unsupported: None },
-        FileEntry { path: "lib.rs".to_string(), hunk_count: 1, notes: 0, flagged: false, hunks: vec![], unsupported: None },
-        FileEntry { path: "index/mod.rs".to_string(), hunk_count: 3, notes: 0, flagged: false, hunks: vec![], unsupported: None },
+        FileEntry { path: "main.rs".to_string(), hunk_count: 2, notes: 0, flagged: false, hunks: main_hunks, unsupported: None },
+        FileEntry { path: "lib.rs".to_string(), hunk_count: 1, notes: 0, flagged: false, hunks: lib_hunks, unsupported: None },
+        FileEntry { path: "index/mod.rs".to_string(), hunk_count: 3, notes: 0, flagged: false, hunks: mod_hunks, unsupported: None },
         FileEntry {
             path: "index/postings.rs".to_string(),
             hunk_count: 5,
@@ -195,13 +413,13 @@ pub fn mock_project() -> Project {
             hunks: postings_hunks,
             unsupported: None,
         },
-        FileEntry { path: "query/parser.rs".to_string(), hunk_count: 6, notes: 1, flagged: false, hunks: parser_hunks, unsupported: None },
+        FileEntry { path: "query/parser.rs".to_string(), hunk_count: 4, notes: 1, flagged: false, hunks: parser_hunks, unsupported: None },
         FileEntry {
             path: "tests/integration_test.rs".to_string(),
             hunk_count: 3,
             notes: 0,
             flagged: false,
-            hunks: vec![],
+            hunks: test_hunks,
             unsupported: None,
         },
     ];
