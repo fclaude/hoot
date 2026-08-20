@@ -12,6 +12,7 @@ mod opencode_client;
 mod pi_client;
 mod syntax;
 mod theme;
+mod trust;
 mod ui;
 
 use std::io;
@@ -208,6 +209,9 @@ fn run(
     agent_backend: AgentBackend,
 ) -> io::Result<()> {
     let mut app = App::new(target_dir, keymap, agent_backend);
+    // Only the real production entry point reads real on-disk state for
+    // this — see the field's doc comment on why App::new itself doesn't.
+    app.agent_trust_acknowledged = trust::is_acknowledged();
 
     loop {
         app.poll_agent();

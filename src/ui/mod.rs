@@ -1,4 +1,5 @@
 mod agent;
+mod agent_trust_confirm;
 mod curation;
 mod file_finder;
 mod note_input;
@@ -39,6 +40,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::FileFinder => file_finder::draw(f, app, area),
         Overlay::NoteInput => note_input::draw(f, app, area),
         Overlay::QuitConfirm => quit_confirm::draw(f, app, area),
+        Overlay::AgentTrustConfirm => agent_trust_confirm::draw(f, app, area),
         Overlay::None => {}
     }
 }
@@ -107,6 +109,36 @@ pub fn key_hints(items: &[(&str, &str)]) -> Line<'static> {
         spans.push(Span::styled(label.to_string(), Style::default().fg(theme::DIM)));
     }
     Line::from(spans)
+}
+
+/// Greedily word-wraps `text` to `width` columns. Pre-wrapping into
+/// separate `Line`s (rather than relying on `Paragraph`'s own wrap) keeps
+/// each rendered row known ahead of time — needed wherever a caller does
+/// its own row-count math (Agent's bottom-anchored transcript scroll,
+/// dialog box sizing, ...) instead of just handing ratatui a wrapping
+/// widget and trusting whatever it decides to draw. A single word longer
+/// than `width` is left on its own (slightly overflowing) line rather than
+/// hard-split — simpler, and rare for natural-language text.
+pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width < 4 {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let would_be = if current.is_empty() { word.chars().count() } else { current.chars().count() + 1 + word.chars().count() };
+        if would_be > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 /// Truncates `s` to at most `max_width` display columns, replacing the
@@ -205,6 +237,32 @@ mod tests {
     use ratatui::Terminal;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn wrap_text_breaks_at_word_boundaries_within_width() {
+        let lines = wrap_text("the quick brown fox jumps", 11);
+        for l in &lines {
+            assert!(l.chars().count() <= 11, "{l:?} exceeds width");
+        }
+        assert_eq!(lines.join(" "), "the quick brown fox jumps");
+    }
+
+    #[test]
+    fn wrap_text_leaves_an_overlong_word_on_its_own_line() {
+        let lines = wrap_text("supercalifragilisticexpialidocious short", 10);
+        assert_eq!(lines[0], "supercalifragilisticexpialidocious");
+        assert_eq!(lines[1], "short");
+    }
+
+    #[test]
+    fn wrap_text_empty_input_yields_one_empty_line() {
+        assert_eq!(wrap_text("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_text_short_text_is_a_single_line() {
+        assert_eq!(wrap_text("hi", 80), vec!["hi"]);
+    }
     use std::process::Command;
 
     fn scratch_repo(label: &str) -> PathBuf {

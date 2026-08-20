@@ -27,6 +27,7 @@ pub enum Overlay {
     FileFinder,
     NoteInput,
     QuitConfirm,
+    AgentTrustConfirm,
 }
 
 /// Which pane arrow keys currently move.
@@ -158,6 +159,20 @@ pub struct App {
     /// completion from one the user killed mid-flight, so `finish_turn`
     /// always reported the same "N files changed" summary either way.
     agent_cancelled: bool,
+    /// Whether the one-time "Agent runs with broad, unsandboxed trust"
+    /// prompt has been shown and confirmed — see `trust.rs`. Defaults to
+    /// already-acknowledged here in `App::new`, *not* to whatever
+    /// `trust::is_acknowledged()` reports for the real `$HOME`: that would
+    /// make every test's behavior depend on whether this machine has ever
+    /// run hoot for real before, right down to whether a test spawns a
+    /// genuine `pi`/`opencode` subprocess. `main.rs` is the only real
+    /// production entry point (never exercised by `cargo test`), and it
+    /// sets this explicitly from the real on-disk state right after
+    /// construction — see `run()`.
+    pub agent_trust_acknowledged: bool,
+    /// A turn `spawn_turn` held back pending that confirmation, to run (or
+    /// discard) once `on_key_agent_trust_confirm` answers it.
+    pending_turn: Option<(String, PathBuf, ToolProfile, TurnPurpose)>,
 
     // CURATION
     pub curation_files: Vec<CurationFile>,
@@ -298,6 +313,8 @@ impl App {
             agent_session: None,
             agent_purpose: TurnPurpose::Chat,
             agent_cancelled: false,
+            agent_trust_acknowledged: true,
+            pending_turn: None,
 
             curation_files: review.curation_files,
             curation_index: 0,
@@ -559,12 +576,26 @@ impl App {
         if prompt.is_empty() || self.agent_running {
             return;
         }
+        // First real turn ever on this machine: hold it and ask before a
+        // subprocess with this much trust (auto-approved tool calls, real
+        // code execution — see trust.rs) runs for the first time.
+        if !self.agent_trust_acknowledged {
+            self.pending_turn = Some((prompt, cwd, tools, purpose));
+            self.overlay = Overlay::AgentTrustConfirm;
+            return;
+        }
+        self.spawn_turn_now(prompt, cwd, tools, purpose);
+    }
+
+    fn spawn_turn_now(&mut self, prompt: String, cwd: PathBuf, tools: ToolProfile, purpose: TurnPurpose) {
         self.agent_purpose = purpose;
         self.agent_model_live = None;
         if purpose == TurnPurpose::Chat {
             self.transcript.push(AgentLine { kind: AgentLineKind::UserPrompt, text: prompt.clone() });
             self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() });
             self.agent_scroll = 0; // jump to the bottom to watch it stream in
+        } else {
+            self.commit_message_status = Some("Generating\u{2026}".to_string());
         }
 
         let result = match self.agent_backend {
@@ -616,7 +647,6 @@ impl App {
              real value) for the following diff. Output ONLY the commit message text — no \
              commentary, no markdown code fences.\n\n{diff_text}"
         );
-        self.commit_message_status = Some("Generating\u{2026}".to_string());
         let target_dir = self.target_dir.clone();
         self.spawn_turn(prompt, target_dir, ToolProfile::ReadOnly, TurnPurpose::CommitMessage);
     }
@@ -795,6 +825,7 @@ impl App {
             Overlay::FileFinder => return self.on_key_file_finder(key),
             Overlay::NoteInput => return self.on_key_note_input(key),
             Overlay::QuitConfirm => return self.on_key_quit_confirm(key),
+            Overlay::AgentTrustConfirm => return self.on_key_agent_trust_confirm(key),
             Overlay::None => {}
         }
 
@@ -1320,6 +1351,31 @@ impl App {
         match key.code {
             KeyCode::Enter | KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => self.overlay = Overlay::None,
+            _ => {}
+        }
+    }
+
+    fn on_key_agent_trust_confirm(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.agent_trust_acknowledged = true;
+                crate::trust::acknowledge();
+                self.overlay = Overlay::None;
+                if let Some((prompt, cwd, tools, purpose)) = self.pending_turn.take() {
+                    self.spawn_turn_now(prompt, cwd, tools, purpose);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                // Declining just drops the held turn — it never ran, so
+                // there's nothing to undo. The prompt that led here was
+                // already cleared from its input field by the caller
+                // before spawn_turn was ever reached, same as if it had
+                // actually been sent; retyping it is the cost of a
+                // one-time safety prompt, not something worth engineering
+                // a restore path for.
+                self.pending_turn = None;
+                self.overlay = Overlay::None;
+            }
             _ => {}
         }
     }
@@ -2123,6 +2179,67 @@ mod tests {
 
         assert!(!app.agent_running, "demo mode must never spawn a real agent turn");
         assert_eq!(app.commit_message_status.as_deref(), Some("Demo mode — nothing real to summarize."));
+    }
+
+    #[test]
+    fn an_unacknowledged_trust_prompt_holds_the_turn_instead_of_spawning() {
+        // App::new defaults agent_trust_acknowledged to true (see its doc
+        // comment — real per-machine state is only applied by main.rs) —
+        // forcing it false here is what actually exercises the gate, the
+        // same way a genuinely first-ever launch would.
+        let (mut app, dir) = two_file_app("trust-gate-hold");
+        app.mode = Mode::Agent;
+        app.agent_trust_acknowledged = false;
+
+        for c in "hello".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.overlay, Overlay::AgentTrustConfirm, "should hold for confirmation, not proceed");
+        assert!(!app.agent_running, "must not have attempted a real spawn yet");
+        assert!(app.transcript.is_empty(), "the prompt shouldn't appear in the transcript until it actually sends");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn declining_the_trust_prompt_discards_the_held_turn() {
+        let (mut app, dir) = two_file_app("trust-gate-decline");
+        app.mode = Mode::Agent;
+        app.agent_trust_acknowledged = false;
+
+        for c in "hello".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.overlay, Overlay::AgentTrustConfirm);
+
+        app.on_key(key(KeyCode::Esc));
+
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(!app.agent_trust_acknowledged, "declining shouldn't count as acknowledging");
+        assert!(!app.agent_running);
+        assert!(app.transcript.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_commit_message_is_also_held_for_trust_confirmation() {
+        // The gate lives in spawn_turn, shared by both call paths — this
+        // covers the Curate 'g' path specifically, not just Agent chat.
+        let (mut app, dir) = two_file_app("trust-gate-curate");
+        app.mode = Mode::Curation;
+        app.agent_trust_acknowledged = false;
+
+        app.on_key(key(KeyCode::Char('g')));
+
+        assert_eq!(app.overlay, Overlay::AgentTrustConfirm);
+        assert!(!app.agent_running);
+        assert_eq!(app.commit_message_status, None, "no real turn should have started yet");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
