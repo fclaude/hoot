@@ -72,6 +72,7 @@ pub enum Action {
     CurateHunkPrev,
     CurateHunkNext,
     CurateToggleHunk,
+    CurateOpenInReview,
     CurateEditMessage,
     CurateGenerateMessage,
     CurateCommit,
@@ -250,6 +251,14 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::CurateHunkPrev, "curate_hunk_prev", "Previous hunk", "Curate", "left", "View the previous hunk in this file"),
     b!(Action::CurateHunkNext, "curate_hunk_next", "Next hunk", "Curate", "right", "View the next hunk in this file"),
     b!(Action::CurateToggleHunk, "curate_toggle_hunk", "Toggle hunk", "Curate", "space", "Select/deselect the hunk currently shown"),
+    b!(
+        Action::CurateOpenInReview,
+        "curate_open_in_review",
+        "Open in Review",
+        "Curate",
+        "r",
+        "Jump to this hunk's file in Review, file tree and content both"
+    ),
     b!(Action::CurateEditMessage, "curate_edit_message", "Edit message", "Curate", "e", "Open the commit message in $EDITOR"),
     b!(
         Action::CurateGenerateMessage,

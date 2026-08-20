@@ -37,6 +37,19 @@ pub struct Hunk {
     pub note: Option<String>,
 }
 
+impl Hunk {
+    /// The line number this hunk starts at in the *new* (current) file —
+    /// parsed from its own header line, e.g. the `18` in
+    /// `@@ -12,7 +18,11 @@ impl Foo {`. `None` if `lines` is somehow empty
+    /// or doesn't start with a header (shouldn't happen for a real hunk —
+    /// every parser here always pushes the header first — but this is
+    /// reached from Curate's real hunk data, not just tests, so it stays a
+    /// clean `Option` rather than an assumption baked in with `.unwrap()`).
+    pub fn new_file_start_line(&self) -> Option<usize> {
+        self.lines.first().filter(|l| l.kind == DiffLineKind::HunkHeader).and_then(|l| parse_hunk_new_start(&l.text))
+    }
+}
+
 /// A file as it appears in the Review tree.
 #[derive(Clone, PartialEq)]
 pub struct FileEntry {
@@ -65,8 +78,7 @@ pub struct FileEntry {
 pub fn diff_lines_with_file_line_numbers(hunks: &[Hunk]) -> Vec<(Option<usize>, DiffLine)> {
     let mut out = Vec::new();
     for hunk in hunks {
-        let mut line_no =
-            hunk.lines.first().filter(|l| l.kind == DiffLineKind::HunkHeader).and_then(|l| parse_hunk_new_start(&l.text)).unwrap_or(1);
+        let mut line_no = hunk.new_file_start_line().unwrap_or(1);
         for dl in &hunk.lines {
             match dl.kind {
                 DiffLineKind::HunkHeader => continue,

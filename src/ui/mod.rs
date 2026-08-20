@@ -721,6 +721,11 @@ mod tests {
 
         assert_eq!(app.nav_file.file_name().unwrap(), "lib.rs");
         assert_eq!(app.nav_line, 1); // 0-indexed line of the `pub fn parse_query` definition
+                                     // Regression: jumping used to move the content pane only — the
+                                     // tree/explorer pane's selection silently stayed wherever it had
+                                     // been, so it could point at a completely different file than
+                                     // what was actually on screen.
+        assert_eq!(app.tree[app.tree_index].path, app.nav_file, "the tree selection should follow the jump too");
         let screen = render(&app, 150, 40);
         assert!(screen.contains("parse_query"), "{screen}");
 

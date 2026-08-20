@@ -525,6 +525,25 @@ impl App {
         self.refresh_hover();
     }
 
+    /// Switches to Review focused on `path` — the tree/explorer pane and
+    /// the content pane both, not just the content pane `open_file` alone
+    /// moves. Every "open this file in Review" entry point (symbol jump,
+    /// file finder, jumping here from a Curate hunk) goes through this, so
+    /// they all agree on what "opening a file" means: previously only the
+    /// content pane actually moved, and the tree pane's selection/scroll
+    /// silently stayed wherever it had been.
+    fn open_in_review(&mut self, path: PathBuf, line: Option<usize>) {
+        self.open_file(path.clone());
+        self.content_view = ContentView::Context;
+        if let Some(line) = line {
+            self.nav_line = self.nav_line_for_file_line(line);
+        }
+        self.nav_focus = NavFocus::Content;
+        self.tree_index = self.tree.iter().position(|e| e.path == path).unwrap_or(self.tree_index);
+        self.refresh_hover();
+        self.mode = Mode::Review;
+    }
+
     fn refresh_hover(&mut self) {
         // `nav_line` indexes into whatever's currently on screen — when
         // that's a diff view, it isn't a position in `self.source` at all
@@ -1170,16 +1189,11 @@ impl App {
         } else if k.is(&key, Action::SymbolJumpTo) {
             if let Some(&i) = self.filtered_symbols().get(self.symbol_index) {
                 let sym = &self.symbols[i];
-                let path = sym.path.clone();
-                let line = sym.line;
-                self.open_file(path);
-                // Always land on Context (never Focused): Focused can
-                // collapse the exact target line away if it's not near a
-                // change, but Context always has every line.
-                self.content_view = ContentView::Context;
-                self.nav_line = self.nav_line_for_file_line(line);
-                self.nav_focus = NavFocus::Content;
-                self.refresh_hover();
+                // `open_in_review` always lands on Context (never
+                // Focused): Focused can collapse the exact target line
+                // away if it's not near a change, but Context always has
+                // every line.
+                self.open_in_review(sym.path.clone(), Some(sym.line));
             }
             self.overlay = Overlay::None;
             self.mode = Mode::Review;
@@ -1230,9 +1244,7 @@ impl App {
         } else if k.is(&key, Action::FinderOpen) {
             if let Some(&i) = self.filtered_files().get(self.file_finder_index) {
                 let path = self.tree[i].path.clone();
-                self.open_file(path);
-                self.content_view = ContentView::Context;
-                self.nav_focus = NavFocus::Content;
+                self.open_in_review(path, None);
             }
             self.overlay = Overlay::None;
             self.mode = Mode::Review;
@@ -1486,6 +1498,23 @@ impl App {
                         f.status = None;
                     }
                 }
+            }
+        } else if k.is(&key, Action::CurateOpenInReview) {
+            if let Some(cf) = self.curation_files.get(self.curation_index) {
+                let path = self.target_dir.join(&cf.path);
+                // No line for a file with nothing to curate (binary, a
+                // pure rename, ...) — `hunks` is empty there, so this
+                // naturally falls back to just opening the file with no
+                // specific line to jump to, same as file-finder does.
+                let shown_index = self.curation_hunk_index.min(cf.total().saturating_sub(1) as usize);
+                let line = self
+                    .project
+                    .files
+                    .iter()
+                    .find(|f| f.path == cf.path)
+                    .and_then(|f| f.hunks.get(shown_index))
+                    .and_then(|h| h.new_file_start_line());
+                self.open_in_review(path, line);
             }
         } else if k.is(&key, Action::CurateEditMessage) {
             // Straight to $EDITOR on the real buffer — no in-TUI editing
@@ -2046,6 +2075,58 @@ mod tests {
         assert_eq!(app.open_editor_requested, None);
         app.on_key(key(KeyCode::Char('e')));
         assert_eq!(app.open_editor_requested, Some(EditorTarget::CommitMessage));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curate_open_in_review_positions_both_the_tree_and_content_panes() {
+        let (mut app, dir) = two_file_app("curate-open-in-review");
+        app.mode = Mode::Curation;
+        assert_eq!(app.curation_files[1].path, "b.txt");
+        app.curation_index = 1; // b.txt, not whatever App::new happened to open in Review
+
+        app.on_key(key(KeyCode::Char('r')));
+
+        assert!(app.mode == Mode::Review, "expected Review mode");
+        assert_eq!(app.nav_file, dir.join("b.txt"), "content pane should have opened b.txt");
+        assert_eq!(app.tree[app.tree_index].path, dir.join("b.txt"), "tree/explorer pane should be positioned on b.txt too");
+        assert_eq!(app.content_view, ContentView::Context);
+        assert!(app.nav_focus == NavFocus::Content);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curate_open_in_review_lands_on_the_hunks_own_line_not_just_line_one() {
+        // two_file_app's single-hunk files don't distinguish "opened the
+        // file" from "opened it at the right line" — a file with two
+        // far-apart hunks does.
+        let dir = scratch_repo("curate-open-in-review-line");
+        let original: String = (1..=20).map(|n| format!("line{n}\n")).collect();
+        commit_file(&dir, "f.txt", &original);
+        let mut lines: Vec<String> = (1..=20).map(|n| format!("line{n}")).collect();
+        lines[0] = "line1-CHANGED".to_string();
+        lines[19] = "line20-CHANGED".to_string();
+        fs::write(dir.join("f.txt"), lines.join("\n") + "\n").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.mode = Mode::Curation;
+        assert_eq!(app.curation_files[0].total(), 2, "expected two separate hunks");
+        app.curation_hunk_index = 1; // the second hunk, around line20
+
+        app.on_key(key(KeyCode::Char('r')));
+
+        assert!(app.mode == Mode::Review, "expected Review mode");
+        assert_eq!(app.nav_file, dir.join("f.txt"));
+        // f.txt has an active diff, so `nav_line` indexes the Context
+        // view's diff-line reconstruction, not `app.source` directly —
+        // `current_content_line_number` resolves either case to the real
+        // file line. The hunk's own declared start (17, confirmed against
+        // a real `git diff`: 3 lines of leading context before line 20
+        // itself) is the thing actually worth asserting on here — landed
+        // on the *second* hunk, not silently defaulted to the first (1).
+        assert_eq!(app.current_content_line_number(), Some(17));
 
         let _ = fs::remove_dir_all(&dir);
     }
