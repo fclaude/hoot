@@ -128,6 +128,24 @@ fn is_source_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).map(|e| SOURCE_EXTS.contains(&e)).unwrap_or(false)
 }
 
+/// Reads `path` for `scan_symbols`/`reference_count`, applying the same
+/// symlink and size guards as `read_file` — these two run over every
+/// matched source file in the tree on essentially every symbol-related
+/// action (typing in the symbol jump overlay, opening a file, ...), so a
+/// symlink extension-matched as a "source file" (an `evil.rs` pointing at
+/// `~/.ssh/id_rsa`, say) would otherwise have its target's content quietly
+/// folded into symbol/reference results the same way `read_file` used to
+/// leak one into the content pane. Unlike `read_file`, a rejected path is
+/// just skipped rather than shown as a placeholder line — this feeds a
+/// bulk background scan, not a single "here's what you opened" display.
+fn read_source_file(path: &Path) -> Option<String> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_READABLE_SIZE {
+        return None;
+    }
+    fs::read_to_string(path).ok()
+}
+
 fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>, ignored: &HashSet<PathBuf>) {
     if out.len() >= SCAN_FILE_BUDGET {
         return;
@@ -159,7 +177,7 @@ pub fn scan_symbols(root: &Path) -> Vec<SymbolResult> {
 
     let mut out = Vec::new();
     'files: for path in &files {
-        let Ok(content) = fs::read_to_string(path) else { continue };
+        let Some(content) = read_source_file(path) else { continue };
         for (i, line) in content.lines().enumerate() {
             if let Some(name) = extract_symbol_name(line) {
                 out.push(SymbolResult { name, path: path.clone(), line: i + 1, preview: line.trim().to_string() });
@@ -261,7 +279,7 @@ pub fn reference_count(root: &Path, name: &str) -> u32 {
     collect_source_files(root, &mut files, &crate::gitreview::ignored_paths(root));
     let mut count = 0u32;
     for path in files {
-        let Ok(content) = fs::read_to_string(&path) else { continue };
+        let Some(content) = read_source_file(&path) else { continue };
         for line in content.lines() {
             count += line.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| *w == name).count() as u32;
         }
@@ -348,6 +366,56 @@ mod tests {
         assert!(names.contains(&"Server"), "names = {names:?}");
         assert!(names.contains(&"Widget"), "names = {names:?}");
         assert!(names.contains(&"render"), "names = {names:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_symbols_does_not_follow_a_symlink_out_of_the_tree() {
+        // Regression: scan_symbols/reference_count used to read every
+        // extension-matched path with fs::read_to_string directly, which
+        // follows symlinks — an `evil.rs` symlinked to an arbitrary file
+        // outside the tree (e.g. ~/.ssh/id_rsa) would have its target
+        // content quietly scanned into symbol results. Same class of bug
+        // read_file already had, fixed the same way: skip anything that
+        // isn't a real regular file.
+        let dir = scratch_dir("scan-symlink");
+        // In a genuinely separate directory, not just another file inside
+        // `dir` — otherwise it'd get scanned as its own legitimate source
+        // file regardless of the symlink, and the test would pass without
+        // actually exercising the symlink guard at all.
+        let outside_dir = scratch_dir("scan-symlink-outside");
+        let outside = outside_dir.join("outside.rs");
+        fs::write(&outside, "fn top_secret_function() {}\n").unwrap();
+        let link = dir.join("evil.rs");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let symbols = scan_symbols(&dir);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains(&"top_secret_function"), "symlink target leaked into symbol scan: {names:?}");
+
+        let count = reference_count(&dir, "top_secret_function");
+        assert_eq!(count, 0, "symlink target leaked into reference count");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    #[test]
+    fn scan_symbols_skips_an_oversized_source_file() {
+        let dir = scratch_dir("scan-oversized");
+        let mut padded = "fn should_not_appear() {}\n".to_string();
+        padded.push_str(&"x".repeat((MAX_READABLE_SIZE + 1) as usize - padded.len()));
+        fs::write(dir.join("big.rs"), &padded).unwrap();
+        // A well-formed small file alongside it proves the scan still runs
+        // and only the oversized one gets skipped, not that scanning broke
+        // entirely.
+        fs::write(dir.join("small.rs"), "fn kept() {}\n").unwrap();
+
+        let symbols = scan_symbols(&dir);
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"kept"), "names = {names:?}");
+        assert!(!names.contains(&"should_not_appear"), "oversized file should have been skipped entirely: {names:?}");
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -538,7 +538,22 @@ impl App {
             self.nav_line = self.nav_line_for_file_line(line);
         }
         self.nav_focus = NavFocus::Content;
-        self.tree_index = self.tree.iter().position(|e| e.path == path).unwrap_or(self.tree_index);
+        // `path` itself won't be in the tree for a file Curate can still
+        // show a diff for but the tree can't (a deletion — gone from disk
+        // entirely — or a file past `fsnav::TREE_BUDGET`'s scan cap). Falling
+        // back to `self.tree_index` unchanged in that case left whatever
+        // unrelated row the cursor happened to be parked on looking
+        // selected/highlighted, with nothing about it connected to the file
+        // the content pane just jumped to. The containing directory is
+        // still something real to land on instead — it's what a file
+        // explorer would do — so try that before giving up and leaving the
+        // stale position.
+        self.tree_index = self
+            .tree
+            .iter()
+            .position(|e| e.path == path)
+            .or_else(|| path.parent().and_then(|parent| self.tree.iter().position(|e| e.is_dir && e.path == parent)))
+            .unwrap_or(self.tree_index);
         self.refresh_hover();
         self.mode = Mode::Review;
     }
@@ -2109,6 +2124,47 @@ mod tests {
         assert_eq!(app.tree[app.tree_index].path, dir.join("b.txt"), "tree/explorer pane should be positioned on b.txt too");
         assert_eq!(app.content_view, ContentView::Context);
         assert!(app.nav_focus == NavFocus::Content);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curate_open_in_review_on_a_deleted_file_lands_on_its_directory_not_a_stale_row() {
+        // Regression: a deleted file still has a real diff for Curate to
+        // show (all-removed hunks), but fsnav::build_tree walks the live
+        // filesystem, so the file itself is never in `self.tree` to
+        // position on. Falling back to whatever `tree_index` happened to
+        // be before the jump left an unrelated file looking selected/
+        // highlighted in the sidebar while the content pane had already
+        // moved to the deleted file. The containing directory (still on
+        // disk, still in the tree) is the fix's fallback target.
+        let dir = scratch_repo("open-in-review-deleted");
+        commit_file(&dir, "a.txt", "a1\na2\n");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/gone.txt"), "g1\ng2\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "add sub/gone.txt"]).current_dir(&dir).status().unwrap();
+
+        fs::write(dir.join("a.txt"), "a1-changed\na2\n").unwrap();
+        fs::remove_file(dir.join("sub/gone.txt")).unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        assert!(!app.tree.iter().any(|e| e.path == dir.join("sub/gone.txt")), "deleted file shouldn't be in the tree");
+        assert!(app.tree.iter().any(|e| e.path == dir.join("sub") && e.is_dir), "its directory should still be in the tree");
+
+        app.mode = Mode::Curation;
+        let gone_index = app.curation_files.iter().position(|cf| cf.path == "sub/gone.txt").expect("sub/gone.txt in curation_files");
+        app.curation_index = gone_index;
+        // Park the tree cursor somewhere unrelated first, so a fallback to
+        // "leave it wherever it was" would be observably wrong.
+        app.tree_index = app.tree.iter().position(|e| e.path == dir.join("a.txt")).unwrap();
+
+        app.on_key(key(KeyCode::Char('r')));
+
+        assert!(app.mode == Mode::Review, "expected Review mode");
+        assert_eq!(app.nav_file, dir.join("sub/gone.txt"), "content pane should have opened the deleted file");
+        assert_eq!(app.tree[app.tree_index].path, dir.join("sub"), "tree should fall back to the containing directory");
 
         let _ = fs::remove_dir_all(&dir);
     }
