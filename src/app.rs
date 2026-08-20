@@ -591,6 +591,15 @@ impl App {
         if self.agent_running {
             return;
         }
+        // The diff behind a demo "selection" is fabricated (data::mock_project),
+        // not something a real repo actually produced — spawning a real agent
+        // turn over it would burn a real API call on fictional content the
+        // user never asked to send anywhere, just for pressing `g` out of
+        // curiosity while exploring --demo.
+        if !self.review_is_real {
+            self.commit_message_status = Some("Demo mode — nothing real to summarize.".to_string());
+            return;
+        }
         let diff_text = self.selected_diff_text();
         if diff_text.trim().is_empty() {
             self.commit_message_status = Some("Nothing selected to summarize.".to_string());
@@ -2051,6 +2060,24 @@ mod tests {
         assert_eq!(app.commit_message_status.as_deref(), Some("Nothing selected to summarize."));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_message_in_demo_mode_does_not_spawn_a_real_agent_turn() {
+        // Regression: pressing `g` out of curiosity while exploring --demo
+        // used to spawn a real pi/opencode turn over data::mock_project's
+        // fabricated diff — a real API call, real cost, for content that
+        // was never a real change to anything.
+        let dir = std::env::temp_dir().join(format!("hoot-app-test-demo-gen-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir); // never created — is_git_repo must see it as not-a-repo
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        assert!(!app.review_is_real, "should have fallen back to mock data");
+
+        app.mode = Mode::Curation;
+        app.on_key(key(KeyCode::Char('g')));
+
+        assert!(!app.agent_running, "demo mode must never spawn a real agent turn");
+        assert_eq!(app.commit_message_status.as_deref(), Some("Demo mode — nothing real to summarize."));
     }
 
     #[test]

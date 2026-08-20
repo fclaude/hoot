@@ -121,7 +121,10 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_commit_box(f: &mut Frame, app: &App, area: Rect) {
-    let title = if app.review_is_real { "Commit message" } else { "Commit message (editable, drafted by local model)" };
+    // The demo message is static fabricated text (data::mock_commit_message),
+    // not something any model actually drafted — say so plainly rather than
+    // implying a real local inference call happened.
+    let title = if app.review_is_real { "Commit message" } else { "Commit message (editable — fictional demo text)" };
     let mut lines: Vec<Line<'static>> = Vec::new();
     if let Some(status) = &app.commit_message_status {
         lines.push(Line::from(Span::styled(status.clone(), Style::default().fg(theme::ORANGE))));
