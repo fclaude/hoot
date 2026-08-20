@@ -8,6 +8,7 @@
 //! jump-to-definition-ish navigation over a real repo; not a substitute for
 //! `rust-analyzer` et al.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -27,11 +28,12 @@ const SYMBOL_BUDGET: usize = 500;
 
 pub fn build_tree(root: &Path) -> Vec<TreeEntry> {
     let mut out = Vec::new();
-    walk(root, 0, &mut out);
+    let ignored = crate::gitreview::ignored_paths(root);
+    walk(root, 0, &mut out, &ignored);
     out
 }
 
-fn walk(dir: &Path, depth: u8, out: &mut Vec<TreeEntry>) {
+fn walk(dir: &Path, depth: u8, out: &mut Vec<TreeEntry>, ignored: &HashSet<PathBuf>) {
     if out.len() >= TREE_BUDGET {
         return;
     }
@@ -48,11 +50,19 @@ fn walk(dir: &Path, depth: u8, out: &mut Vec<TreeEntry>) {
             continue;
         }
         let path = entry.path();
+        // Gitignored paths (build output, caches, local scratch/log dirs,
+        // ...) are exactly what a Git review tool's file list should never
+        // show — they're not part of what's being reviewed, and an ignored
+        // directory full of logs was enough on its own to exhaust
+        // TREE_BUDGET before any real source file was reached.
+        if ignored.contains(&path) {
+            continue;
+        }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
             let child_count = fs::read_dir(&path).map(|d| d.filter_map(|e| e.ok()).count() as u32).unwrap_or(0);
             out.push(TreeEntry { label: format!("{name}/"), depth, is_dir: true, child_count: Some(child_count), path: path.clone() });
-            walk(&path, depth + 1, out);
+            walk(&path, depth + 1, out, ignored);
         } else {
             out.push(TreeEntry { label: name, depth, is_dir: false, child_count: None, path });
         }
@@ -70,7 +80,7 @@ fn is_source_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).map(|e| SOURCE_EXTS.contains(&e)).unwrap_or(false)
 }
 
-fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>, ignored: &HashSet<PathBuf>) {
     if out.len() >= SCAN_FILE_BUDGET {
         return;
     }
@@ -84,8 +94,11 @@ fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
             continue;
         }
         let path = entry.path();
+        if ignored.contains(&path) {
+            continue;
+        }
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            collect_source_files(&path, out);
+            collect_source_files(&path, out, ignored);
         } else if is_source_file(&path) {
             out.push(path);
         }
@@ -94,7 +107,7 @@ fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 pub fn scan_symbols(root: &Path) -> Vec<SymbolResult> {
     let mut files = Vec::new();
-    collect_source_files(root, &mut files);
+    collect_source_files(root, &mut files, &crate::gitreview::ignored_paths(root));
 
     let mut out = Vec::new();
     'files: for path in &files {
@@ -197,7 +210,7 @@ pub fn fuzzy_match(needle: &str, haystack: &str) -> bool {
 /// Whole-word occurrence count of `name` across scanned source files.
 pub fn reference_count(root: &Path, name: &str) -> u32 {
     let mut files = Vec::new();
-    collect_source_files(root, &mut files);
+    collect_source_files(root, &mut files, &crate::gitreview::ignored_paths(root));
     let mut count = 0u32;
     for path in files {
         let Ok(content) = fs::read_to_string(&path) else { continue };
@@ -326,6 +339,33 @@ mod tests {
         assert!(labels.contains(&".gitignore"), "labels = {labels:?}");
         assert!(labels.contains(&".github/"), "labels = {labels:?}");
         assert!(labels.contains(&"release.yml"), "labels = {labels:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_tree_excludes_gitignored_directories() {
+        // Regression: build_tree used to walk the raw filesystem with no
+        // idea what Git ignores, so a gitignored directory full of logs or
+        // scratch files (a local tool's working state, a build cache not
+        // yet excluded from SKIP_DIRS by name, ...) showed up in the
+        // Navigate sidebar right alongside real tracked/untracked source —
+        // and could exhaust TREE_BUDGET before any real file was reached.
+        let dir = scratch_dir("tree-gitignore");
+        let status = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap();
+        assert!(status.success());
+        fs::write(dir.join(".gitignore"), "/ignored-dir/\n").unwrap();
+        fs::create_dir_all(dir.join("ignored-dir")).unwrap();
+        fs::write(dir.join("ignored-dir/noise.log"), "noise\n").unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let tree = build_tree(&dir);
+        let labels: Vec<&str> = tree.iter().map(|e| e.label.as_str()).collect();
+        assert!(!labels.contains(&"ignored-dir/"), "labels = {labels:?}");
+        assert!(labels.contains(&"src/"), "labels = {labels:?}");
+        assert!(labels.contains(&"main.rs"), "labels = {labels:?}");
+        assert!(labels.contains(&".gitignore"), "labels = {labels:?}");
 
         let _ = fs::remove_dir_all(&dir);
     }

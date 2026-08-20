@@ -404,10 +404,11 @@ impl App {
     /// the diff is byte-for-byte the same as last time — so idle polling
     /// never disturbs in-progress Curation hunk selections. When the diff
     /// really did change, per-file `selected`/`flagged`/`notes` are carried
-    /// over by path; hunk-level curation selections reset to "all
-    /// selected", matching a fresh `gitreview::load`, since hunks can shift
-    /// shape under a real content change and there's no reliable way to
-    /// match them index-for-index.
+    /// over by path; a file whose hunks shift shape gets marked
+    /// `FileStatus::Stale` with every hunk deselected rather than
+    /// re-selected, since hunks can't be reliably matched index-for-index
+    /// across a real content change and silently defaulting back to
+    /// "commit everything" risks staging content the user never reviewed.
     fn sync_review_from_disk(&mut self) {
         let mut review = crate::gitreview::load(&self.target_dir);
         if review.project.files == self.project.files {
@@ -428,20 +429,31 @@ impl App {
         // deselected. Only a file whose hunks actually shifted shape needs
         // resetting — that's the one case index-for-index selection
         // genuinely can't be trusted.
+        //
+        // And when it *is* that case, resetting means "nothing selected,
+        // marked stale" rather than gitreview::load's normal "everything
+        // selected" default: the file existed under previous review, the
+        // user may well have deliberately deselected part of it, and there
+        // is no way here to tell "content changed but the old exclusion is
+        // still what they want" from "content changed and needs a fresh
+        // look" — so a brand-new file gets the trusting default, but one
+        // that changed shape out from under an existing review does not.
         for cf in &mut review.curation_files {
-            let unchanged_hunks = self
-                .project
-                .files
-                .iter()
-                .find(|f| f.path == cf.path)
-                .zip(review.project.files.iter().find(|f| f.path == cf.path))
-                .is_some_and(|(old, new)| old.hunks == new.hunks);
-            if unchanged_hunks {
-                if let Some(old_cf) = self.curation_files.iter().find(|c| c.path == cf.path) {
-                    if old_cf.hunk_selected.len() == cf.hunk_selected.len() {
-                        cf.hunk_selected = old_cf.hunk_selected.clone();
+            let old_new =
+                self.project.files.iter().find(|f| f.path == cf.path).zip(review.project.files.iter().find(|f| f.path == cf.path));
+            match old_new {
+                Some((old, new)) if old.hunks == new.hunks => {
+                    if let Some(old_cf) = self.curation_files.iter().find(|c| c.path == cf.path) {
+                        if old_cf.hunk_selected.len() == cf.hunk_selected.len() {
+                            cf.hunk_selected = old_cf.hunk_selected.clone();
+                        }
                     }
                 }
+                Some(_) => {
+                    cf.hunk_selected = vec![false; cf.hunk_selected.len()];
+                    cf.status = Some(crate::theme::FileStatus::Stale);
+                }
+                None => {}
             }
         }
         self.project = review.project;
@@ -1362,6 +1374,12 @@ impl App {
             if let Some(f) = self.curation_files.get_mut(self.curation_index) {
                 if let Some(s) = f.hunk_selected.get_mut(self.curation_hunk_index) {
                     *s = !*s;
+                    // A `Stale` file's whole point is "look at this again
+                    // before trusting it" — touching a hunk at all is that
+                    // look, so the badge has done its job.
+                    if f.status == Some(crate::theme::FileStatus::Stale) {
+                        f.status = None;
+                    }
                 }
             }
         } else if k.is(&key, Action::CurateEditMessage) {
@@ -2264,6 +2282,39 @@ mod tests {
 
         assert_eq!(app.curation_files[1].path, "b.txt");
         assert!(!app.curation_files[1].hunk_selected[0], "b.txt's deselected hunk should survive a.txt changing");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_review_from_disk_marks_a_changed_file_stale_instead_of_reselecting_everything() {
+        // Regression: a file whose *own* hunks shift shape (not just an
+        // unrelated file elsewhere in the repo) used to fall through to
+        // gitreview::load's normal "everything selected" default — so a
+        // background edit to the file the user was actively curating could
+        // silently re-include content they never reviewed. Index-for-index
+        // hunk matching genuinely can't be trusted across a real shape
+        // change, so the safer response is deselect-and-flag, not
+        // reselect-everything.
+        let (mut app, dir) = two_file_app("sync-review-stale");
+        assert_eq!(app.curation_files[0].path, "a.txt");
+        assert!(app.curation_files[0].hunk_selected[0], "starts selected");
+        assert_eq!(app.curation_files[0].status, None);
+
+        // Change a.txt's own content enough to shift its hunk shape.
+        fs::write(dir.join("a.txt"), "a1-changed\na2\na3-new-line\n").unwrap();
+        app.sync_review_from_disk();
+
+        assert_eq!(app.curation_files[0].path, "a.txt");
+        assert!(!app.curation_files[0].hunk_selected[0], "a changed file's hunks should not silently reselect");
+        assert_eq!(app.curation_files[0].status, Some(crate::theme::FileStatus::Stale));
+
+        // Touching any hunk is the re-review the badge was asking for.
+        app.mode = Mode::Curation;
+        app.curation_index = 0;
+        app.curation_hunk_index = 0;
+        app.on_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.curation_files[0].status, None, "toggling a hunk should clear the stale badge");
 
         let _ = fs::remove_dir_all(&dir);
     }

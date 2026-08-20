@@ -18,11 +18,17 @@ pub const ORANGE: Color = Color::Rgb(0xff, 0xb8, 0x6c); // has open notes / in-p
 pub const YELLOW: Color = Color::Rgb(0xf1, 0xfa, 0x8c); // syntax: string literals
 
 /// Status of a file in the review/curation flow.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStatus {
     Clean,
     HasNotes,
     Flagged,
+    /// The file's hunks changed shape underneath the user (a background
+    /// agent turn, another `git` operation, a manual edit) since it was
+    /// last reviewed here — its selection was reset to nothing-selected
+    /// rather than trusted, so it needs an explicit re-review before any
+    /// of it can be committed.
+    Stale,
 }
 
 impl FileStatus {
@@ -31,6 +37,7 @@ impl FileStatus {
             FileStatus::Clean => "\u{2714}",    // ✔
             FileStatus::HasNotes => "\u{29d6}", // ⧖
             FileStatus::Flagged => "\u{2717}",  // ✗
+            FileStatus::Stale => "\u{26a0}",    // ⚠
         }
     }
 
@@ -39,6 +46,7 @@ impl FileStatus {
             FileStatus::Clean => GREEN,
             FileStatus::HasNotes => ORANGE,
             FileStatus::Flagged => RED,
+            FileStatus::Stale => ORANGE,
         }
     }
 }

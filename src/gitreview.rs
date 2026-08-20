@@ -4,7 +4,8 @@
 //! git repository at all; inside a real repo with a clean tree this reports
 //! an honest empty changeset rather than silently substituting fake content.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use crate::data::{self, CurationFile, DiffLine, DiffLineKind, FileEntry, Hunk, Project};
@@ -44,6 +45,21 @@ fn git(root: &Path, args: &[&str]) -> Option<Output> {
 
 pub fn is_git_repo(root: &Path) -> bool {
     git(root, &["rev-parse", "--is-inside-work-tree"]).map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Absolute paths under `root` that Git ignores — files and whole
+/// directories, matched the same way `git status` would (`.gitignore`,
+/// nested `.gitignore`s, global excludes, ...). `--directory` reports an
+/// ignored directory as one entry (`build/`) instead of walking in and
+/// listing every file inside it — exactly what a caller skipping whole
+/// subtrees during a filesystem walk wants, and far cheaper for something
+/// like a large `target/` or `node_modules/`. Empty (not an error) outside
+/// a git repo, so callers can use this unconditionally.
+pub fn ignored_paths(root: &Path) -> HashSet<PathBuf> {
+    let Some(listing) = git(root, &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"]) else {
+        return HashSet::new();
+    };
+    String::from_utf8_lossy(&listing.stdout).lines().filter(|l| !l.is_empty()).map(|rel| root.join(rel.trim_end_matches('/'))).collect()
 }
 
 /// Diffs against HEAD (staged + unstaged) when a commit exists; otherwise
@@ -712,6 +728,29 @@ index 111..222 100644
         let mut paths: Vec<&str> = review.project.files.iter().map(|f| f.path.as_str()).collect();
         paths.sort();
         assert_eq!(paths, vec!["tracked.txt", "untracked.txt"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ignored_paths_covers_ignored_files_and_whole_directories_but_not_tracked_ones() {
+        let dir = scratch_repo("ignored-paths");
+        fs::write(dir.join(".gitignore"), "*.log\n/scratch/\n").unwrap();
+        fs::write(dir.join("keep.txt"), "a\n").unwrap();
+        fs::write(dir.join("debug.log"), "noise\n").unwrap();
+        fs::create_dir_all(dir.join("scratch")).unwrap();
+        fs::write(dir.join("scratch/temp.md"), "noise\n").unwrap();
+        run(&dir, &["add", "keep.txt", ".gitignore"]);
+        run(&dir, &["commit", "-q", "-m", "init"]);
+
+        let ignored = ignored_paths(&dir);
+        assert!(ignored.contains(&dir.join("debug.log")), "{ignored:?}");
+        // Reported as the directory itself, not each file inside it — a
+        // caller skipping whole subtrees during a walk needs exactly that.
+        assert!(ignored.contains(&dir.join("scratch")), "{ignored:?}");
+        assert!(!ignored.contains(&dir.join("scratch/temp.md")), "{ignored:?}");
+        assert!(!ignored.contains(&dir.join("keep.txt")), "{ignored:?}");
+        assert!(!ignored.contains(&dir.join(".gitignore")), "{ignored:?}");
 
         let _ = fs::remove_dir_all(&dir);
     }
