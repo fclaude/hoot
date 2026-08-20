@@ -229,6 +229,18 @@ fn run(
         }
 
         if app.should_quit {
+            // Every quit path lands here — not each individual keypress
+            // that can set should_quit (q, Ctrl+C, the confirmation
+            // dialog's Enter/q) — so a running turn's process (and
+            // anything it itself spawned; see cancel_agent_turn) always
+            // gets killed on the way out. Without this, quitting mid-turn
+            // just orphaned the real pi/opencode subprocess: nothing kills
+            // a child a Rust process spawned when that process exits, so
+            // it kept running — reading and writing the repo — with no UI
+            // left to show it was still happening.
+            if app.agent_running {
+                app.cancel_agent_turn();
+            }
             return Ok(());
         }
     }

@@ -19,6 +19,7 @@
 //! tools — they have no bearing on this.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -68,7 +69,13 @@ pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) 
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::piped());
+        .stdin(Stdio::piped())
+        // Its own process group (pgid = its own pid), not hoot's — a tool
+        // call `pi` runs (a shell command, a linter, a test suite, ...)
+        // inherits that same group by default, so cancelling the turn can
+        // signal the whole group at once instead of leaving grandchildren
+        // behind as orphans still running after "Cancelled." shows.
+        .process_group(0);
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");

@@ -11,7 +11,7 @@
 //! staging too, since there's no `-- a/path`/`-- b/path` pair to patch
 //! against.
 //!
-//! Before any of that staging happens, two guards run in order:
+//! Before any of that staging happens, three guards run in order:
 //!
 //! 1. Nothing selected at all → bail out before touching git. Checked
 //!    first so a no-op commit attempt is actually a no-op, not a mutation
@@ -27,6 +27,18 @@
 //!    telling the user to resolve it themselves (`git status`) is the
 //!    honest option: hoot only ever mutates an index it knows started
 //!    clean.
+//! 3. Every selected file's hunks are re-fetched from disk and compared
+//!    against what `project` (Curate's last synced view) has, right here
+//!    — not trusted from whenever the caller last polled. `project` can be
+//!    a poll tick or more stale: a background agent turn or an external
+//!    edit can change a selected file between when the user looked at it
+//!    in Curate and when they press `c`. Staging from stale hunk data
+//!    would mean `git add`ing whatever the file *currently* contains
+//!    (not what was reviewed) for a whole-file selection, or handing a
+//!    patch built from old line content to `git apply --cached` for a
+//!    partial one — best case that errors, worst case it silently commits
+//!    content nobody actually looked at. Refuse and ask for a re-review
+//!    rather than gamble on which case it is.
 
 use std::io::Write;
 use std::path::Path;
@@ -45,6 +57,18 @@ pub fn commit(root: &Path, project: &Project, curation_files: &[CurationFile], m
         return Err(
             "there are changes already staged outside hoot (see `git status`) — resolve or unstage those first, then try again".to_string()
         );
+    }
+
+    let current = crate::gitreview::diff_files(root);
+    for cf in curation_files {
+        if cf.selected() == 0 {
+            continue;
+        }
+        let reviewed = project.files.iter().find(|f| f.path == cf.path).map(|f| &f.hunks);
+        let now = current.iter().find(|f| f.path == cf.path).map(|f| &f.hunks);
+        if reviewed != now {
+            return Err(format!("{} changed since it was last reviewed here \u{2014} re-open Curate and check it again", cf.path));
+        }
     }
 
     let mut staged_any = false;
@@ -325,6 +349,42 @@ mod tests {
 
         let staged_after = Command::new("git").args(["diff", "--cached"]).current_dir(&dir).output().unwrap().stdout;
         assert_eq!(staged_before, staged_after, "an already-staged file must survive a no-op commit attempt untouched");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_to_commit_a_file_that_changed_since_it_was_last_reviewed() {
+        // Regression: `project`/`curation_files` are whatever Curate last
+        // synced — a poll tick or more stale by the time the user actually
+        // presses `c`. A background agent turn or an external edit landing
+        // on a selected file in that window used to be invisible to
+        // commit(): it staged whatever the file *currently* contained (or
+        // handed git apply a patch built from now-outdated line content),
+        // not what was actually reviewed.
+        let dir = scratch_repo("stale-review");
+        fs::write(dir.join("f.txt"), "line1\nline2\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+        fs::write(dir.join("f.txt"), "line1-changed\nline2\n").unwrap();
+
+        let (project, cfs) = project_and_curation(&dir);
+        assert_eq!(cfs[0].selected(), cfs[0].total());
+
+        // The file changes again *after* Curate synced — simulating a
+        // background agent turn or an external edit landing in the gap
+        // before the user actually presses `c`.
+        fs::write(dir.join("f.txt"), "line1-changed\nline2-changed-too\n").unwrap();
+
+        let err = commit(&dir, &project, &cfs, "should be refused").unwrap_err();
+        assert!(err.contains("f.txt"), "{err}");
+        assert!(err.contains("changed since"), "{err}");
+
+        // Nothing should have been staged or committed.
+        let log = Command::new("git").args(["log", "--oneline"]).current_dir(&dir).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 1, "no new commit should have landed");
+        let staged = Command::new("git").args(["diff", "--cached"]).current_dir(&dir).output().unwrap().stdout;
+        assert!(staged.is_empty(), "nothing should have been staged: {}", String::from_utf8_lossy(&staged));
 
         let _ = fs::remove_dir_all(&dir);
     }

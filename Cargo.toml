@@ -2,7 +2,7 @@
 name = "hoot"
 version = "0.1.0"
 edition = "2021"
-description = "A terminal UI for reviewing a git working tree alongside the pi coding agent"
+description = "A terminal UI for reviewing a git working tree alongside an AI coding agent (opencode or pi)"
 license = "MIT"
 repository = "https://github.com/fclaude/hoot"
 readme = "README.md"
@@ -15,14 +15,17 @@ serde_json = "1"
 toml = "0.8"
 tempfile = "3"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Built with `cargo install cargo-deb` + `cargo deb`. See packaging/README.md.
 [package.metadata.deb]
 maintainer = "Francisco Claude-Faust <fclaude@recoded.cl>"
 copyright = "2026, Francisco Claude-Faust <fclaude@recoded.cl>"
 extended-description = """\
-A terminal UI for reviewing a git working tree while steering the pi \
-coding agent inside it: see what changed, chat with the agent, and pick \
-exactly which hunks go into a commit."""
+A terminal UI for reviewing a git working tree alongside an AI coding \
+agent (opencode by default, or pi): see what changed, chat with the \
+agent, and pick exactly which hunks go into a commit."""
 depends = "$auto, git"
 section = "utils"
 priority = "optional"

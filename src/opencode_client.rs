@@ -35,6 +35,7 @@
 //! backend either, and doesn't risk the OS's argument-length limit.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -87,6 +88,12 @@ pub fn spawn(prompt: &str, cwd: &Path, session_id: Option<&str>, tools: ToolProf
         cmd.arg("--session").arg(id);
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+    // Its own process group (pgid = its own pid), not hoot's — a tool call
+    // opencode runs (a shell command, a linter, a test suite, ...)
+    // inherits that same group by default, so cancelling the turn can
+    // signal the whole group at once instead of leaving grandchildren
+    // behind as orphans still running after "Cancelled." shows.
+    cmd.process_group(0);
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
