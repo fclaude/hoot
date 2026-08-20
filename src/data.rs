@@ -15,19 +15,26 @@ pub enum DiffLineKind {
 pub struct DiffLine {
     pub kind: DiffLineKind,
     pub text: String,
+    /// True if the diff this was parsed from marked this line with a
+    /// trailing `\ No newline at end of file` — i.e. this line is the last
+    /// one in its file (old or new side) and that file doesn't end in a
+    /// newline. Metadata on the line rather than a line of its own so
+    /// staging/rendering code doesn't need a fifth `DiffLineKind` it must
+    /// otherwise special-case everywhere `kind` is matched exhaustively.
+    pub no_newline: bool,
 }
 
 fn ctx(text: &str) -> DiffLine {
-    DiffLine { kind: DiffLineKind::Context, text: text.to_string() }
+    DiffLine { kind: DiffLineKind::Context, text: text.to_string(), no_newline: false }
 }
 fn add(text: &str) -> DiffLine {
-    DiffLine { kind: DiffLineKind::Added, text: text.to_string() }
+    DiffLine { kind: DiffLineKind::Added, text: text.to_string(), no_newline: false }
 }
 fn rem(text: &str) -> DiffLine {
-    DiffLine { kind: DiffLineKind::Removed, text: text.to_string() }
+    DiffLine { kind: DiffLineKind::Removed, text: text.to_string(), no_newline: false }
 }
 fn hdr(text: &str) -> DiffLine {
-    DiffLine { kind: DiffLineKind::HunkHeader, text: text.to_string() }
+    DiffLine { kind: DiffLineKind::HunkHeader, text: text.to_string(), no_newline: false }
 }
 
 #[derive(Clone, PartialEq)]
@@ -138,7 +145,7 @@ pub fn focus_diff_lines(lines: &[(Option<usize>, DiffLine)], context: usize) -> 
             }
             let n = i - start;
             let text = format!("\u{22ef} {n} unchanged line{} \u{22ef}", if n == 1 { "" } else { "s" });
-            out.push((None, DiffLine { kind: DiffLineKind::HunkHeader, text }));
+            out.push((None, DiffLine { kind: DiffLineKind::HunkHeader, text, no_newline: false }));
         }
     }
     out

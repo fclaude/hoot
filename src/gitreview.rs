@@ -275,8 +275,24 @@ fn parse_unified_diff(diff: &str) -> Vec<FileEntry> {
             if let Some(f) = current.as_mut() {
                 flush_hunk(f, &mut current_hunk);
             }
-            current_hunk = Some(Hunk { lines: vec![DiffLine { kind: DiffLineKind::HunkHeader, text: line.to_string() }], note: None });
+            current_hunk = Some(Hunk {
+                lines: vec![DiffLine { kind: DiffLineKind::HunkHeader, text: line.to_string(), no_newline: false }],
+                note: None,
+            });
         } else if let Some(h) = current_hunk.as_mut() {
+            if line.starts_with("\\ No newline at end of file") {
+                // Applies to the line immediately above it, not a content
+                // line of its own — recorded as metadata on that line so
+                // `stage_partial_hunks` can re-emit it verbatim when only
+                // some hunks of a file are staged. Dropping it outright (the
+                // old behavior) silently produced a patch `git apply`
+                // rejects whenever the affected line falls inside a
+                // selected hunk.
+                if let Some(last) = h.lines.last_mut() {
+                    last.no_newline = true;
+                }
+                continue;
+            }
             let kind = if line.starts_with('+') && !line.starts_with("+++") {
                 DiffLineKind::Added
             } else if line.starts_with('-') && !line.starts_with("---") {
@@ -284,9 +300,9 @@ fn parse_unified_diff(diff: &str) -> Vec<FileEntry> {
             } else if line.starts_with(' ') {
                 DiffLineKind::Context
             } else {
-                continue; // e.g. "\ No newline at end of file"
+                continue;
             };
-            h.lines.push(DiffLine { kind, text: line.to_string() });
+            h.lines.push(DiffLine { kind, text: line.to_string(), no_newline: false });
         }
     }
     flush_file(&mut files, &mut current, &mut current_hunk, &mut unsupported_reason);

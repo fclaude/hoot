@@ -84,7 +84,40 @@ fn visible_child_count(dir: &Path, ignored: &HashSet<PathBuf>) -> u32 {
         .count() as u32
 }
 
+/// Files larger than this are shown as a placeholder instead of being read
+/// in full — same reasoning and same limit as `gitreview.rs`'s
+/// `MAX_SYNTHETIC_DIFF_SIZE`: this guards a poll-tick-driven read against a
+/// pathologically large file, not just a one-off open.
+const MAX_READABLE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+
+/// Reads `path` for display in the tree/content pane.
+///
+/// Uses `symlink_metadata`, not `metadata`/`fs::read_to_string` directly —
+/// both follow symlinks, so a symlink pointing outside the repo (planted by
+/// whatever produced the tree being reviewed, same threat `gitreview.rs`'s
+/// `synthetic_new_file_diff` defends against for untracked files) would
+/// otherwise silently display an arbitrary external file's content. Shown
+/// as its target path text instead, matching how git itself displays a
+/// symlink. Anything that isn't a symlink or a regular file (a FIFO,
+/// socket, device node, ...) is skipped outright rather than read — opening
+/// one can block indefinitely, and this runs on every poll tick as well as
+/// on open, so a hang here would freeze the whole single-threaded event
+/// loop with no way to recover short of an external kill.
 pub fn read_file(path: &Path) -> Vec<String> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) => return vec![format!("(couldn't read {}: {e})", path.display())],
+    };
+    if meta.is_symlink() {
+        let target = fs::read_link(path).map(|p| p.display().to_string()).unwrap_or_default();
+        return vec![format!("(symlink -> {target})")];
+    }
+    if !meta.is_file() {
+        return vec![format!("({} is not a regular file)", path.display())];
+    }
+    if meta.len() > MAX_READABLE_SIZE {
+        return vec!["(file too large to display)".to_string()];
+    }
     match fs::read_to_string(path) {
         Ok(content) => content.lines().take(4000).map(|l| l.to_string()).collect(),
         Err(e) => vec![format!("(couldn't read {}: {e})", path.display())],
@@ -398,5 +431,72 @@ mod tests {
         assert!(!fuzzy_match("srn", "main.rs")); // right letters, wrong order
         assert!(!fuzzy_match("xyz", "main.rs"));
         assert!(!fuzzy_match("main.rs.extra", "main.rs")); // needle longer than haystack
+    }
+
+    #[test]
+    fn read_file_returns_a_regular_files_content() {
+        let dir = scratch_dir("read-regular");
+        let path = dir.join("f.txt");
+        fs::write(&path, "line1\nline2\n").unwrap();
+        assert_eq!(read_file(&path), vec!["line1".to_string(), "line2".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_file_shows_a_symlinks_target_path_not_the_targets_content() {
+        // Regression: read_file used to call fs::read_to_string directly,
+        // which follows symlinks — a symlink pointing outside the reviewed
+        // directory (planted deliberately, or just an absolute symlink left
+        // by some tool) would silently display an arbitrary external
+        // file's content in the tree/content pane. Mirrors the same defense
+        // gitreview.rs's synthetic_new_file_diff already has for untracked
+        // symlinks in a real diff.
+        let dir = scratch_dir("read-symlink");
+        let outside = dir.join("outside.txt");
+        fs::write(&outside, "TOP_SECRET_SHOULD_NEVER_APPEAR").unwrap();
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let lines = read_file(&link);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains(&outside.display().to_string()), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("TOP_SECRET")), "target content leaked: {lines:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_file_skips_a_fifo_instead_of_blocking() {
+        // Regression: with no file-type guard at all, opening a FIFO
+        // blocked the read forever — and since fsnav::read_file runs on
+        // every poll tick as well as on open, that froze the entire
+        // single-threaded event loop with no way to recover short of an
+        // external kill. A FIFO with no reader ever attached (as here)
+        // would hang this test indefinitely on the old code instead of
+        // just failing it.
+        let dir = scratch_dir("read-fifo");
+        let fifo = dir.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo failed");
+
+        let lines = read_file(&fifo);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("not a regular file"), "{lines:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_file_caps_an_oversized_file_instead_of_reading_it_in_full() {
+        let dir = scratch_dir("read-oversized");
+        let path = dir.join("big.txt");
+        {
+            let f = fs::File::create(&path).unwrap();
+            f.set_len(MAX_READABLE_SIZE + 1).unwrap();
+        }
+        let lines = read_file(&path);
+        assert_eq!(lines, vec!["(file too large to display)".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

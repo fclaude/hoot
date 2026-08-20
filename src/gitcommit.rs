@@ -42,6 +42,13 @@
 //!    case that errors, worst case it silently commits content nobody
 //!    actually looked at. Refuse and ask for a re-review rather than
 //!    gamble on which case it is.
+//!
+//! A staging failure partway through a multi-file batch (file 2 of 3 fails
+//! `git apply`, say) unstages everything this call staged before returning
+//! the error — otherwise a retry would hit guard 2 above with a message
+//! ("staged outside hoot") that's simply false for content hoot itself just
+//! staged, and the user would be stuck manually unstaging before they could
+//! even try again.
 
 use std::io::Write;
 use std::path::Path;
@@ -63,6 +70,12 @@ pub fn commit(root: &Path, project: &Project, curation_files: &[CurationFile], m
     }
 
     let mut staged_any = false;
+    // Paths this call has staged so far, so a failure partway through a
+    // multi-file commit can unstage exactly what *it* just added rather
+    // than leaving the index in a state where a retry hits the "already
+    // staged outside hoot" guard above — which would be actively wrong: the
+    // reason it's staged is this function, not something outside hoot.
+    let mut staged_paths: Vec<&str> = Vec::new();
     for cf in curation_files {
         if cf.selected() == 0 {
             continue;
@@ -84,14 +97,20 @@ pub fn commit(root: &Path, project: &Project, curation_files: &[CurationFile], m
         let current = crate::gitreview::diff_files(root);
         let now = current.iter().find(|f| f.path == cf.path).map(|f| &f.hunks);
         if now != Some(&file.hunks) {
+            unstage(root, &staged_paths);
             return Err(format!("{} changed since it was last reviewed here \u{2014} re-open Curate and check it again", cf.path));
         }
 
-        if cf.selected() == cf.total() {
-            stage_whole_file(root, &cf.path)?;
+        let staged = if cf.selected() == cf.total() {
+            stage_whole_file(root, &cf.path)
         } else {
-            stage_partial_hunks(root, &cf.path, &file.hunks, &cf.hunk_selected)?;
+            stage_partial_hunks(root, &cf.path, &file.hunks, &cf.hunk_selected)
+        };
+        if let Err(e) = staged {
+            unstage(root, &staged_paths);
+            return Err(e);
         }
+        staged_paths.push(&cf.path);
         staged_any = true;
     }
 
@@ -100,6 +119,23 @@ pub fn commit(root: &Path, project: &Project, curation_files: &[CurationFile], m
     }
 
     run_commit(root, message)
+}
+
+/// Best-effort: unstages exactly `paths` (never a blanket reset) so a
+/// failure partway through `commit` leaves the index as clean as it found
+/// it. Guard #2 above already refused to run at all if the index had
+/// anything staged before this call started, so at the point this is
+/// called the index can only contain what this call itself staged. Errors
+/// are swallowed — this only ever runs while already unwinding a real
+/// error, and there's nothing more useful to do with a second one than
+/// leave the affected paths staged for the user to sort out by hand.
+fn unstage(root: &Path, paths: &[&str]) {
+    if paths.is_empty() {
+        return;
+    }
+    let mut args = vec!["reset", "-q", "--"];
+    args.extend(paths.iter().copied());
+    let _ = run_git(root, &args);
 }
 
 fn run_git(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
@@ -152,6 +188,12 @@ fn stage_partial_hunks(root: &Path, path: &str, hunks: &[crate::data::Hunk], hun
         for line in &hunk.lines {
             patch.push_str(&line.text);
             patch.push('\n');
+            // Re-emit the marker `parse_unified_diff` pulled off this line
+            // as metadata — `git apply` rejects a patch that's missing it
+            // whenever the line it belongs to falls inside the selection.
+            if line.no_newline {
+                patch.push_str("\\ No newline at end of file\n");
+            }
         }
     }
     if !any {
@@ -435,6 +477,115 @@ mod tests {
 
         let log = Command::new("git").args(["log", "--oneline"]).current_dir(&dir).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 1, "no new commit should have landed");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staleness_failure_partway_through_a_multi_file_commit_unstages_what_it_added() {
+        // Regression for a real bug: a.txt is staged first in the loop,
+        // then b.txt fails its per-file freshness check (same setup as
+        // `a_multi_file_commit_still_catches_staleness_on_a_later_file`).
+        // Before the fix, a.txt stayed staged after the error return — a
+        // retry would then hit guard 2 ("already staged outside hoot"),
+        // which is simply false: hoot staged it, moments ago, in this same
+        // call. Confirms both halves: the index is clean immediately after
+        // the failed call, and a retry actually succeeds instead of
+        // tripping that guard.
+        let dir = scratch_repo("staleness-rollback");
+        fs::write(dir.join("a.txt"), "a1\na2\n").unwrap();
+        fs::write(dir.join("b.txt"), "b1\nb2\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+        fs::write(dir.join("a.txt"), "a1-changed\na2\n").unwrap();
+        fs::write(dir.join("b.txt"), "b1-changed\nb2\n").unwrap();
+
+        let (project, cfs) = project_and_curation(&dir);
+        assert_eq!(cfs.len(), 2);
+        assert_eq!(cfs[1].path, "b.txt", "b.txt should be second in iteration order, after a.txt is staged");
+
+        fs::write(dir.join("b.txt"), "b1-changed\nb2-changed-too\n").unwrap();
+
+        let err = commit(&dir, &project, &cfs, "should be refused").unwrap_err();
+        assert!(err.contains("b.txt"), "{err}");
+
+        assert!(!index_has_staged_changes(&dir).unwrap(), "a.txt should have been unstaged along with the failed attempt");
+        let status = Command::new("git").args(["status", "--short", "a.txt"]).current_dir(&dir).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout), " M a.txt\n", "a.txt should show as modified-but-unstaged");
+
+        // Retrying with just a.txt must not hit the "already staged
+        // outside hoot" guard — that would mean the rollback above didn't
+        // actually happen.
+        let (project2, cfs2) = project_and_curation(&dir);
+        let a_only: Vec<CurationFile> = cfs2.into_iter().filter(|cf| cf.path == "a.txt").collect();
+        let summary = commit(&dir, &project2, &a_only, "Fix a.txt").unwrap();
+        assert!(summary.contains("Fix a.txt"), "{summary}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unstage_reverses_exactly_the_given_paths() {
+        // Direct test of the rollback primitive itself: stages two real
+        // files, unstages only one by path, and confirms the other is left
+        // exactly as staged — `unstage` must never touch more than what
+        // it's told to.
+        let dir = scratch_repo("unstage-helper");
+        fs::write(dir.join("a.txt"), "a1\n").unwrap();
+        fs::write(dir.join("b.txt"), "b1\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+        fs::write(dir.join("a.txt"), "a1-changed\n").unwrap();
+        fs::write(dir.join("b.txt"), "b1-changed\n").unwrap();
+
+        stage_whole_file(&dir, "a.txt").unwrap();
+        stage_whole_file(&dir, "b.txt").unwrap();
+        assert!(index_has_staged_changes(&dir).unwrap());
+
+        unstage(&dir, &["a.txt"]);
+
+        let status = Command::new("git").args(["status", "--short"]).current_dir(&dir).output().unwrap();
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(status.contains(" M a.txt"), "a.txt should be unstaged: {status}");
+        assert!(status.contains("M  b.txt"), "b.txt should remain staged: {status}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn partial_hunk_commit_on_a_file_with_no_trailing_newline_applies_cleanly() {
+        // Regression: `parse_unified_diff` used to drop the
+        // "\ No newline at end of file" marker entirely instead of
+        // recording it on the line it belongs to. Reconstructing a patch
+        // from only the selected hunks' `DiffLine`s then produced text
+        // `git apply --cached` rejected outright for any file lacking a
+        // trailing newline — exactly the kind of file this repo itself
+        // has plenty of (README.md, source files edited by hand, ...).
+        let dir = scratch_repo("no-trailing-newline");
+        let original: String = (1..=20).map(|n| format!("line{n}")).collect::<Vec<_>>().join("\n");
+        fs::write(dir.join("f.txt"), &original).unwrap(); // no trailing newline
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+
+        // Two far-apart changes -> two hunks; the second one touches the
+        // file's last line, which is where the no-newline marker attaches.
+        let mut lines: Vec<String> = (1..=20).map(|n| format!("line{n}")).collect();
+        lines[0] = "line1-CHANGED".to_string();
+        lines[19] = "line20-CHANGED".to_string();
+        fs::write(dir.join("f.txt"), lines.join("\n")).unwrap(); // still no trailing newline
+
+        let (project, mut cfs) = project_and_curation(&dir);
+        assert_eq!(cfs[0].total(), 2, "expected two separate hunks");
+        cfs[0].hunk_selected[0] = false;
+        cfs[0].hunk_selected[1] = true; // select only the hunk touching the no-newline line
+
+        let summary = commit(&dir, &project, &cfs, "Fix line20 only");
+        assert!(summary.is_ok(), "git apply should accept the reconstructed patch: {summary:?}");
+
+        let log = Command::new("git").args(["show", "HEAD:f.txt"]).current_dir(&dir).output().unwrap();
+        let committed = String::from_utf8_lossy(&log.stdout);
+        assert!(committed.ends_with("line20-CHANGED"), "{committed}");
+        assert!(!committed.ends_with('\n'), "committed content should still have no trailing newline: {committed:?}");
 
         let _ = fs::remove_dir_all(&dir);
     }

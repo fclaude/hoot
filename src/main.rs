@@ -187,6 +187,21 @@ fn main() -> io::Result<()> {
         eprintln!("(continuing with defaults for the above)");
     }
 
+    // A panic anywhere after this point would otherwise unwind straight past
+    // the `disable_raw_mode`/`LeaveAlternateScreen`/`show_cursor` cleanup at
+    // the bottom of this function, leaving the terminal in raw mode with no
+    // visible echo and the panic message itself swallowed into the alternate
+    // screen — the user's left staring at a dead prompt with no indication
+    // anything went wrong, and no way out short of blindly typing `reset`.
+    // Best-effort restore the terminal before handing off to the default
+    // hook so the panic message actually reaches a normal, readable screen.
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        default_panic_hook(info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;

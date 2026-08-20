@@ -135,8 +135,11 @@ pub struct App {
     /// a plain `fs::write`. Kept alive in `App` so it's deleted on drop —
     /// i.e. cleaned up when hoot exits — instead of accumulating in
     /// `/tmp` (or `$TMPDIR`) forever. Only used when `agent_backend` is
-    /// `Pi`.
-    pub session_file: tempfile::NamedTempFile,
+    /// `Pi`, and created lazily on the first pi turn (see
+    /// `ensure_session_file`) rather than unconditionally in `App::new` —
+    /// a full or read-only `$TMPDIR` would otherwise fail every launch,
+    /// including for opencode users who never touch this field at all.
+    pub session_file: Option<tempfile::NamedTempFile>,
     /// opencode's equivalent of `session_file`, except it can't be decided
     /// upfront — opencode assigns this itself and only hands it back after
     /// the first turn runs (`AgentEvent::Session`), so it starts `None` and
@@ -298,11 +301,7 @@ impl App {
 
             target_dir,
             agent_backend,
-            session_file: tempfile::Builder::new()
-                .prefix("hoot-session-")
-                .suffix(".jsonl")
-                .tempfile()
-                .expect("couldn't create a temp file for the pi session"),
+            session_file: None,
             opencode_session_id: None,
             transcript: Vec::new(),
             agent_input: String::new(),
@@ -606,6 +605,15 @@ impl App {
         self.spawn_turn_now(prompt, cwd, tools, purpose);
     }
 
+    /// Creates `session_file` on first use rather than in `App::new` — see
+    /// the field's doc comment — and returns its path either way.
+    fn ensure_session_file(&mut self) -> std::io::Result<PathBuf> {
+        if self.session_file.is_none() {
+            self.session_file = Some(tempfile::Builder::new().prefix("hoot-session-").suffix(".jsonl").tempfile()?);
+        }
+        Ok(self.session_file.as_ref().expect("just set").path().to_path_buf())
+    }
+
     fn spawn_turn_now(&mut self, prompt: String, cwd: PathBuf, tools: ToolProfile, purpose: TurnPurpose) {
         self.agent_purpose = purpose;
         self.agent_model_live = None;
@@ -618,7 +626,10 @@ impl App {
         }
 
         let result = match self.agent_backend {
-            AgentBackend::Pi => pi_client::spawn(&prompt, &cwd, self.session_file.path(), tools),
+            AgentBackend::Pi => match self.ensure_session_file() {
+                Ok(path) => pi_client::spawn(&prompt, &cwd, &path, tools),
+                Err(e) => Err(e),
+            },
             AgentBackend::OpenCode => opencode_client::spawn(&prompt, &cwd, self.opencode_session_id.as_deref(), tools),
         };
         match result {

@@ -67,6 +67,19 @@ impl AgentSession {
     #[cfg_attr(unix, allow(unused_mut))]
     pub fn cancel(&self) {
         if let Ok(mut child) = self.child.lock() {
+            // If the backend's own reader thread already reaped this child
+            // (the turn finished naturally at almost the same moment this
+            // was called), its pid may have already been reused by the OS
+            // for an unrelated process by the time the signals below fire.
+            // try_wait() only tells us what this Child already knows, so it
+            // can't close the race entirely — the pid could still be
+            // reused in the instant between this check and the kill calls
+            // — but it collapses the window from "arbitrarily long" (until
+            // something notices the turn ended) to a handful of
+            // instructions, for free.
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
             #[cfg(unix)]
             {
                 let pid = child.id() as i32;
@@ -316,5 +329,29 @@ mod tests {
 
         assert!(!alive(root_pid), "pid {root_pid} (sh) should no longer exist after cancel()");
         assert!(!alive(grandchild_pid), "pid {grandchild_pid} (sleep, sh's child) should no longer exist after cancel()");
+    }
+
+    #[test]
+    fn cancel_on_an_already_reaped_child_does_not_signal_the_now_stale_pid() {
+        // Regression (Low severity): cancel() used to always sig the pid
+        // from child.id(), with no check for whether the process behind
+        // that pid had already exited and been reaped — e.g. by the
+        // backend's own reader thread finishing a turn naturally at almost
+        // the same moment cancel() runs. A reaped pid can be reused by the
+        // OS for an unrelated process; signaling it then hits that
+        // process's group instead. try_wait() closes the overwhelming
+        // majority of that window by skipping the signal entirely once
+        // this Child already knows it's gone. Exercises the exact ordering
+        // that used to be racy: wait() completes (simulating the reader
+        // thread) strictly before cancel() runs, so this always takes the
+        // early-return path, not just possibly.
+        let (tx, rx) = std::sync::mpsc::channel::<AgentEvent>();
+        let mut child = std::process::Command::new("true").spawn().expect("spawn true");
+        child.wait().expect("wait for `true` to exit"); // reaped before cancel() ever runs
+        let child = Arc::new(Mutex::new(child));
+        let session = AgentSession::new(rx, child);
+
+        session.cancel(); // must return promptly without panicking or blocking
+        drop(tx);
     }
 }

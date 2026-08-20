@@ -2,7 +2,7 @@
 
 A terminal UI I use for reviewing a git working tree alongside a coding agent — [opencode](https://opencode.ai) by default, or [pi](https://github.com/earendil-works/pi) if you prefer it — built with [ratatui](https://ratatui.rs).
 
-One screen, three modes: look at what changed, pick exactly which hunks go into a commit, and — optionally — chat with an agent. It's a personal tool, not a polished product — expect rough edges.
+One screen, three modes: look at what changed, pick exactly which hunks go into a commit, and — optionally — chat with an agent. Review is where the review/curate loop actually pays off: leave line-anchored notes on the diff, then `y` copies them as a structured prompt to your clipboard — useful even if you don't run opencode or pi at all, e.g. pasting into a browser-based agent instead. It's a personal tool, not a polished product — expect rough edges.
 
 ## Requirements
 
