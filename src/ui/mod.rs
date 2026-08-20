@@ -85,16 +85,29 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
         _ => String::new(),
     };
 
-    let mid_gap = area.width as usize;
-    let used = left.len() + center.len() + right.len() + 2;
-    let pad = mid_gap.saturating_sub(used);
-    let left_pad = pad / 2;
-    let right_pad = pad - left_pad;
+    let (left_pad, right_pad) = status_line_padding(area.width as usize, &left, &center, &right);
 
     let text = format!("{left}{:lw$}{center}{:rw$}{right} ", "", "", lw = left_pad, rw = right_pad);
 
     let para = Paragraph::new(text).style(Style::default().bg(theme::BG_SELECTION).fg(theme::FG));
     f.render_widget(para, area);
+}
+
+/// Splits `mid_gap` columns of padding between `left`/`right`, whatever's
+/// left over after `left` + `center` + `right` themselves. Uses display
+/// width (`unicode_width`), not byte length — a project name or file path
+/// with CJK characters or other wide glyphs has more UTF-8 bytes per
+/// column than plain ASCII, and sizing the gap off byte count would
+/// overcount how much room the text actually needs, unevenly shrinking or
+/// (via `saturating_sub`) fully collapsing the padding well before the
+/// line is actually full. Cosmetic only — nothing panics either way — but
+/// wrong regardless.
+fn status_line_padding(mid_gap: usize, left: &str, center: &str, right: &str) -> (usize, usize) {
+    use unicode_width::UnicodeWidthStr;
+    let used = left.width() + center.width() + right.width() + 2;
+    let pad = mid_gap.saturating_sub(used);
+    let left_pad = pad / 2;
+    (left_pad, pad - left_pad)
 }
 
 /// Bold key glyph + dim action label, per the design system's key-hint grammar.
@@ -338,6 +351,20 @@ mod tests {
     fn expand_tabs_for_display_leaves_tab_free_text_untouched() {
         assert_eq!(expand_tabs_for_display("no tabs here"), "no tabs here");
         assert_eq!(expand_tabs_for_display(""), "");
+    }
+
+    #[test]
+    fn status_line_padding_accounts_for_wide_characters() {
+        // Regression: sizing the gap off byte length instead of display
+        // width overcounts a project name (or file path) with CJK
+        // characters — "中" is 3 bytes but occupies 2 terminal columns —
+        // so a byte-based `used` here would come out to 19 (15 for
+        // "中中中中中" + 1 + 1 + 2), leaving only 1 column of padding to
+        // split for a 20-column line that, by actual display width, has
+        // room for 6. The old logic would return (0, 1); this checks the
+        // real, display-width-correct split instead.
+        let (left_pad, right_pad) = status_line_padding(20, "中中中中中", "c", "r");
+        assert_eq!((left_pad, right_pad), (3, 3));
     }
 
     use std::process::Command;
