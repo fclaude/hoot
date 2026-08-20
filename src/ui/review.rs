@@ -169,7 +169,7 @@ fn draw_content(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
         Some(idx) => {
             let file = &app.project.files[idx];
             if app.split_diff {
-                draw_diff_split(f, area, file);
+                draw_diff_split(f, app, area, file);
             } else {
                 draw_diff_scrollable(f, app, area, file, narrow);
             }
@@ -201,7 +201,7 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
         ContentView::Context => "Focused",
         ContentView::Focused => "Context",
     };
-    let hints = if narrow {
+    let mut hints = if narrow {
         vec![super::key_hints(&[("c", "Comment"), ("v", view_toggle_label)]), super::key_hints(&[("i", "Iterate"), ("y", "Copy prompt")])]
     } else {
         vec![
@@ -223,6 +223,11 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
             ]),
         ]
     };
+    // A turn started from Agent keeps running in the background if you
+    // switch here to look something up — Esc still reaches it.
+    if app.agent_running {
+        hints.push(super::key_hints(&[("Esc", "Cancel agent turn")]));
+    }
 
     let block = super::panel_block(&title).border_style(Style::default().fg(if focused { theme::CYAN } else { theme::DIM }));
     let inner = block.inner(area);
@@ -263,7 +268,7 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
     f.render_widget(Paragraph::new(hints), rows[2]);
 }
 
-fn draw_diff_split(f: &mut Frame, area: Rect, file: &FileEntry) {
+fn draw_diff_split(f: &mut Frame, app: &App, area: Rect, file: &FileEntry) {
     let title = format!("{} \u{2014} before / after", file.path);
 
     let mut before: Vec<Line<'static>> = Vec::new();
@@ -290,13 +295,23 @@ fn draw_diff_split(f: &mut Frame, area: Rect, file: &FileEntry) {
         after.resize(max, Line::raw(""));
     }
 
+    let mut hints = vec![
+        super::key_hints(&[("c", "Comment"), ("g", "Mark good"), ("x", "Flag rework"), ("d/D", "Clear file/all notes"), ("u", "Unified")]),
+        super::key_hints(&[("i", "Review notes \u{2192} send to agent"), ("y", "Copy prompt")]),
+    ];
+    // A turn started from Agent keeps running in the background if you
+    // switch here to look something up — Esc still reaches it.
+    if app.agent_running {
+        hints.push(super::key_hints(&[("Esc", "Cancel agent turn")]));
+    }
+
     let block = super::panel_block(&title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Length(2)])
+        .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Length(hints.len() as u16)])
         .split(inner);
 
     let cols = Layout::default()
@@ -318,10 +333,6 @@ fn draw_diff_split(f: &mut Frame, area: Rect, file: &FileEntry) {
     let divider = "\u{2500}".repeat(rows[1].width as usize);
     f.render_widget(Paragraph::new(divider).style(Style::default().fg(theme::DIM)), rows[1]);
 
-    let hints = vec![
-        super::key_hints(&[("c", "Comment"), ("g", "Mark good"), ("x", "Flag rework"), ("d/D", "Clear file/all notes"), ("u", "Unified")]),
-        super::key_hints(&[("i", "Review notes \u{2192} send to agent"), ("y", "Copy prompt")]),
-    ];
     f.render_widget(Paragraph::new(hints), rows[2]);
 }
 
@@ -343,7 +354,16 @@ fn draw_source(f: &mut Frame, app: &App, area: Rect) {
     if app.current_diff_index().is_some() {
         hints.push(("v", "View diff"));
     }
-    let hints = vec![super::key_hints(&hints)];
+    let mut hints = vec![super::key_hints(&hints)];
+    // Its own row, not appended to the line above: that line already
+    // packs in enough hints to fill a typical terminal width with nothing
+    // left over (there's no wrap/truncate on it), so anything appended
+    // past "View diff" was silently invisible regardless of what it was.
+    // A turn started from Agent keeps running in the background if you
+    // switch here to look something up — Esc still reaches it.
+    if app.agent_running {
+        hints.push(super::key_hints(&[("Esc", "Cancel agent turn")]));
+    }
     let block = super::panel_block(&title).border_style(Style::default().fg(if focused { theme::CYAN } else { theme::DIM }));
     let inner = block.inner(area);
     f.render_widget(block, area);

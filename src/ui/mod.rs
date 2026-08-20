@@ -156,7 +156,16 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
 /// lands at the wrong column and visually overlaps whatever was already
 /// there (confirmed — this is exactly what a real tab-indented Go diff
 /// looked like before this existed).
+///
+/// Tracks column with `unicode_width`, not a plain char count: a wide
+/// character (CJK, most emoji, ...) occupies two terminal columns, and a
+/// tab stop after one needs to account for that same way ratatui's own
+/// cell-buffer math does (ratatui depends on this exact crate itself) —
+/// counting chars instead would land the tab one column short whenever a
+/// wide character preceded it on the line.
 pub fn expand_tabs_for_display(s: &str) -> String {
+    use unicode_width::UnicodeWidthChar;
+
     const TAB_WIDTH: usize = 4;
     if !s.contains('\t') {
         return s.to_string();
@@ -170,7 +179,7 @@ pub fn expand_tabs_for_display(s: &str) -> String {
             col += spaces;
         } else {
             out.push(c);
-            col += 1;
+            col += c.width().unwrap_or(0);
         }
     }
     out
@@ -312,6 +321,17 @@ mod tests {
         // flat substitution — "ab" occupies columns 0-1, so the tab here
         // only needs 2 spaces to reach column 4, not 4.
         assert_eq!(expand_tabs_for_display("ab\tc"), "ab  c");
+    }
+
+    #[test]
+    fn expand_tabs_for_display_accounts_for_wide_characters() {
+        // Regression: counting every char as one column undershoots by one
+        // wherever a double-width character (CJK, most emoji, ...)
+        // precedes a tab — "中" occupies two terminal columns, not one
+        // (confirmed: ratatui itself depends on unicode-width for exactly
+        // this), so a tab right after it only needs two more spaces to
+        // reach the next stop (column 4), not three.
+        assert_eq!(expand_tabs_for_display("中\tc"), "中  c");
     }
 
     #[test]

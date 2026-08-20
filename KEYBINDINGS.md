@@ -53,7 +53,7 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | `review_comment` | Comment | `c` |  | In source view: comment on the current line. Otherwise: comment on the whole file |
 | `review_split_view` | Split view | `s` |  | Switch the diff view to before/after columns |
 | `review_unified_view` | Unified view | `u` |  | Switch the diff view back to unified |
-| `review_iterate` | Iterate | `i` |  | Send queued notes to the real pi agent |
+| `review_iterate` | Iterate | `i` |  | Send queued notes to the real agent |
 | `review_copy_prompt` | Copy prompt | `y` |  | Copy the same assembled review prompt to the system clipboard, for pasting into an agent running elsewhere |
 
 ## Symbol Jump
@@ -85,7 +85,7 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 
 | Binding name | Action | Default | Current | Description |
 |---|---|---|---|---|
-| `agent_send` | Send prompt | `Enter` |  | Send the typed prompt to the real pi agent |
+| `agent_send` | Send prompt | `Enter` |  | Send the typed prompt to the real agent |
 | `agent_scroll_up` | Scroll up | `PgUp` |  | Scroll the transcript up to review history |
 | `agent_scroll_down` | Scroll down | `PgDn` |  | Scroll the transcript back down toward the latest |
 | `agent_cancel` | Cancel turn | `Esc` |  | Stop a running agent turn |
@@ -101,6 +101,6 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | `curate_toggle_hunk` | Toggle hunk | `Space` |  | Select/deselect the hunk currently shown |
 | `curate_open_in_review` | Open in Review | `r` |  | Jump to this hunk's file in Review, file tree and content both |
 | `curate_edit_message` | Edit message | `e` |  | Open the commit message in $EDITOR |
-| `curate_generate_message` | Generate message | `g` |  | Draft a message from the real diff with pi, then open it in $EDITOR for a last pass |
+| `curate_generate_message` | Generate message | `g` |  | Draft a message from the real diff with the agent, then open it in $EDITOR for a last pass |
 | `curate_commit` | Commit | `c` |  | git commit the selected hunks with the drafted message |
 

@@ -27,18 +27,21 @@
 //!    telling the user to resolve it themselves (`git status`) is the
 //!    honest option: hoot only ever mutates an index it knows started
 //!    clean.
-//! 3. Every selected file's hunks are re-fetched from disk and compared
-//!    against what `project` (Curate's last synced view) has, right here
-//!    — not trusted from whenever the caller last polled. `project` can be
-//!    a poll tick or more stale: a background agent turn or an external
-//!    edit can change a selected file between when the user looked at it
-//!    in Curate and when they press `c`. Staging from stale hunk data
-//!    would mean `git add`ing whatever the file *currently* contains
-//!    (not what was reviewed) for a whole-file selection, or handing a
-//!    patch built from old line content to `git apply --cached` for a
-//!    partial one — best case that errors, worst case it silently commits
-//!    content nobody actually looked at. Refuse and ask for a re-review
-//!    rather than gamble on which case it is.
+//! 3. Each selected file's hunks are re-fetched from disk and compared
+//!    against what `project` (Curate's last synced view) has, immediately
+//!    before *that file* is staged — not trusted from whenever the caller
+//!    last polled, and not checked once upfront for the whole batch
+//!    either. `project` can be a poll tick or more stale: a background
+//!    agent turn or an external edit can change a selected file between
+//!    when the user looked at it in Curate and when they press `c` — or,
+//!    for a multi-file commit, while an *earlier* file in the batch is
+//!    still being staged. Staging from stale hunk data would mean
+//!    `git add`ing whatever the file *currently* contains (not what was
+//!    reviewed) for a whole-file selection, or handing a patch built from
+//!    old line content to `git apply --cached` for a partial one — best
+//!    case that errors, worst case it silently commits content nobody
+//!    actually looked at. Refuse and ask for a re-review rather than
+//!    gamble on which case it is.
 
 use std::io::Write;
 use std::path::Path;
@@ -59,24 +62,30 @@ pub fn commit(root: &Path, project: &Project, curation_files: &[CurationFile], m
         );
     }
 
-    let current = crate::gitreview::diff_files(root);
-    for cf in curation_files {
-        if cf.selected() == 0 {
-            continue;
-        }
-        let reviewed = project.files.iter().find(|f| f.path == cf.path).map(|f| &f.hunks);
-        let now = current.iter().find(|f| f.path == cf.path).map(|f| &f.hunks);
-        if reviewed != now {
-            return Err(format!("{} changed since it was last reviewed here \u{2014} re-open Curate and check it again", cf.path));
-        }
-    }
-
     let mut staged_any = false;
     for cf in curation_files {
         if cf.selected() == 0 {
             continue;
         }
         let Some(file) = project.files.iter().find(|f| f.path == cf.path) else { continue };
+
+        // Re-fetched immediately before staging *this* file, not once
+        // upfront for the whole batch: a multi-file commit was otherwise
+        // still racy for every file after the first — the one upfront
+        // check only ever reflected disk state from before *any* staging
+        // happened, so a file two or three deep in the loop could still
+        // get staged against hunks that had gone stale while the files
+        // ahead of it were being staged. This costs a full re-diff per
+        // selected file, which is real overhead on a repo with many
+        // changed files — a deliberate tradeoff: correctness on the
+        // operation this whole screen exists for over commit-time
+        // latency, on an action a user triggers occasionally, not in a
+        // hot loop.
+        let current = crate::gitreview::diff_files(root);
+        let now = current.iter().find(|f| f.path == cf.path).map(|f| &f.hunks);
+        if now != Some(&file.hunks) {
+            return Err(format!("{} changed since it was last reviewed here \u{2014} re-open Curate and check it again", cf.path));
+        }
 
         if cf.selected() == cf.total() {
             stage_whole_file(root, &cf.path)?;
@@ -385,6 +394,47 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 1, "no new commit should have landed");
         let staged = Command::new("git").args(["diff", "--cached"]).current_dir(&dir).output().unwrap().stdout;
         assert!(staged.is_empty(), "nothing should have been staged: {}", String::from_utf8_lossy(&staged));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_multi_file_commit_still_catches_staleness_on_a_later_file() {
+        // The freshness check now runs fresh, immediately before each
+        // file's own staging call, instead of once upfront for the whole
+        // batch — tightening the real window (a file changing while an
+        // *earlier* one in the batch is being staged) that a one-time
+        // check couldn't narrow no matter how it was structured. That
+        // specific timing improvement isn't really something a
+        // synchronous, single-threaded test can reproduce (there's no
+        // true concurrent modification to inject mid-loop) — both the old
+        // and new logic already catch a file that's stale by the time
+        // commit() is even called, regardless of its position. What this
+        // *does* usefully guard: that checking happens per-file, not just
+        // once for whichever file iterates first — a plausible way a
+        // refactor of this could regress without the timing angle
+        // actually failing here.
+        let dir = scratch_repo("stale-review-multi");
+        fs::write(dir.join("a.txt"), "a1\na2\n").unwrap();
+        fs::write(dir.join("b.txt"), "b1\nb2\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+        fs::write(dir.join("a.txt"), "a1-changed\na2\n").unwrap();
+        fs::write(dir.join("b.txt"), "b1-changed\nb2\n").unwrap();
+
+        let (project, cfs) = project_and_curation(&dir);
+        assert_eq!(cfs.len(), 2);
+        assert_eq!(cfs[1].path, "b.txt", "b.txt should be second in iteration order");
+
+        // Only b.txt (the later file) goes stale — a.txt stays exactly as
+        // reviewed.
+        fs::write(dir.join("b.txt"), "b1-changed\nb2-changed-too\n").unwrap();
+
+        let err = commit(&dir, &project, &cfs, "should be refused").unwrap_err();
+        assert!(err.contains("b.txt"), "{err}");
+
+        let log = Command::new("git").args(["log", "--oneline"]).current_dir(&dir).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 1, "no new commit should have landed");
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -848,6 +848,18 @@ impl App {
             Overlay::None => {}
         }
 
+        // Cancelling a running turn works from any mode, not just Agent
+        // or Curate — a turn started from Agent keeps running in the
+        // background if you switch to Review to look something up while
+        // it works, and there was previously no way to stop it again
+        // without switching back first. Gated on agent_running so Esc
+        // still falls through to whatever else it might mean per-mode
+        // when nothing's actually running to cancel.
+        if self.agent_running && self.keymap.is(&key, Action::AgentCancel) {
+            self.cancel_agent_turn();
+            return;
+        }
+
         // Mode switches always work, even mid-text-entry (their default
         // chords are F1-F3, which no text field would otherwise consume).
         if self.keymap.is(&key, Action::SwitchReview) {
@@ -1464,8 +1476,6 @@ impl App {
             self.agent_scroll = self.agent_scroll.saturating_add(PAGE_SIZE);
         } else if k.is(&key, Action::AgentScrollDown) {
             self.agent_scroll = self.agent_scroll.saturating_sub(PAGE_SIZE);
-        } else if k.is(&key, Action::AgentCancel) {
-            self.cancel_agent_turn();
         }
     }
 
@@ -1524,11 +1534,6 @@ impl App {
             self.generate_commit_message();
         } else if k.is(&key, Action::CurateCommit) {
             self.commit_selected();
-        } else if k.is(&key, Action::AgentCancel) {
-            // 'g' can kick off a real (silent) agent turn to draft the
-            // message — same cancel key Agent mode uses, since it's the
-            // same underlying turn.
-            self.cancel_agent_turn();
         }
     }
 }
@@ -2210,6 +2215,35 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert_eq!(app.agent_input, "still typing", "Enter shouldn't clear the prompt while a turn is running");
         assert!(app.agent_running, "and definitely shouldn't have started a second turn");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn esc_cancels_a_running_turn_from_review_mode_too() {
+        // Regression: Esc only cancelled a running turn from Agent or
+        // Curate — switching to Review to look something up while a turn
+        // from Agent kept running in the background left no way to stop
+        // it again without switching back first. Cancellation is now
+        // checked globally, before mode dispatch, whenever a turn is
+        // actually running.
+        let (mut app, dir) = two_file_app("esc-cancel-review");
+        app.mode = Mode::Review;
+        app.agent_running = true; // simulate a turn already in flight
+
+        app.on_key(key(KeyCode::Esc));
+
+        // cancel_agent_turn() only ever signals the kill and marks intent
+        // — agent_running itself only flips once the backend process
+        // actually exits and the event channel disconnects (finish_turn),
+        // which nothing drives here without a real spawned session.
+        assert!(app.agent_cancelled, "Esc should have marked the turn as cancelling");
+        assert!(app.mode == Mode::Review, "cancelling shouldn't itself change modes");
+        assert!(
+            app.transcript.iter().any(|l| l.text.contains("Cancelling")),
+            "expected cancellation feedback in the transcript: {:?}",
+            app.transcript.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

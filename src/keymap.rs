@@ -216,7 +216,7 @@ pub const BINDINGS: &[Binding] = &[
     // requires the Ctrl modifier silently never matches outside terminals
     // with the Kitty keyboard protocol enabled. Enter already means "open
     // file" here, so iterate gets its own mnemonic letter instead.
-    b!(Action::ReviewIterate, "review_iterate", "Iterate", "Review", "i", "Send queued notes to the real pi agent"),
+    b!(Action::ReviewIterate, "review_iterate", "Iterate", "Review", "i", "Send queued notes to the real agent"),
     b!(
         Action::ReviewCopyPrompt,
         "review_copy_prompt",
@@ -235,7 +235,7 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::FinderClose, "finder_close", "Close", "File Finder", "esc", "Close the overlay without opening"),
     b!(Action::NoteConfirm, "note_confirm", "Save note", "Note", "enter", "Save the note and close the overlay"),
     b!(Action::NoteCancel, "note_cancel", "Cancel", "Note", "esc", "Discard and close without saving"),
-    b!(Action::AgentSend, "agent_send", "Send prompt", "Agent", "enter", "Send the typed prompt to the real pi agent"),
+    b!(Action::AgentSend, "agent_send", "Send prompt", "Agent", "enter", "Send the typed prompt to the real agent"),
     b!(Action::AgentScrollUp, "agent_scroll_up", "Scroll up", "Agent", "pageup", "Scroll the transcript up to review history"),
     b!(
         Action::AgentScrollDown,
@@ -266,7 +266,7 @@ pub const BINDINGS: &[Binding] = &[
         "Generate message",
         "Curate",
         "g",
-        "Draft a message from the real diff with pi, then open it in $EDITOR for a last pass"
+        "Draft a message from the real diff with the agent, then open it in $EDITOR for a last pass"
     ),
     b!(Action::CurateCommit, "curate_commit", "Commit", "Curate", "c", "git commit the selected hunks with the drafted message"),
 ];
