@@ -11,15 +11,22 @@
 //! staging too, since there's no `-- a/path`/`-- b/path` pair to patch
 //! against.
 //!
-//! The index is reset to HEAD before any of that staging happens. Without
-//! it, `commit()` only ever *adds* to whatever the index already held —
-//! nothing here ever unstages anything — so any change already staged
-//! before hoot ran (an external `git add`, a leftover partial stage from
-//! earlier) would ride along into the final `git commit` regardless of
-//! whether Curate's selection included it at all. The whole premise of
-//! this screen is that the committed result matches the checked hunks
-//! exactly, so the index can't be allowed to carry in state Curate never
-//! had a say over.
+//! Before any of that staging happens, two guards run in order:
+//!
+//! 1. Nothing selected at all → bail out before touching git. Checked
+//!    first so a no-op commit attempt is actually a no-op, not a mutation
+//!    that happens to also report an error.
+//! 2. The index already has staged content → refuse outright, without
+//!    touching it. An earlier version of this function instead reset the
+//!    index to HEAD before restaging exactly the selection — correct for
+//!    *this screen's* view of the world, but Curate only knows about
+//!    changes `git diff` can see; it has no idea whether pre-existing
+//!    staged content was something the user carefully built by hand
+//!    outside hoot for an unrelated reason. Silently discarding that would
+//!    trade a content-correctness bug for a data-loss one. Refusing and
+//!    telling the user to resolve it themselves (`git status`) is the
+//!    honest option: hoot only ever mutates an index it knows started
+//!    clean.
 
 use std::io::Write;
 use std::path::Path;
@@ -31,8 +38,14 @@ pub fn commit(root: &Path, project: &Project, curation_files: &[CurationFile], m
     if message.trim().is_empty() {
         return Err("commit message is empty".to_string());
     }
-
-    reset_index(root)?;
+    if !curation_files.iter().any(|cf| cf.selected() > 0) {
+        return Err("nothing selected to commit".to_string());
+    }
+    if index_has_staged_changes(root)? {
+        return Err(
+            "there are changes already staged outside hoot (see `git status`) — resolve or unstage those first, then try again".to_string()
+        );
+    }
 
     let mut staged_any = false;
     for cf in curation_files {
@@ -60,16 +73,18 @@ fn run_git(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     Command::new("git").args(args).current_dir(root).output().map_err(|e| e.to_string())
 }
 
-/// Unstages everything — back to matching HEAD, or an empty index in a repo
-/// with no commits yet — without touching the working tree. Bare `git
-/// reset` (no ref, no pathspec) does the right thing in both cases; passing
-/// an explicit `HEAD` would fail outright when there's no commit to name.
-fn reset_index(root: &Path) -> Result<(), String> {
-    let out = run_git(root, &["reset", "-q"])?;
-    if !out.status.success() {
-        return Err(format!("git reset: {}", String::from_utf8_lossy(&out.stderr).trim()));
+/// True if the index already differs from HEAD (or, pre-first-commit, from
+/// an empty tree) — i.e. something is staged that hoot didn't just put
+/// there. `git diff --cached --quiet` exits 1 when there's a difference, 0
+/// when there's none; any other exit code is a real git failure, not a
+/// yes/no answer.
+fn index_has_staged_changes(root: &Path) -> Result<bool, String> {
+    let out = run_git(root, &["diff", "--cached", "--quiet"])?;
+    match out.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(format!("git diff --cached: {}", String::from_utf8_lossy(&out.stderr).trim())),
     }
-    Ok(())
 }
 
 fn run_git_with_stdin(root: &Path, args: &[&str], input: &[u8]) -> Result<std::process::Output, String> {
@@ -237,16 +252,17 @@ mod tests {
     }
 
     #[test]
-    fn a_deselected_hunk_is_excluded_even_when_the_whole_file_was_already_staged() {
-        // Regression: the flagship promise here is "committed == exactly
-        // what Curate has checked." That broke the moment the repo already
-        // had staged content when hoot ran — `git add`/`git apply --cached`
-        // only ever ADD to whatever's already in the index, they never
-        // remove from it, so a hunk the user explicitly deselected could
-        // still ride into the commit if it happened to already be staged
-        // (an external `git add`, a leftover partial stage from earlier,
-        // ...) before Curate ever got a say.
-        let dir = scratch_repo("already-staged");
+    fn refuses_to_commit_when_the_index_already_has_staged_changes() {
+        // Regression, second pass: an earlier fix here reset the index to
+        // HEAD before restaging exactly Curate's selection, which *did*
+        // make the commit content correct — but it did that by silently
+        // discarding whatever was already staged, with no way to know
+        // whether that was a stray `git add .` or work the user had
+        // carefully built by hand outside hoot for something unrelated.
+        // Correct-but-destructive is still not safe: hoot must refuse
+        // outright rather than guess, and leave the index exactly as it
+        // found it.
+        let dir = scratch_repo("already-staged-refuse");
         let original: String = (1..=20).map(|n| format!("line{n}\n")).collect();
         fs::write(dir.join("f.txt"), &original).unwrap();
         Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
@@ -257,72 +273,58 @@ mod tests {
         lines[19] = "line20-CHANGED".to_string();
         fs::write(dir.join("f.txt"), lines.join("\n") + "\n").unwrap();
 
-        // The whole file is staged *before* Curate even loads — outside
-        // hoot entirely, exactly like a stray `git add .` or a half-done
-        // manual stage.
+        // Staged *before* Curate even loads — outside hoot entirely.
         Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        let staged_before = Command::new("git").args(["diff", "--cached"]).current_dir(&dir).output().unwrap().stdout;
 
         let (project, mut cfs) = project_and_curation(&dir);
         assert_eq!(cfs[0].total(), 2, "expected two separate hunks");
-        cfs[0].hunk_selected[0] = false; // explicitly deselect line1's hunk
+        cfs[0].hunk_selected[0] = false;
         cfs[0].hunk_selected[1] = true;
 
-        commit(&dir, &project, &cfs, "Fix line20 only").unwrap();
+        let err = commit(&dir, &project, &cfs, "Fix line20 only").unwrap_err();
+        assert!(err.contains("already staged"), "{err}");
 
-        let log = Command::new("git").args(["show", "HEAD:f.txt"]).current_dir(&dir).output().unwrap();
-        let committed = String::from_utf8_lossy(&log.stdout);
-        assert!(committed.starts_with("line1\n"), "the deselected hunk must not be committed: {committed}");
-        assert!(committed.contains("line20-CHANGED\n"), "{committed}");
-
-        // And the deselected hunk should still be sitting there as a real,
-        // outstanding change — not silently dropped, just not committed.
-        let remaining = crate::gitreview::diff_files(&dir);
-        assert_eq!(remaining.len(), 1);
-        assert!(remaining[0].hunks.iter().any(|h| h.lines.iter().any(|l| l.text.contains("line1-CHANGED"))));
+        // Nothing should have moved: HEAD unchanged, index exactly as the
+        // user left it.
+        let log = Command::new("git").args(["log", "--oneline"]).current_dir(&dir).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 1, "no new commit should have landed");
+        let staged_after = Command::new("git").args(["diff", "--cached"]).current_dir(&dir).output().unwrap().stdout;
+        assert_eq!(staged_before, staged_after, "the pre-existing staged content must be untouched");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_fully_deselected_file_is_not_committed_even_when_it_was_already_staged() {
-        // The more direct version of the regression above: a file with
-        // *zero* selected hunks never reaches stage_whole_file or
-        // stage_partial_hunks at all — commit()'s loop just skips it. If it
-        // was already sitting in the index before hoot ran (an external
-        // `git add`, a leftover stage from earlier), nothing here ever
-        // touches it, and the final plain `git commit` would sweep it in
-        // right alongside whatever Curate actually selected.
-        let dir = scratch_repo("already-staged-deselected");
+    fn nothing_selected_never_touches_git_even_with_unrelated_staged_content() {
+        // The "nothing selected" guard must run *before* any git mutation
+        // — otherwise a no-op commit attempt (everything deselected, or a
+        // stray keypress) would still reset/inspect the index, which is
+        // itself an unwanted side effect on a repo hoot has no business
+        // touching when it isn't actually about to commit anything.
+        let dir = scratch_repo("nothing-selected-with-staged");
         fs::write(dir.join("a.txt"), "a1\na2\n").unwrap();
-        fs::write(dir.join("b.txt"), "b1\nb2\n").unwrap();
+        fs::write(dir.join("staged.txt"), "s1\ns2\n").unwrap();
         Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
         Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
 
         fs::write(dir.join("a.txt"), "a1-changed\na2\n").unwrap();
-        fs::write(dir.join("b.txt"), "b1-changed\nb2\n").unwrap();
-        // Both staged externally, before Curate ever loads.
-        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        fs::write(dir.join("staged.txt"), "s1-changed\ns2\n").unwrap();
+        Command::new("git").args(["add", "staged.txt"]).current_dir(&dir).status().unwrap();
+        let staged_before = Command::new("git").args(["diff", "--cached"]).current_dir(&dir).output().unwrap().stdout;
 
         let (project, mut cfs) = project_and_curation(&dir);
         for cf in &mut cfs {
-            if cf.path == "b.txt" {
-                for s in &mut cf.hunk_selected {
-                    *s = false; // the user does not want b.txt in this commit
-                }
+            for s in &mut cf.hunk_selected {
+                *s = false;
             }
         }
 
-        commit(&dir, &project, &cfs, "Update a.txt only").unwrap();
+        let err = commit(&dir, &project, &cfs, "should not run").unwrap_err();
+        assert!(err.contains("nothing selected"), "{err}");
 
-        let log = Command::new("git").args(["show", "--stat", "--oneline", "HEAD"]).current_dir(&dir).output().unwrap();
-        let stat = String::from_utf8_lossy(&log.stdout);
-        assert!(stat.contains("a.txt"), "{stat}");
-        assert!(!stat.contains("b.txt"), "b.txt was deselected and must not be in the commit: {stat}");
-
-        // b.txt's change should still be outstanding (staged or not — just
-        // not committed) rather than silently discarded.
-        let status = Command::new("git").args(["status", "--porcelain", "--", "b.txt"]).current_dir(&dir).output().unwrap();
-        assert!(!status.stdout.is_empty(), "b.txt's change should still be pending somewhere");
+        let staged_after = Command::new("git").args(["diff", "--cached"]).current_dir(&dir).output().unwrap().stdout;
+        assert_eq!(staged_before, staged_after, "an already-staged file must survive a no-op commit attempt untouched");
 
         let _ = fs::remove_dir_all(&dir);
     }

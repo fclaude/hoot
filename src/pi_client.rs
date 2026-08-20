@@ -22,6 +22,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde_json::Value;
@@ -72,8 +73,8 @@ pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
-
     let mut stdin = child.stdin.take().expect("piped stdin");
+    let child = Arc::new(Mutex::new(child));
     let prompt = prompt.to_string();
     thread::spawn(move || {
         // A closed read end (pi exits before reading, e.g. bad flags) would
@@ -101,6 +102,7 @@ pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) 
         }
     });
 
+    let wait_child = child.clone();
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
@@ -109,10 +111,12 @@ pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) 
                 let _ = tx.send(AgentEvent::Error(line));
             }
         }
-        let _ = child.wait();
+        if let Ok(mut child) = wait_child.lock() {
+            let _ = child.wait();
+        }
     });
 
-    Ok(AgentSession { rx })
+    Ok(AgentSession::new(rx, child))
 }
 
 fn parse_line(line: &str) -> Option<AgentEvent> {

@@ -38,6 +38,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde_json::Value;
@@ -90,6 +91,7 @@ pub fn spawn(prompt: &str, cwd: &Path, session_id: Option<&str>, tools: ToolProf
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
+    let child = Arc::new(Mutex::new(child));
 
     let (tx, rx) = mpsc::channel();
 
@@ -123,6 +125,7 @@ pub fn spawn(prompt: &str, cwd: &Path, session_id: Option<&str>, tools: ToolProf
         }
     });
 
+    let wait_child = child.clone();
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
@@ -131,14 +134,16 @@ pub fn spawn(prompt: &str, cwd: &Path, session_id: Option<&str>, tools: ToolProf
                 let _ = tx.send(AgentEvent::Error(line));
             }
         }
-        let _ = child.wait();
+        if let Ok(mut child) = wait_child.lock() {
+            let _ = child.wait();
+        }
         // `prompt_file` stays alive (and thus on disk) until here — the
         // child has now fully exited, so it's definitely done reading it.
         // Dropping it here deletes it.
         drop(prompt_file);
     });
 
-    Ok(AgentSession { rx })
+    Ok(AgentSession::new(rx, child))
 }
 
 fn parse_event(v: &Value) -> Option<AgentEvent> {

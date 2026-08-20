@@ -65,6 +65,7 @@ pub enum Action {
     AgentSend,
     AgentScrollUp,
     AgentScrollDown,
+    AgentCancel,
 
     CurateUp,
     CurateDown,
@@ -243,6 +244,7 @@ pub const BINDINGS: &[Binding] = &[
         "pagedown",
         "Scroll the transcript back down toward the latest"
     ),
+    b!(Action::AgentCancel, "agent_cancel", "Cancel turn", "Agent", "esc", "Stop a running agent turn"),
     b!(Action::CurateUp, "curate_up", "Move up", "Curate", "up", "Select the previous file"),
     b!(Action::CurateDown, "curate_down", "Move down", "Curate", "down", "Select the next file"),
     b!(Action::CurateHunkPrev, "curate_hunk_prev", "Previous hunk", "Curate", "left", "View the previous hunk in this file"),

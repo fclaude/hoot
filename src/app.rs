@@ -153,6 +153,11 @@ pub struct App {
     pub agent_running: bool,
     agent_session: Option<AgentSession>,
     agent_purpose: TurnPurpose,
+    /// Set by `cancel_agent_turn` and read (and cleared) by `finish_turn` —
+    /// there was previously no way to distinguish a turn that ran to
+    /// completion from one the user killed mid-flight, so `finish_turn`
+    /// always reported the same "N files changed" summary either way.
+    agent_cancelled: bool,
 
     // CURATION
     pub curation_files: Vec<CurationFile>,
@@ -292,6 +297,7 @@ impl App {
             agent_running: false,
             agent_session: None,
             agent_purpose: TurnPurpose::Chat,
+            agent_cancelled: false,
 
             curation_files: review.curation_files,
             curation_index: 0,
@@ -706,7 +712,12 @@ impl App {
     fn finish_turn(&mut self) {
         self.agent_running = false;
         self.agent_session = None;
+        let cancelled = std::mem::take(&mut self.agent_cancelled);
         if self.agent_purpose == TurnPurpose::CommitMessage {
+            if cancelled {
+                self.commit_message_status = Some("Cancelled.".to_string());
+                return;
+            }
             // If the turn errored, `apply_agent_event` already put that
             // message in `commit_message_status` — leave it there instead
             // of clobbering it, and don't open $EDITOR on what would be an
@@ -717,6 +728,14 @@ impl App {
                 self.commit_message_status = None;
                 self.open_editor_requested = Some(EditorTarget::CommitMessage);
             }
+            return;
+        }
+        if cancelled {
+            self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: "Cancelled.".to_string() });
+            // A cancelled turn can still have written real files before it
+            // was killed — pull those in too, same as a completed turn.
+            self.sync_review_from_disk();
+            self.sync_navigate_from_disk();
             return;
         }
         // Every turn writes directly to target_dir now, so whatever's
@@ -732,6 +751,25 @@ impl App {
         self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
         self.sync_review_from_disk();
         self.sync_navigate_from_disk();
+    }
+
+    /// Kills the running agent subprocess, if any — the only way to stop a
+    /// turn short of quitting hoot entirely before this existed. `pi`/
+    /// `opencode` can run for a long time on a wide-scoped prompt, and nothing
+    /// here caps how long that runs on its own.
+    pub fn cancel_agent_turn(&mut self) {
+        if !self.agent_running {
+            return;
+        }
+        if let Some(session) = &self.agent_session {
+            session.cancel();
+        }
+        self.agent_cancelled = true;
+        if self.agent_purpose == TurnPurpose::Chat {
+            self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: "Cancelling\u{2026}".to_string() });
+        } else {
+            self.commit_message_status = Some("Cancelling\u{2026}".to_string());
+        }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -1358,6 +1396,8 @@ impl App {
             self.agent_scroll = self.agent_scroll.saturating_add(PAGE_SIZE);
         } else if k.is(&key, Action::AgentScrollDown) {
             self.agent_scroll = self.agent_scroll.saturating_sub(PAGE_SIZE);
+        } else if k.is(&key, Action::AgentCancel) {
+            self.cancel_agent_turn();
         }
     }
 
@@ -1399,6 +1439,11 @@ impl App {
             self.generate_commit_message();
         } else if k.is(&key, Action::CurateCommit) {
             self.commit_selected();
+        } else if k.is(&key, Action::AgentCancel) {
+            // 'g' can kick off a real (silent) agent turn to draft the
+            // message — same cancel key Agent mode uses, since it's the
+            // same underlying turn.
+            self.cancel_agent_turn();
         }
     }
 }

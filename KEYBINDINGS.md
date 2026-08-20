@@ -88,6 +88,7 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | `agent_send` | Send prompt | `Enter` |  | Send the typed prompt to the real pi agent |
 | `agent_scroll_up` | Scroll up | `PgUp` |  | Scroll the transcript up to review history |
 | `agent_scroll_down` | Scroll down | `PgDn` |  | Scroll the transcript back down toward the latest |
+| `agent_cancel` | Cancel turn | `Esc` |  | Stop a running agent turn |
 
 ## Curate
 

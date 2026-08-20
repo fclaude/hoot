@@ -45,14 +45,25 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     draw_commit_box(f, app, right[0]);
     draw_hunk_box(f, app, right[1]);
 
-    let hints = super::key_hints(&[
-        ("\u{2191}\u{2193}", "File"),
-        ("\u{2190}\u{2192}", "Prev/next hunk"),
-        ("Space", "Toggle hunk"),
-        ("g", "Generate message"),
-        ("e", "Edit in $EDITOR"),
-        ("c", "Commit"),
-    ]);
+    let hints = if app.agent_running {
+        super::key_hints(&[
+            ("\u{2191}\u{2193}", "File"),
+            ("\u{2190}\u{2192}", "Prev/next hunk"),
+            ("Space", "Toggle hunk"),
+            ("Esc", "Cancel agent turn"),
+            ("e", "Edit in $EDITOR"),
+            ("c", "Commit"),
+        ])
+    } else {
+        super::key_hints(&[
+            ("\u{2191}\u{2193}", "File"),
+            ("\u{2190}\u{2192}", "Prev/next hunk"),
+            ("Space", "Toggle hunk"),
+            ("g", "Generate message"),
+            ("e", "Edit in $EDITOR"),
+            ("c", "Commit"),
+        ])
+    };
     let mut spans = vec![Span::styled("\u{258c} ", Style::default().fg(theme::DIM))];
     spans.extend(hints.spans);
     match &app.last_commit {

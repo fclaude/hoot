@@ -137,7 +137,10 @@ fn main() -> io::Result<()> {
             std::process::exit(1);
         }
     }
-    let target_dir = if demo {
+    // `_demo_guard` has to outlive `run()` below — its Drop impl is what
+    // deletes the demo directory, so it's bound here and just left alone
+    // rather than immediately discarded.
+    let (target_dir, _demo_guard) = if demo {
         // Force gitreview::load's mock-data fallback regardless of what
         // the real cwd happens to be — otherwise `--demo` run from inside
         // an actual git repo (this one, say) would just show real data,
@@ -151,11 +154,28 @@ fn main() -> io::Result<()> {
         // `target_dir` resolves to on disk regardless of demo mode, so a
         // path that doesn't exist at all used to surface as a raw
         // "couldn't read" error and an agent that couldn't even spawn.
-        let demo_dir = std::env::temp_dir().join(format!("hoot-demo-{}", std::process::id()));
-        write_demo_files(&demo_dir);
-        demo_dir.canonicalize().unwrap_or(demo_dir)
+        //
+        // Uses `tempfile::TempDir`, not a predictable `$TMPDIR/hoot-demo-<pid>`
+        // path built by hand: a guessable name in a world-writable temp dir
+        // is plantable — another local user pre-creates that exact path as a
+        // symlink before hoot does, and the `fs::create_dir_all`/`fs::write`
+        // calls below follow it straight into wherever they pointed it.
+        // `TempDir` picks an unpredictable name and creates it atomically, so
+        // there's nothing to plant in advance, and it deletes itself when
+        // dropped instead of accumulating forever across runs.
+        match tempfile::Builder::new().prefix("hoot-demo-").tempdir() {
+            Ok(dir) => {
+                write_demo_files(dir.path());
+                let canonical = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+                (canonical, Some(dir))
+            }
+            Err(e) => {
+                eprintln!("error: couldn't create a demo directory: {e}");
+                std::process::exit(1);
+            }
+        }
     } else {
-        target_dir.canonicalize().unwrap_or(target_dir)
+        (target_dir.canonicalize().unwrap_or(target_dir), None)
     };
 
     let (keymap, warnings) = Keymap::load();

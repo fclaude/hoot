@@ -128,7 +128,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, _narrow: bool) {
         Span::styled(app.target_dir.display().to_string(), Style::default().fg(theme::DIM)),
     ])];
 
-    let hints = vec![super::key_hints(&[("PgUp/PgDn", "Scroll"), ("Enter", "Send")])];
+    let hints = vec![if app.agent_running {
+        super::key_hints(&[("PgUp/PgDn", "Scroll"), ("Enter", "Send"), ("Esc", "Cancel turn")])
+    } else {
+        super::key_hints(&[("PgUp/PgDn", "Scroll"), ("Enter", "Send")])
+    }];
 
     let title = if app.agent_running { "agent \u{2014} running" } else { "agent" };
     let block = super::panel_block(title);
