@@ -42,6 +42,11 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
 
+      - name: Dependency advisory scan
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
       - name: Tag matches Cargo.toml version
         run: |
           set -euo pipefail
