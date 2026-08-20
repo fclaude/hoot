@@ -213,6 +213,16 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
     );
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    // The sidebar's ⚠ glyph alone doesn't explain itself — spell out why
+    // this file's hunks all came back deselected right where the user is
+    // about to review them, not just as a badge they might not notice.
+    if cf.status == Some(theme::FileStatus::Stale) {
+        lines.push(Line::from(Span::styled(
+            "File changed since your last review. All hunks were deselected.",
+            Style::default().fg(theme::ORANGE),
+        )));
+        lines.push(Line::raw(""));
+    }
     match file.and_then(|f| f.hunks.get(shown_index)) {
         Some(hunk) => {
             for dl in &hunk.lines {

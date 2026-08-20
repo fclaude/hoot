@@ -15,7 +15,7 @@ mod theme;
 mod ui;
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{self, Event};
@@ -42,6 +42,37 @@ Usage:
 <path> must exist and be a git repository, or hoot exits with an error —
 pass --demo instead if you just want to look around the UI.
 ";
+
+/// Writes placeholder source files under `dir`, matching the file paths
+/// `data::mock_project` names, so `--demo` has something real on disk for
+/// Navigate to browse and an agent to point its `--dir` at. Their content
+/// has nothing to do with the mock review's fabricated hunks/notes — those
+/// come from `data::mock_project`/`mock_curation_files` regardless of what
+/// is or isn't on disk; this only needs to look like a plausible small
+/// project when opened.
+fn write_demo_files(dir: &Path) {
+    const FILES: &[(&str, &str)] = &[
+        ("main.rs", "mod index;\nmod query;\n\nfn main() {\n    println!(\"search-index demo\");\n}\n"),
+        ("lib.rs", "pub mod index;\npub mod query;\n"),
+        ("index/mod.rs", "pub mod postings;\n\npub struct Index {\n    pub postings: postings::Postings,\n}\n"),
+        (
+            "index/postings.rs",
+            "pub struct Postings {\n    docs: Vec<u32>,\n}\n\nimpl Postings {\n    pub fn iter(&self) -> PostingsIter {\n        PostingsIter { docs: &self.docs }\n    }\n}\n\npub struct PostingsIter<'a> {\n    docs: &'a [u32],\n}\n",
+        ),
+        (
+            "query/parser.rs",
+            "pub struct QueryParser;\n\nimpl QueryParser {\n    pub fn parse(&mut self) -> Result<Query, ParseError> {\n        self.token()\n    }\n}\n",
+        ),
+        ("tests/integration_test.rs", "#[test]\nfn finds_matching_documents() {\n    // demo placeholder\n}\n"),
+    ];
+    for (rel, content) in FILES {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, content);
+    }
+}
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -111,10 +142,18 @@ fn main() -> io::Result<()> {
         // the real cwd happens to be — otherwise `--demo` run from inside
         // an actual git repo (this one, say) would just show real data,
         // since App::new loads whatever target_dir resolves to with no
-        // way to ask for fake data on top of a real repo. A path that
-        // can't possibly be a git repo makes App::new's own `is_git_repo`
-        // check do the rest, same as the old implicit fallback did.
-        std::env::temp_dir().join(format!("hoot-demo-{}", std::process::id()))
+        // way to ask for fake data on top of a real repo. Deliberately NOT
+        // a git repo itself: `gitreview::load` only takes the mock-data
+        // branch while `is_git_repo` is false, so a real `.git` here would
+        // replace the fabricated demo review with a real (empty) diff on
+        // the very next poll tick. It does need to be a real, populated
+        // directory though — Navigate/Agent read and run against whatever
+        // `target_dir` resolves to on disk regardless of demo mode, so a
+        // path that doesn't exist at all used to surface as a raw
+        // "couldn't read" error and an agent that couldn't even spawn.
+        let demo_dir = std::env::temp_dir().join(format!("hoot-demo-{}", std::process::id()));
+        write_demo_files(&demo_dir);
+        demo_dir.canonicalize().unwrap_or(demo_dir)
     } else {
         target_dir.canonicalize().unwrap_or(target_dir)
     };

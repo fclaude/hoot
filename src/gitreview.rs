@@ -47,6 +47,21 @@ pub fn is_git_repo(root: &Path) -> bool {
     git(root, &["rev-parse", "--is-inside-work-tree"]).map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// Runs a `git ls-files`-family command and returns the raw relative paths
+/// it names, unquoted. By default git quotes any path with a non-ASCII or
+/// otherwise "unusual" byte — `café.txt` comes back as the literal text
+/// `"caf\303\251.txt"`, quote marks and octal escapes included — which is
+/// exactly what breaks joining the result onto `root` to get a real
+/// filesystem path back. `-z` (added here, not by callers) makes git emit
+/// the actual filesystem bytes NUL-terminated instead, so there's nothing
+/// to unescape.
+fn ls_files_paths(root: &Path, args: &[&str]) -> Vec<String> {
+    let mut args = args.to_vec();
+    args.push("-z");
+    let Some(listing) = git(root, &args) else { return Vec::new() };
+    listing.stdout.split(|&b| b == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect()
+}
+
 /// Absolute paths under `root` that Git ignores — files and whole
 /// directories, matched the same way `git status` would (`.gitignore`,
 /// nested `.gitignore`s, global excludes, ...). `--directory` reports an
@@ -56,10 +71,10 @@ pub fn is_git_repo(root: &Path) -> bool {
 /// like a large `target/` or `node_modules/`. Empty (not an error) outside
 /// a git repo, so callers can use this unconditionally.
 pub fn ignored_paths(root: &Path) -> HashSet<PathBuf> {
-    let Some(listing) = git(root, &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"]) else {
-        return HashSet::new();
-    };
-    String::from_utf8_lossy(&listing.stdout).lines().filter(|l| !l.is_empty()).map(|rel| root.join(rel.trim_end_matches('/'))).collect()
+    ls_files_paths(root, &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"])
+        .into_iter()
+        .map(|rel| root.join(rel.trim_end_matches('/')))
+        .collect()
 }
 
 /// Diffs against HEAD (staged + unstaged) when a commit exists; otherwise
@@ -118,12 +133,9 @@ fn run_git_diff(root: &Path) -> String {
 /// a second and a visibly stalling UI. One `ls-files` plus reading each
 /// file directly is the same information without the fork-per-file cost.
 fn untracked_files_diff(root: &Path) -> String {
-    let Some(listing) = git(root, &["ls-files", "--others", "--exclude-standard"]) else {
-        return String::new();
-    };
     let mut diff = String::new();
-    for path in String::from_utf8_lossy(&listing.stdout).lines().filter(|l| !l.is_empty()) {
-        diff.push_str(&synthetic_new_file_diff(root, path));
+    for path in ls_files_paths(root, &["ls-files", "--others", "--exclude-standard"]) {
+        diff.push_str(&synthetic_new_file_diff(root, &path));
     }
     diff
 }
@@ -751,6 +763,44 @@ index 111..222 100644
         assert!(!ignored.contains(&dir.join("scratch/temp.md")), "{ignored:?}");
         assert!(!ignored.contains(&dir.join("keep.txt")), "{ignored:?}");
         assert!(!ignored.contains(&dir.join(".gitignore")), "{ignored:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ignored_paths_matches_a_real_path_for_non_ascii_names() {
+        // Regression: by default `git ls-files` quotes any path with a
+        // non-ASCII byte as literal text like `"caf\303\251/"` — joining
+        // that string onto `root` produces a PathBuf that will never equal
+        // a real `café/` entry from `fs::read_dir`, so the ignored
+        // directory would silently stay visible. `-z` output has no
+        // quoting to undo.
+        let dir = scratch_repo("ignored-paths-unicode");
+        fs::write(dir.join(".gitignore"), "/café/\n").unwrap();
+        fs::create_dir_all(dir.join("café")).unwrap();
+        fs::write(dir.join("café/f.txt"), "noise\n").unwrap();
+        run(&dir, &["add", ".gitignore"]);
+        run(&dir, &["commit", "-q", "-m", "init"]);
+
+        let ignored = ignored_paths(&dir);
+        assert!(ignored.contains(&dir.join("café")), "{ignored:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn untracked_files_diff_reads_a_non_ascii_named_file() {
+        // Same quoting issue, the other call site: an untracked file with a
+        // non-ASCII name used to come back from `ls-files` as a quoted,
+        // escaped string that didn't match anything on disk, so
+        // `symlink_metadata` silently failed and the file never appeared in
+        // the diff at all.
+        let dir = scratch_repo("untracked-diff-unicode");
+        fs::write(dir.join("café.txt"), "bonjour\n").unwrap();
+
+        let diff = untracked_files_diff(&dir);
+        assert!(diff.contains("café.txt"), "{diff}");
+        assert!(diff.contains("bonjour"), "{diff}");
 
         let _ = fs::remove_dir_all(&dir);
     }

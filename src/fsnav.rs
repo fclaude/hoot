@@ -60,13 +60,28 @@ fn walk(dir: &Path, depth: u8, out: &mut Vec<TreeEntry>, ignored: &HashSet<PathB
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
-            let child_count = fs::read_dir(&path).map(|d| d.filter_map(|e| e.ok()).count() as u32).unwrap_or(0);
+            let child_count = visible_child_count(&path, ignored);
             out.push(TreeEntry { label: format!("{name}/"), depth, is_dir: true, child_count: Some(child_count), path: path.clone() });
             walk(&path, depth + 1, out, ignored);
         } else {
             out.push(TreeEntry { label: name, depth, is_dir: false, child_count: None, path });
         }
     }
+}
+
+/// How many of `dir`'s direct children would actually show up in the tree —
+/// the same `SKIP_DIRS`/gitignore filtering `walk` applies, so the count
+/// next to a directory's name matches what expanding it actually reveals
+/// instead of a raw `read_dir` tally that includes noise and ignored
+/// entries the tree never displays.
+fn visible_child_count(dir: &Path, ignored: &HashSet<PathBuf>) -> u32 {
+    let Ok(rd) = fs::read_dir(dir) else { return 0 };
+    rd.filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            !SKIP_DIRS.contains(&name.as_str()) && !ignored.contains(&e.path())
+        })
+        .count() as u32
 }
 
 pub fn read_file(path: &Path) -> Vec<String> {
