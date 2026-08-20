@@ -1445,9 +1445,9 @@ mod tests {
         let (mut app, dir) = two_file_app("fkeys");
         assert!(app.mode == Mode::Review, "App::new starts in Review");
         app.on_key(key(KeyCode::F(2)));
-        assert!(app.mode == Mode::Agent);
+        assert!(app.mode == Mode::Curation, "F2 is Curate — Review and Curate are front and center, Agent is F3");
         app.on_key(key(KeyCode::F(3)));
-        assert!(app.mode == Mode::Curation);
+        assert!(app.mode == Mode::Agent);
         app.on_key(key(KeyCode::F(1)));
         assert!(app.mode == Mode::Review);
         let _ = fs::remove_dir_all(&dir);

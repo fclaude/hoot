@@ -113,8 +113,11 @@ pub const BINDINGS: &[Binding] = &[
         "f1,ctrl+r",
         "Jump to the Review screen (file tree + diff/source)"
     ),
-    b!(Action::SwitchAgent, "switch_agent", "Switch: Agent", "Global", "f2,ctrl+a", "Jump to the Agent screen"),
-    b!(Action::SwitchCurate, "switch_curate", "Switch: Curate", "Global", "f3,ctrl+u", "Jump to the Curation screen"),
+    // Review and Curate are where the real work happens; Agent is a nice
+    // extra, not the main draw — so F2/Ctrl+u goes to Curate and Agent
+    // gets bumped to F3/Ctrl+a, keeping each action's own mnemonic letter.
+    b!(Action::SwitchCurate, "switch_curate", "Switch: Curate", "Global", "f2,ctrl+u", "Jump to the Curation screen"),
+    b!(Action::SwitchAgent, "switch_agent", "Switch: Agent", "Global", "f3,ctrl+a", "Jump to the Agent screen"),
     b!(
         Action::OpenSymbolJump,
         "open_symbol_jump",

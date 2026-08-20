@@ -372,10 +372,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_screen_shows_pi_status_via_f2() {
+    fn agent_screen_shows_pi_status_via_f3() {
         let dir = scratch_repo("agent");
         let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
-        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
         let screen = render(&app, 120, 30);
         assert!(screen.contains("pi"), "{screen}");
         assert!(screen.contains("idle"), "{screen}");
@@ -387,7 +387,7 @@ mod tests {
     fn agent_screen_shows_the_active_backends_label() {
         let dir = scratch_repo("agent-opencode");
         let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::OpenCode);
-        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
         let screen = render(&app, 120, 30);
         assert!(screen.contains("opencode"), "the header/status line should reflect the selected backend: {screen}");
 
@@ -400,7 +400,7 @@ mod tests {
 
         let dir = scratch_repo("agent-long");
         let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
-        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
         app.transcript = (1..=100).map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") }).collect();
         for c in "MY_TYPED_PROMPT".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -420,7 +420,7 @@ mod tests {
 
         let dir = scratch_repo("agent-scrollback");
         let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
-        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
         app.transcript = (1..=100).map(|n| AgentLine { kind: AgentLineKind::Text, text: format!("TRANSCRIPT_LINE_{n}") }).collect();
 
         for _ in 0..8 {
@@ -437,13 +437,13 @@ mod tests {
     }
 
     #[test]
-    fn curation_screen_shows_real_hunk_selection_via_f3() {
+    fn curation_screen_shows_real_hunk_selection_via_f2() {
         let dir = scratch_repo("curate");
         commit_file(&dir, "f.txt", "a\nb\n");
         fs::write(dir.join("f.txt"), "a-changed\nb\n").unwrap();
 
         let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
-        app.on_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         let screen = render(&app, 120, 30);
         assert!(screen.contains("f.txt"), "{screen}");
         assert!(screen.contains("1/1 sel"), "{screen}");

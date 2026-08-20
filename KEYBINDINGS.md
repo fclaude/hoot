@@ -24,8 +24,8 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 |---|---|---|---|---|
 | `quit` | Quit | `q` |  | Exit hoot |
 | `switch_review` | Switch: Review | `F1 / Ctrl+r` |  | Jump to the Review screen (file tree + diff/source) |
-| `switch_agent` | Switch: Agent | `F2 / Ctrl+a` |  | Jump to the Agent screen |
-| `switch_curate` | Switch: Curate | `F3 / Ctrl+u` |  | Jump to the Curation screen |
+| `switch_curate` | Switch: Curate | `F2 / Ctrl+u` |  | Jump to the Curation screen |
+| `switch_agent` | Switch: Agent | `F3 / Ctrl+a` |  | Jump to the Agent screen |
 | `open_symbol_jump` | Open Symbol Jump | `Ctrl+k` |  | Open the fuzzy symbol-jump overlay from anywhere |
 | `open_file_finder` | Open File Finder | `Ctrl+f` |  | Open the fuzzy file finder (with live preview) from anywhere |
 
