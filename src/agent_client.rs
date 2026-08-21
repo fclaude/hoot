@@ -320,8 +320,34 @@ mod tests {
             })
             .expect("sh should have spawned sleep as a real child by now");
 
-        let alive =
-            |pid: i32| std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().map(|s| s.success()).unwrap_or(false);
+        // "Alive" has to mean *running*, not merely present in the process
+        // table, and `kill -0` cannot tell those apart: it succeeds for a
+        // zombie too. Killing the grandchild orphans it, the orphan is
+        // reparented to pid 1, and it stays a zombie until pid 1 reaps it
+        // — which assumes pid 1 is an init that reaps. Inside a container
+        // it is whatever process keeps the container up, which doesn't, so
+        // the pid lingered and this read a correctly-killed process as
+        // still running. `ps` state `Z` is the distinction; an empty
+        // result means the pid is gone entirely.
+        let alive = |pid: i32| -> bool {
+            let Ok(out) = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output() else {
+                return false;
+            };
+            let state = String::from_utf8_lossy(&out.stdout);
+            let state = state.trim();
+            !state.is_empty() && !state.starts_with('Z')
+        };
+        // Dying isn't instantaneous: cancel() signals, and the kernel gets
+        // to the rest in its own time.
+        let settles_dead = |pid: i32| {
+            (0..40).any(|_| {
+                if !alive(pid) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                false
+            })
+        };
         assert!(alive(grandchild_pid), "sanity check: the grandchild should be running before cancel()");
 
         let child = Arc::new(Mutex::new(root));
@@ -331,8 +357,8 @@ mod tests {
         waiter.join().expect("waiter thread panicked").ok();
         drop(tx);
 
-        assert!(!alive(root_pid), "pid {root_pid} (sh) should no longer exist after cancel()");
-        assert!(!alive(grandchild_pid), "pid {grandchild_pid} (sleep, sh's child) should no longer exist after cancel()");
+        assert!(settles_dead(root_pid), "pid {root_pid} (sh) should no longer be running after cancel()");
+        assert!(settles_dead(grandchild_pid), "pid {grandchild_pid} (sleep, sh's child) should no longer be running after cancel()");
     }
 
     #[test]
