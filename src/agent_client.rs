@@ -290,22 +290,27 @@ mod tests {
     /// container up. Reads the same `/proc` the production path does, so
     /// these tests don't reintroduce the `ps` dependency the code just
     /// dropped; `ps` remains for macOS, which has no `/proc`.
+    ///
+    /// Two whole functions rather than one with `#[cfg]` blocks inside:
+    /// whichever block came last had to `return` explicitly, which is a
+    /// needless return on the platform where the other block is compiled
+    /// out — and clippy is right about that, on exactly one of the two
+    /// platforms.
+    #[cfg(target_os = "linux")]
     fn process_is_running(pid: i32) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
-            let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else { return false };
-            return !matches!(rest.split_whitespace().next(), Some("Z") | None);
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let Ok(out) = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output() else {
-                return false;
-            };
-            let state = String::from_utf8_lossy(&out.stdout);
-            let state = state.trim();
-            !state.is_empty() && !state.starts_with('Z')
-        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+        let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else { return false };
+        !matches!(rest.split_whitespace().next(), Some("Z") | None)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn process_is_running(pid: i32) -> bool {
+        let Ok(out) = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output() else {
+            return false;
+        };
+        let state = String::from_utf8_lossy(&out.stdout);
+        let state = state.trim();
+        !state.is_empty() && !state.starts_with('Z')
     }
 
     #[test]
