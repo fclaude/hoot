@@ -1,5 +1,6 @@
-//! Color palette and semantic roles, lifted directly from the design system
-//! reference frame (Frame 9) of the source mockup.
+//! The color palette, and what each color is used to mean. One place for
+//! both, so a color can't quietly come to mean two different things in two
+//! different panes.
 
 use ratatui::style::Color;
 

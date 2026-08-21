@@ -1,10 +1,10 @@
 //! Minimal inline-markdown rendering for agent transcript text.
 //!
-//! `pi`'s answers arrive as one complete block of text (not deltas) that
-//! routinely uses `**bold**`, `` `code` ``, `#` headers, and `-`/`*`/`1.`
-//! bullet lists. Rendering that as plain wrapped text left the literal
-//! `**`/`` ` ``/`-` markers in place and — worse — collapsed every newline
-//! into a single run-on paragraph, since word-wrapping split on all
+//! Both backends deliver an answer as one complete block of text (not
+//! deltas) that routinely uses `**bold**`, `` `code` ``, `#` headers, and
+//! `-`/`*`/`1.` bullet lists. Rendering that as plain wrapped text left the
+//! literal `**`/`` ` ``/`-` markers in place and — worse — collapsed every
+//! newline into a single run-on paragraph, since word-wrapping split on all
 //! whitespace including `\n`. This renders each source line on its own,
 //! turns list/header markers into real formatting, and word-wraps the
 //! result while keeping each token's style intact across the wrap.
@@ -192,9 +192,9 @@ mod tests {
 
     #[test]
     fn strips_bold_markers_and_bolds_the_span() {
-        let out = render("**Steer** is a TUI", 80, Style::default());
-        assert_eq!(plain(&out), vec!["Steer is a TUI"]);
-        let bold_span = out[0].spans.iter().find(|s| s.content.as_ref() == "Steer").unwrap();
+        let out = render("**hoot** is a TUI", 80, Style::default());
+        assert_eq!(plain(&out), vec!["hoot is a TUI"]);
+        let bold_span = out[0].spans.iter().find(|s| s.content.as_ref() == "hoot").unwrap();
         assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
     }
 

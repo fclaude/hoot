@@ -1,27 +1,30 @@
 //! Real change review, backed by `git diff` in the target directory.
 //!
-//! Falls back to the mockup's static demo data only when the target isn't a
-//! git repository at all; inside a real repo with a clean tree this reports
-//! an honest empty changeset rather than silently substituting fake content.
+//! There is no fabricated-data path here any more, and deliberately so.
+//! `load` used to substitute hand-written demo content whenever the target
+//! wasn't a git repository, which meant a typo'd path could open a UI full
+//! of invented changes, and `--demo` itself showed hunks that disagreed
+//! with what Review read off disk. `main.rs` now rejects a non-repo
+//! outright and `--demo` builds a real throwaway repo (see `demo.rs`), so
+//! every screen in the app is looking at the same real `git diff`. A repo
+//! with a clean tree reports an honest empty changeset.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use crate::data::{self, ChangeKind, CurationFile, DiffLine, DiffLineKind, FileEntry, FileMeta, Hunk, Project};
+use crate::data::{ChangeKind, CurationFile, DiffLine, DiffLineKind, FileEntry, FileMeta, Hunk, Project};
 
 pub struct ReviewData {
     pub project: Project,
     pub curation_files: Vec<CurationFile>,
-    pub is_real: bool,
 }
 
+/// The working-tree review for `root`. A directory that isn't a git
+/// repository has nothing to review and reports exactly that — an empty
+/// changeset — rather than standing in fake content for it.
 pub fn load(root: &Path) -> ReviewData {
-    if !is_git_repo(root) {
-        return ReviewData { project: data::mock_project(), curation_files: data::mock_curation_files(), is_real: false };
-    }
-
-    let files = diff_files(root);
+    let files = if is_git_repo(root) { diff_files(root) } else { Vec::new() };
 
     let curation_files =
         files.iter().map(|f| CurationFile { path: f.path.clone(), hunk_selected: vec![true; selectable_units(f)], status: None }).collect();
@@ -29,7 +32,7 @@ pub fn load(root: &Path) -> ReviewData {
     let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.display().to_string());
     let project = Project { name: name.clone(), root: name, files };
 
-    ReviewData { project, curation_files, is_real: true }
+    ReviewData { project, curation_files }
 }
 
 /// How many independently selectable units a file offers in Curation: one
@@ -143,7 +146,7 @@ pub fn ignored_paths(root: &Path) -> HashSet<PathBuf> {
 /// falls back to a plain working-tree diff (e.g. a repo with zero commits).
 /// Appends untracked files too — plain `git diff` never shows those (they
 /// aren't in the index at all), which would otherwise make a file the
-/// agent just created invisible to Hoot until it's staged. Uses git's
+/// agent just created invisible in Review until it's staged. Uses git's
 /// default (small) context window — this is the canonical hunk breakdown
 /// Curation's per-hunk selection and partial commits rely on, so it needs
 /// real, separate hunk boundaries, not one hunk spanning the whole file.
@@ -858,14 +861,18 @@ index 111..222 100644
     }
 
     #[test]
-    fn load_falls_back_to_mock_outside_a_git_repo() {
+    fn load_reports_nothing_to_review_outside_a_git_repo() {
+        // Regression: this used to return hand-written demo content, so a
+        // typo'd path opened a full UI of invented changes with nothing to
+        // say they weren't real. An empty changeset is the honest answer;
+        // `main.rs` refuses to get this far in the first place.
         let dir = std::env::temp_dir().join(format!("hoot-gitreview-not-a-repo-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
         let review = load(&dir);
-        assert!(!review.is_real);
-        assert_eq!(review.project.name, "search-index"); // mock_project's fixed name
+        assert!(review.project.files.is_empty());
+        assert!(review.curation_files.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -881,7 +888,6 @@ index 111..222 100644
         run(&dir, &["add", "new.txt"]);
 
         let review = load(&dir);
-        assert!(review.is_real);
         assert!(
             review.project.files.iter().any(|f| f.path == "new.txt"),
             "{:?}",
@@ -899,7 +905,6 @@ index 111..222 100644
         run(&dir, &["commit", "-q", "-m", "init"]);
 
         let review = load(&dir);
-        assert!(review.is_real);
         assert!(review.project.files.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
@@ -914,7 +919,6 @@ index 111..222 100644
         fs::write(dir.join("f.txt"), "line1-changed\nline2\n").unwrap();
 
         let review = load(&dir);
-        assert!(review.is_real);
         assert_eq!(review.project.files.len(), 1);
         assert_eq!(review.project.files[0].path, "f.txt");
         assert_eq!(review.curation_files.len(), 1);

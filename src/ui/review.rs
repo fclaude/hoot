@@ -58,11 +58,38 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let chunks =
         Layout::default().direction(Direction::Horizontal).constraints([Constraint::Length(sidebar_width), Constraint::Min(0)]).split(area);
 
-    draw_tree(f, app, chunks[0], narrow);
+    draw_tree(f, app, chunks[0]);
     draw_content(f, app, chunks[1], narrow);
 }
 
-fn draw_tree(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
+/// The tree pane's footer counts, in the longest form that fits `width`.
+///
+/// Fitted against the sidebar's own width, not the whole-screen `narrow`
+/// flag. The sidebar is a fixed 38 columns on any terminal wide enough not
+/// to count as narrow, and the wordier version this used to print there
+/// ("5 files changed \u{b7} 0 notes queued \u{b7} 0 flagged") needs 44 — so it was
+/// cut off mid-word, with no ellipsis and nothing to indicate anything was
+/// missing, at every width above the narrow threshold. The fallback drops
+/// the flagged tally only once even that can't fit, which in practice is
+/// just the 24-column narrow sidebar; the final truncate is a backstop for
+/// anything narrower still.
+///
+/// Takes the counts rather than an `&App` so the thing it actually does —
+/// fit text into a width — is testable without a repo on disk behind it.
+fn tree_footer_counts(files: usize, notes: u32, flagged: usize, width: usize) -> String {
+    let budget = width.saturating_sub(2);
+    let plural = if notes == 1 { "" } else { "s" };
+    let candidates = [
+        format!("{files} changed \u{b7} {notes} note{plural} \u{b7} {flagged} flagged"),
+        format!("{files} changed \u{b7} {notes} note{plural}"),
+    ];
+    match candidates.iter().find(|c| c.chars().count() <= budget) {
+        Some(c) => c.clone(),
+        None => super::truncate_with_ellipsis(&candidates[1], budget),
+    }
+}
+
+fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     let tick_color = if app.nav_focus == NavFocus::Tree { theme::CYAN } else { theme::DIM };
     // 2 rows reserved either way: the summary line, plus room for a
     // transient clipboard-copy status line under it when there is one.
@@ -72,7 +99,16 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let scroll = scroll_offset(app.tree_index, app.tree.len(), visible);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(Span::styled(app.target_dir.display().to_string(), Style::default().fg(theme::FG))));
+    // Ellipsised from the front, not hard-clipped: the sidebar is far
+    // narrower than a real absolute path, and the end of a path is the half
+    // worth keeping. Left unclipped, a Paragraph simply cut it wherever the
+    // pane ran out, which read as a corrupted path rather than a shortened
+    // one — most visibly under `--demo`, whose repo lives in a temp
+    // directory with a long generated prefix.
+    lines.push(Line::from(Span::styled(
+        super::truncate_start_with_ellipsis(&app.target_dir.display().to_string(), area.width as usize),
+        Style::default().fg(theme::FG),
+    )));
 
     for (i, entry) in app.tree.iter().enumerate().skip(scroll).take(visible) {
         let indent = "\u{2502}  ".repeat(entry.depth as usize);
@@ -124,29 +160,13 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     }
 
     lines.push(Line::raw(""));
-    if narrow {
-        lines.push(Line::from(vec![
-            Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
-            Span::styled(
-                format!("{} changed \u{b7} {} notes", app.project.files.len(), app.notes_queued()),
-                Style::default().fg(theme::FG),
-            ),
-        ]));
-    } else {
-        lines.push(Line::from(vec![
-            Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
-            Span::styled(
-                format!(
-                    "{} file{} changed \u{b7} {} notes queued \u{b7} {} flagged",
-                    app.project.files.len(),
-                    if app.project.files.len() == 1 { "" } else { "s" },
-                    app.notes_queued(),
-                    app.files_flagged()
-                ),
-                Style::default().fg(theme::FG),
-            ),
-        ]));
-    }
+    lines.push(Line::from(vec![
+        Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
+        Span::styled(
+            tree_footer_counts(app.project.files.len(), app.notes_queued(), app.files_flagged(), area.width as usize),
+            Style::default().fg(theme::FG),
+        ),
+    ]));
 
     match &app.review_clipboard_status {
         Some(Ok(msg)) => lines.push(Line::from(vec![
@@ -447,4 +467,64 @@ fn draw_hover(f: &mut Frame, hover: &crate::data::HoverInfo, cursor_line: usize,
     )));
 
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_footer_never_exceeds_the_sidebar_width() {
+        // 38 is the wide sidebar and 24 the narrow one; the rest are widths
+        // in between and below, where the long form used to be cut off
+        // mid-word with nothing to indicate it.
+        for width in [10usize, 16, 24, 30, 36, 38, 44] {
+            for files in [0usize, 1, 12] {
+                let s = tree_footer_counts(files, 3, 2, width);
+                assert!(s.chars().count() <= width.saturating_sub(2), "{s:?} overflows a {width}-column sidebar");
+            }
+        }
+    }
+
+    #[test]
+    fn tree_footer_reports_every_count_at_the_wide_sidebar_width() {
+        // 38 is the sidebar `draw` renders on any non-narrow terminal, and
+        // it's where the old text was silently cut off. All three counts
+        // have to survive at that width, including for two-digit tallies.
+        for (files, notes, flagged) in [(5usize, 3u32, 2usize), (12, 10, 3)] {
+            let s = tree_footer_counts(files, notes, flagged, 38);
+            assert_eq!(s, format!("{files} changed \u{b7} {notes} notes \u{b7} {flagged} flagged"), "at 38 columns");
+            assert!(s.chars().count() <= 36, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn tree_footer_drops_the_flagged_count_only_when_it_cannot_fit() {
+        // The 24-column narrow sidebar: no room for all three, so the
+        // flagged tally goes rather than the text being cut mid-word.
+        assert_eq!(tree_footer_counts(5, 3, 2, 24), "5 changed \u{b7} 3 notes");
+    }
+
+    #[test]
+    fn tree_footer_pluralizes_the_note_count() {
+        // Every other count line in the app gets this right; this one used
+        // to read "1 notes queued".
+        assert!(tree_footer_counts(2, 1, 0, 38).contains("1 note \u{b7}"), "{:?}", tree_footer_counts(2, 1, 0, 38));
+        assert!(tree_footer_counts(2, 0, 0, 38).contains("0 notes"), "{:?}", tree_footer_counts(2, 0, 0, 38));
+    }
+
+    #[test]
+    fn tree_footer_falls_back_to_an_ellipsis_when_nothing_fits() {
+        let tiny = tree_footer_counts(5, 3, 2, 8);
+        assert!(tiny.ends_with('\u{2026}'), "{tiny:?}");
+        assert!(tiny.chars().count() <= 6, "{tiny:?}");
+    }
+
+    #[test]
+    fn scroll_offset_keeps_the_selection_on_screen() {
+        assert_eq!(scroll_offset(0, 100, 10), 0);
+        assert_eq!(scroll_offset(50, 100, 10), 45, "centered when there is room on both sides");
+        assert_eq!(scroll_offset(99, 100, 10), 90, "clamped at the end");
+        assert_eq!(scroll_offset(3, 5, 10), 0, "everything fits, no scrolling");
+    }
 }

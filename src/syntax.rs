@@ -1,4 +1,4 @@
-//! Lightweight, hand-rolled syntax highlighting for Navigate's source view.
+//! Lightweight, hand-rolled syntax highlighting for Review's source view.
 //!
 //! This tokenizes one line at a time, independent of every other line — not
 //! a real lexer. Multi-line constructs (a Rust block comment, a Python
@@ -6,7 +6,7 @@
 //! oddly at their boundaries. Good enough for a quick read over a handful
 //! of common languages; not a substitute for a real grammar.
 //!
-//! Deliberately scoped to Navigate's source view only — the Steer/Curation
+//! Deliberately scoped to that source view only — the Review and Curate
 //! diff panels already use color to mean added/removed/context, and
 //! layering a second, unrelated color meaning on top of that would make
 //! both harder to read.

@@ -52,7 +52,7 @@ pub enum ContentView {
     Focused,
 }
 
-/// What an in-flight `pi` turn is for. `Chat` (the normal Agent-pane
+/// What an in-flight agent turn is for. `Chat` (the normal Agent-pane
 /// conversation, in either read-only or edit mode) streams into the
 /// visible transcript as usual. `CommitMessage` is a silent background
 /// turn — its result goes straight to `commit_message`, never the
@@ -75,7 +75,16 @@ pub struct App {
 
     // REVIEW
     pub project: Project,
-    pub review_is_real: bool,
+    /// Whether this session is running against `--demo`'s throwaway repo
+    /// rather than a repository the user chose.
+    ///
+    /// An explicit flag from `main.rs`, not something inferred from the
+    /// review data. It used to be `review_is_real`, meaning "gitreview
+    /// handed back real data rather than mock data" — but the demo repo is
+    /// a real git repository now (see `demo.rs`), so there is nothing left
+    /// in the diff itself to tell the two apart, and nothing should be:
+    /// the demo's whole value is that it exercises the same code path.
+    pub demo: bool,
     pub split_diff: bool,
     pub tree: Vec<TreeEntry>,
     pub tree_index: usize,
@@ -202,10 +211,10 @@ pub enum EditorTarget {
 }
 
 /// How often `sync_from_disk` re-reads the repo to pick up changes made
-/// outside hoot (an external `pi` run, an editor, `git` on the command
-/// line). A plain poll rather than an OS file-watcher: this app already
-/// re-derives all of its state from disk on demand (git diff, fs reads),
-/// so a cheap periodic re-check reuses that instead of adding a new
+/// outside hoot (an agent run in another terminal, an editor, `git` on the
+/// command line). A plain poll rather than an OS file-watcher: this app
+/// already re-derives all of its state from disk on demand (git diff, fs
+/// reads), so a cheap periodic re-check reuses that instead of adding a new
 /// notification-based dependency and its own failure modes.
 const FS_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
@@ -245,7 +254,7 @@ fn diff_context_for(target_dir: &std::path::Path, file: &std::path::Path) -> Vec
 }
 
 impl App {
-    pub fn new(target_dir: PathBuf, keymap: Keymap, agent_backend: AgentBackend) -> Self {
+    pub fn new(target_dir: PathBuf, keymap: Keymap, agent_backend: AgentBackend, demo: bool) -> Self {
         let review = crate::gitreview::load(&target_dir);
         let tree = fsnav::build_tree(&target_dir);
         let symbols = fsnav::scan_symbols(&target_dir);
@@ -270,7 +279,7 @@ impl App {
             last_fs_poll: Instant::now(),
 
             project: review.project,
-            review_is_real: review.is_real,
+            demo,
             split_diff: false,
 
             tree,
@@ -318,9 +327,10 @@ impl App {
             curation_files: review.curation_files,
             curation_index: 0,
             curation_hunk_index: 0,
-            // Real diffs get an empty message the user must actually write —
-            // the drafted mock text belongs only to the non-git demo path.
-            commit_message: if review.is_real { String::new() } else { data::mock_commit_message() },
+            // Always empty, demo or not: the message is something you write
+            // (or ask the agent for), never something pre-filled on your
+            // behalf and then committed because it looked ready.
+            commit_message: String::new(),
             commit_message_status: None,
             open_editor_requested: None,
             last_commit: None,
@@ -335,7 +345,6 @@ impl App {
     fn refresh_review(&mut self) {
         let review = crate::gitreview::load(&self.target_dir);
         self.project = review.project;
-        self.review_is_real = review.is_real;
         self.curation_files = review.curation_files;
         self.curation_index = 0;
         self.curation_hunk_index = 0;
@@ -361,8 +370,13 @@ impl App {
         self.diff_index_for(&self.nav_file)
     }
 
-    /// Diff if the open file has uncommitted changes, source otherwise —
-    /// the default `content_view` every time a different file is opened.
+    /// The `content_view` every newly-opened file starts in. Always
+    /// `Context`, since it renders correctly whether or not the file has a
+    /// diff — a changed file shows the whole file with its changes overlaid
+    /// in place, an unchanged one shows plain source. `Focused` is only ever
+    /// reached by pressing `v` on a file that actually has a diff. Kept as a
+    /// named function rather than inlining the constant so every "open a
+    /// file" path is guaranteed to agree on the answer.
     fn default_content_view(&self) -> ContentView {
         ContentView::Context
     }
@@ -421,7 +435,7 @@ impl App {
 
     /// Called every event-loop tick; re-reads the repo from disk at most
     /// once per `FS_POLL_INTERVAL` and folds in anything that changed
-    /// outside hoot — a `pi` run in another terminal, an editor, `git` on
+    /// outside hoot — an agent run in another terminal, an editor, `git` on
     /// the command line. Keeps Review usable as a pure review/browsing
     /// layer even when whatever's making the changes isn't hoot's own
     /// Agent pane.
@@ -432,7 +446,7 @@ impl App {
         self.last_fs_poll = Instant::now();
 
         self.sync_review_from_disk();
-        self.sync_navigate_from_disk();
+        self.sync_tree_from_disk();
     }
 
     /// Re-reads the git diff and merges it into `self.project` /
@@ -493,7 +507,6 @@ impl App {
             }
         }
         self.project = review.project;
-        self.review_is_real = review.is_real;
         self.curation_files = review.curation_files;
         self.curation_index = self.curation_index.min(self.curation_files.len().saturating_sub(1));
         let hunk_total = self.curation_files.get(self.curation_index).map(|f| f.total()).unwrap_or(0);
@@ -510,7 +523,7 @@ impl App {
     /// re-scanned alongside a tree change (a file was added/removed/moved)
     /// rather than on every poll, since a full symbol scan is the more
     /// expensive of the two and a same-file content edit doesn't need it.
-    fn sync_navigate_from_disk(&mut self) {
+    fn sync_tree_from_disk(&mut self) {
         let new_tree = fsnav::build_tree(&self.target_dir);
         if new_tree != self.tree {
             self.tree = new_tree;
@@ -686,22 +699,24 @@ impl App {
         }
     }
 
-    /// Ctrl+G in Curation: asks `pi` to draft a commit message from the real
-    /// diff of everything currently selected — a silent, read-only,
-    /// no-tools-needed turn that never touches the visible Agent
-    /// transcript. Completing it opens `$EDITOR` for a last pass (see
-    /// `apply_agent_event`'s `AgentEnd` handling).
+    /// `g` in Curate: asks the active agent backend to draft a commit
+    /// message from the real diff of everything currently selected — a
+    /// silent, read-only, no-tools-needed turn that never touches the
+    /// visible Agent transcript. Completing it opens `$EDITOR` for a last
+    /// pass (see `apply_agent_event`'s `AgentEnd` handling).
     pub fn generate_commit_message(&mut self) {
         if self.agent_running {
             return;
         }
-        // The diff behind a demo "selection" is fabricated (data::mock_project),
-        // not something a real repo actually produced — spawning a real agent
-        // turn over it would burn a real API call on fictional content the
-        // user never asked to send anywhere, just for pressing `g` out of
-        // curiosity while exploring --demo.
-        if !self.review_is_real {
-            self.commit_message_status = Some("Demo mode — nothing real to summarize.".to_string());
+        // The demo's diff is real now (it's a real repo), so this is no
+        // longer about fabricated content — it's about cost. `g` is one
+        // keypress away while someone is poking around `--demo`, and it
+        // spawns a real agent subprocess against a real model. Nobody
+        // exploring the UI asked to spend an API call on a throwaway repo's
+        // invented change.
+        if self.demo {
+            self.commit_message_status =
+                Some("Demo mode \u{2014} not spending a real agent turn on a throwaway repo. Press e to write one.".to_string());
             return;
         }
         let diff_text = self.selected_diff_text();
@@ -832,7 +847,7 @@ impl App {
             // A cancelled turn can still have written real files before it
             // was killed — pull those in too, same as a completed turn.
             self.sync_review_from_disk();
-            self.sync_navigate_from_disk();
+            self.sync_tree_from_disk();
             return;
         }
         // Every turn writes directly to target_dir now, so whatever's
@@ -847,7 +862,7 @@ impl App {
         };
         self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
         self.sync_review_from_disk();
-        self.sync_navigate_from_disk();
+        self.sync_tree_from_disk();
     }
 
     /// Kills the running agent subprocess, if any — the only way to stop a
@@ -1189,8 +1204,8 @@ impl App {
         }
     }
 
-    /// Turns every queued review note and flag into a real prompt for
-    /// `pi` — all of them, not just whatever file happens to be open right
+    /// Turns every queued review note and flag into a real prompt for the
+    /// agent — all of them, not just whatever file happens to be open right
     /// now. Grouped under their file, with an explicit line annotation, so
     /// the agent can't confuse which file (or line) a piece of feedback is
     /// actually about. This is only ever shown to the user in the iterate
@@ -1618,7 +1633,7 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    /// Two files, each with one hunk, so Hoot/Curation navigation and
+    /// Two files, each with one hunk, so Review/Curate navigation and
     /// selection have more than one row to move between.
     fn two_file_app(label: &str) -> (App, PathBuf) {
         let dir = scratch_repo(label);
@@ -1628,7 +1643,7 @@ mod tests {
         fs::write(dir.join("b.txt"), "b1-changed\nb2\n").unwrap();
         Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
         // Leave both staged-but-uncommitted so `git diff HEAD` still sees them.
-        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         (app, dir)
     }
 
@@ -1652,7 +1667,7 @@ mod tests {
         // `quit_key_is_configurable` below covers the actually-configurable
         // `q` binding separately.
         let dir = scratch_repo("ctrlc");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.on_key(ctrl('c'));
         assert!(app.should_quit);
         let _ = fs::remove_dir_all(&dir);
@@ -1689,7 +1704,7 @@ mod tests {
         // this only asserts the routing, not that unsaved overlay text is
         // itself protected — that's a separate question.
         let dir = scratch_repo("ctrlc-overlay");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
         app.overlay = Overlay::NoteInput;
         app.note_input = "some in-progress note text".to_string();
@@ -1705,7 +1720,7 @@ mod tests {
         let dir = scratch_repo("quit-remap");
         let mut keymap = Keymap::defaults();
         keymap.set(Action::Quit, crate::keymap::KeyChord { code: KeyCode::Char('z'), mods: KeyModifiers::NONE });
-        let mut app = App::new(dir.clone(), keymap, AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), keymap, AgentBackend::Pi, false);
 
         app.on_key(key(KeyCode::Char('q')));
         assert!(!app.should_quit, "plain q should no longer quit once remapped");
@@ -1766,7 +1781,7 @@ mod tests {
         lines[0] = "line1-CHANGED".to_string();
         fs::write(dir.join("big.rs"), lines.join("\n") + "\n").unwrap();
 
-        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         assert!(app.current_diff_index().is_some(), "big.rs should have a diff");
         assert_eq!(app.content_view, ContentView::Context, "Context is always the default");
         // 30 file lines, but a *modified* line1 is a Removed+Added pair
@@ -1795,7 +1810,7 @@ mod tests {
         lines[4] = "line5-CHANGED".to_string(); // line 5, 0-indexed 4
         fs::write(dir.join("f.rs"), lines.join("\n") + "\n").unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.on_key(key(KeyCode::Tab)); // focus content
                                        // Rows: line1..line4 (context, 4 rows) then the old "line5"
                                        // (removed) then "line5-CHANGED" (added, file line 5) — 5 Downs
@@ -1827,7 +1842,7 @@ mod tests {
         lines[4] = "line5-CHANGED".to_string();
         fs::write(dir.join("f.rs"), lines.join("\n") + "\n").unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.on_key(key(KeyCode::Tab)); // focus content
         for _ in 0..5 {
             app.on_key(key(KeyCode::Down));
@@ -1843,11 +1858,11 @@ mod tests {
     }
 
     #[test]
-    fn navigate_tree_movement_via_arrows_and_vim_keys() {
+    fn review_tree_movement_via_arrows_and_vim_keys() {
         let dir = scratch_repo("navigate-tree");
         commit_file(&dir, "a.rs", "fn a() {}\n");
         commit_file(&dir, "b.rs", "fn b() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
 
         assert_eq!(app.tree_index, 0);
@@ -1862,10 +1877,10 @@ mod tests {
     }
 
     #[test]
-    fn navigate_source_cursor_movement_and_hover_toggle() {
+    fn review_source_cursor_movement_and_hover_toggle() {
         let dir = scratch_repo("navigate-cursor");
         commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n    let y = 2;\n}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
 
         // Up/Down move the tree until the source pane is focused — arrows
@@ -1891,10 +1906,10 @@ mod tests {
     }
 
     #[test]
-    fn navigate_comment_opens_note_input_targeting_the_current_line() {
+    fn review_comment_opens_note_input_targeting_the_current_line() {
         let dir = scratch_repo("navigate-comment");
         commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n    let y = 2;\n}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
         app.on_key(key(KeyCode::Tab)); // focus source
         app.on_key(key(KeyCode::Down)); // nav_line == 1
@@ -1919,7 +1934,7 @@ mod tests {
     #[test]
     fn note_input_esc_discards_without_saving() {
         let dir = scratch_repo("note-cancel");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
         app.project.files.push(crate::data::FileEntry {
             path: "x.rs".to_string(),
@@ -1946,7 +1961,7 @@ mod tests {
     #[test]
     fn note_input_editing_supports_cursor_movement_and_backspace() {
         let dir = scratch_repo("note-edit");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
         app.project.files.push(crate::data::FileEntry {
             path: "x.rs".to_string(),
@@ -1975,10 +1990,10 @@ mod tests {
     }
 
     #[test]
-    fn navigate_left_right_scroll_the_source_pane_only_when_focused() {
+    fn review_left_right_scroll_the_source_pane_only_when_focused() {
         let dir = scratch_repo("navigate-scroll");
         commit_file(&dir, "main.rs", "fn main() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
 
         app.on_key(key(KeyCode::Right));
@@ -1995,7 +2010,7 @@ mod tests {
     }
 
     #[test]
-    fn navigate_left_right_also_scroll_while_viewing_a_diff() {
+    fn review_left_right_also_scroll_while_viewing_a_diff() {
         // Regression: horizontal scroll used to be disabled whenever the
         // open file had a diff, which meant it was disabled for basically
         // every file under review — the diff-in-context view is the
@@ -2003,7 +2018,7 @@ mod tests {
         let dir = scratch_repo("navigate-scroll-diff");
         commit_file(&dir, "long.rs", "short\n");
         fs::write(dir.join("long.rs"), "a very much longer line than before, changed\n").unwrap();
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
         assert!(app.current_diff_index().is_some(), "long.rs should have a diff");
 
@@ -2018,11 +2033,11 @@ mod tests {
     }
 
     #[test]
-    fn navigate_page_up_down_and_home_end_in_source() {
+    fn review_page_up_down_and_home_end_in_source() {
         let dir = scratch_repo("navigate-page");
         let content: String = (1..=60).map(|n| format!("line{n}\n")).collect();
         commit_file(&dir, "big.rs", &content);
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
         app.on_key(key(KeyCode::Tab)); // focus source
         assert!(app.nav_focus == NavFocus::Content);
@@ -2043,10 +2058,10 @@ mod tests {
     }
 
     #[test]
-    fn navigate_page_down_clamps_at_the_end_of_a_short_file() {
+    fn review_page_down_clamps_at_the_end_of_a_short_file() {
         let dir = scratch_repo("navigate-page-short");
         commit_file(&dir, "small.rs", "line1\nline2\nline3\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
         app.on_key(key(KeyCode::Tab));
 
@@ -2057,10 +2072,10 @@ mod tests {
     }
 
     #[test]
-    fn navigate_enter_focuses_source_and_opening_a_file_resets_scroll() {
+    fn review_enter_focuses_source_and_opening_a_file_resets_scroll() {
         let dir = scratch_repo("navigate-open-focus");
         commit_file(&dir, "a.rs", "fn a() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
         app.nav_scroll_x = 12;
 
@@ -2083,7 +2098,7 @@ mod tests {
         commit_file(&dir, "z-changed.rs", "fn z() {}\n");
         fs::write(dir.join("z-changed.rs"), "fn z() { /* edited */ }\n").unwrap();
 
-        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         assert_eq!(app.nav_file, dir.join("z-changed.rs"));
         assert_eq!(app.tree[app.tree_index].path, dir.join("z-changed.rs"));
 
@@ -2091,11 +2106,11 @@ mod tests {
     }
 
     #[test]
-    fn navigate_enter_opens_the_selected_tree_file() {
+    fn review_enter_opens_the_selected_tree_file() {
         let dir = scratch_repo("navigate-open");
         commit_file(&dir, "a.rs", "fn a() {}\n");
         commit_file(&dir, "b.rs", "fn b() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
 
         // No subdirectories, so the tree is just [a.rs, b.rs] in that order;
@@ -2173,7 +2188,7 @@ mod tests {
         fs::remove_file(dir.join("sub/gone.txt")).unwrap();
         Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         assert!(!app.tree.iter().any(|e| e.path == dir.join("sub/gone.txt")), "deleted file shouldn't be in the tree");
         assert!(app.tree.iter().any(|e| e.path == dir.join("sub") && e.is_dir), "its directory should still be in the tree");
 
@@ -2206,7 +2221,7 @@ mod tests {
         lines[19] = "line20-CHANGED".to_string();
         fs::write(dir.join("f.txt"), lines.join("\n") + "\n").unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Curation;
         assert_eq!(app.curation_files[0].total(), 2, "expected two separate hunks");
         app.curation_hunk_index = 1; // the second hunk, around line20
@@ -2238,7 +2253,7 @@ mod tests {
         lines[19] = "line20-CHANGED".to_string();
         fs::write(dir.join("f.txt"), lines.join("\n") + "\n").unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Curation;
         assert_eq!(app.curation_files[0].total(), 2, "expected two separate hunks");
         assert_eq!(app.curation_hunk_index, 0);
@@ -2271,7 +2286,7 @@ mod tests {
     #[test]
     fn agent_input_accumulates_text_without_spawning_pi() {
         let dir = scratch_repo("agent-input");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Agent;
 
         for c in "hello".chars() {
@@ -2294,7 +2309,7 @@ mod tests {
         // cleared the box, spawn_turn no-op'd on agent_running, and the
         // text was already gone.
         let dir = scratch_repo("agent-input-race");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Agent;
         app.agent_running = true; // simulate a turn already in flight
 
@@ -2343,7 +2358,7 @@ mod tests {
     fn symbol_jump_close_discards_filter_state_choice() {
         let dir = scratch_repo("symjump-close");
         commit_file(&dir, "lib.rs", "fn foo() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.on_key(ctrl('k'));
         app.on_key(key(KeyCode::Char('f')));
         assert_eq!(app.symbol_filter, "f");
@@ -2371,20 +2386,19 @@ mod tests {
 
     #[test]
     fn generate_message_in_demo_mode_does_not_spawn_a_real_agent_turn() {
-        // Regression: pressing `g` out of curiosity while exploring --demo
-        // used to spawn a real pi/opencode turn over data::mock_project's
-        // fabricated diff — a real API call, real cost, for content that
-        // was never a real change to anything.
-        let dir = std::env::temp_dir().join(format!("hoot-app-test-demo-gen-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir); // never created — is_git_repo must see it as not-a-repo
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
-        assert!(!app.review_is_real, "should have fallen back to mock data");
+        // Pressing `g` out of curiosity while exploring --demo must not
+        // spend a real API call on a throwaway repo. The guard is the
+        // explicit demo flag now, not "the review data looks fake" — the
+        // demo's diff is a real git diff, which is the whole point of it.
+        let (_dir, repo) = crate::demo::create_repo().expect("demo repo");
+        let mut app = App::new(repo, Keymap::defaults(), AgentBackend::Pi, true);
+        assert!(!app.curation_files.is_empty(), "the demo repo should have something selected to summarize");
 
         app.mode = Mode::Curation;
         app.on_key(key(KeyCode::Char('g')));
 
         assert!(!app.agent_running, "demo mode must never spawn a real agent turn");
-        assert_eq!(app.commit_message_status.as_deref(), Some("Demo mode — nothing real to summarize."));
+        assert!(app.commit_message_status.as_deref().is_some_and(|s| s.starts_with("Demo mode")), "{:?}", app.commit_message_status);
     }
 
     #[test]
@@ -2729,7 +2743,7 @@ mod tests {
         }
         fs::write(dir.join("f.txt"), "one\ntwo\n").unwrap();
 
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Curation;
         app.commit_message = "Add a line".to_string();
         app.agent_running = true;
@@ -2786,15 +2800,15 @@ mod tests {
     }
 
     #[test]
-    fn sync_navigate_from_disk_picks_up_an_external_edit_to_the_open_file() {
+    fn sync_tree_from_disk_picks_up_an_external_edit_to_the_open_file() {
         let dir = scratch_repo("sync-nav-source");
         commit_file(&dir, "main.rs", "fn main() {\n    let x = 1;\n}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
         assert_eq!(app.source.len(), 3);
 
         fs::write(dir.join("main.rs"), "fn main() {\n    let x = 1;\n    let y = 2;\n}\n").unwrap();
-        app.sync_navigate_from_disk();
+        app.sync_tree_from_disk();
 
         assert_eq!(app.source.len(), 4, "should re-read the file that changed on disk");
         assert!(app.source.iter().any(|l| l.contains("let y = 2")), "{:?}", app.source);
@@ -2803,15 +2817,15 @@ mod tests {
     }
 
     #[test]
-    fn sync_navigate_from_disk_picks_up_a_new_file_added_externally() {
+    fn sync_tree_from_disk_picks_up_a_new_file_added_externally() {
         let dir = scratch_repo("sync-nav-tree");
         commit_file(&dir, "a.rs", "fn a() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Review;
         let before = app.tree.len();
 
         fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
-        app.sync_navigate_from_disk();
+        app.sync_tree_from_disk();
 
         assert_eq!(app.tree.len(), before + 1, "should pick up the new file on disk");
         assert!(app.tree.iter().any(|e| e.label == "b.rs"), "{:?}", app.tree.iter().map(|e| &e.label).collect::<Vec<_>>());
@@ -2822,7 +2836,7 @@ mod tests {
     #[test]
     fn commit_message_purpose_routes_text_and_end_away_from_the_transcript() {
         let dir = scratch_repo("purpose-text");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         let transcript_len_before = app.transcript.len();
 
         app.agent_purpose = TurnPurpose::CommitMessage;
@@ -2842,7 +2856,7 @@ mod tests {
     #[test]
     fn commit_message_purpose_routes_errors_to_status_not_transcript() {
         let dir = scratch_repo("purpose-error");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         let transcript_len_before = app.transcript.len();
 
         app.agent_purpose = TurnPurpose::CommitMessage;
@@ -2862,7 +2876,7 @@ mod tests {
         // the error the user was still looking at and popping up an editor
         // on an empty buffer with no explanation.
         let dir = scratch_repo("purpose-error-finish");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.agent_purpose = TurnPurpose::CommitMessage;
         app.agent_running = true;
 
@@ -2887,7 +2901,7 @@ mod tests {
         // which then has to be threaded into every later call. Confirms
         // that capture happens regardless of which turn purpose is active.
         let dir = scratch_repo("opencode-session-capture");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::OpenCode);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::OpenCode, false);
         assert!(app.opencode_session_id.is_none());
 
         app.apply_agent_event(AgentEvent::Session("ses_abc123".to_string()));
@@ -2905,7 +2919,7 @@ mod tests {
         let dir = scratch_repo("finder");
         commit_file(&dir, "main.rs", "fn main() {}\n");
         commit_file(&dir, "readme.md", "# hi\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
 
         app.on_key(ctrl('f'));
         assert!(app.overlay == Overlay::FileFinder);
@@ -2931,7 +2945,7 @@ mod tests {
     fn file_finder_esc_closes_without_opening_anything() {
         let dir = scratch_repo("finder-close");
         commit_file(&dir, "a.rs", "fn a() {}\n");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         let original_file = app.nav_file.clone();
 
         app.on_key(ctrl('f'));
@@ -2957,7 +2971,7 @@ mod tests {
     #[test]
     fn agent_input_types_at_cursor_not_just_appends() {
         let dir = scratch_repo("agent-cursor");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Agent;
 
         for c in "ac".chars() {
@@ -2978,7 +2992,7 @@ mod tests {
     #[test]
     fn agent_input_backspace_and_delete() {
         let dir = scratch_repo("agent-bs-del");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Agent;
         for c in "abc".chars() {
             app.on_key(key(KeyCode::Char(c)));
@@ -3006,7 +3020,7 @@ mod tests {
     #[test]
     fn agent_input_home_end_and_arrow_clamping() {
         let dir = scratch_repo("agent-home-end");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Agent;
         for c in "hello".chars() {
             app.on_key(key(KeyCode::Char(c)));
@@ -3030,7 +3044,7 @@ mod tests {
     #[test]
     fn agent_input_editing_is_utf8_safe() {
         let dir = scratch_repo("agent-utf8");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Agent;
         for c in "caf\u{e9}".chars() {
             app.on_key(key(KeyCode::Char(c)));
@@ -3045,7 +3059,7 @@ mod tests {
     #[test]
     fn agent_send_clears_input_and_resets_cursor() {
         let dir = scratch_repo("agent-send-reset");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Agent;
         for c in "hello".chars() {
             app.on_key(key(KeyCode::Char(c)));
@@ -3063,7 +3077,7 @@ mod tests {
         // deliberately not exercised here, same as elsewhere in this file —
         // it would spawn a real, un-cleaned-up `pi` subprocess.
         let dir = scratch_repo("agent-scroll");
-        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
         app.mode = Mode::Agent;
 
         assert_eq!(app.agent_scroll, 0);

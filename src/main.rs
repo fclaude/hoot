@@ -2,6 +2,7 @@ mod agent_client;
 mod app;
 mod clipboard;
 mod data;
+mod demo;
 mod editor;
 mod fsnav;
 mod gitcommit;
@@ -16,7 +17,7 @@ mod trust;
 mod ui;
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::event::{self, Event};
@@ -34,46 +35,16 @@ hoot — a terminal UI for reviewing a git working tree alongside an AI coding a
 
 Usage:
   hoot [path]                    review the repo at <path> (default: current directory)
-  hoot --demo                    explore the UI with fake demo data, no git repo needed
+  hoot --demo                    explore the UI on a throwaway demo repo, no setup needed
   hoot --agent <pi|opencode>     pick the agent backend (default: opencode)
   hoot --print-keymap            print the generated keybindings reference and exit
   hoot --help                    print this message and exit
   hoot --version                 print the version and exit
 
 <path> must exist and be a git repository, or hoot exits with an error —
-pass --demo instead if you just want to look around the UI.
+pass --demo instead if you just want to look around the UI. --demo builds a
+small git repository in a temp directory and deletes it again on exit.
 ";
-
-/// Writes placeholder source files under `dir`, matching the file paths
-/// `data::mock_project` names, so `--demo` has something real on disk for
-/// Navigate to browse and an agent to point its `--dir` at. Their content
-/// has nothing to do with the mock review's fabricated hunks/notes — those
-/// come from `data::mock_project`/`mock_curation_files` regardless of what
-/// is or isn't on disk; this only needs to look like a plausible small
-/// project when opened.
-fn write_demo_files(dir: &Path) {
-    const FILES: &[(&str, &str)] = &[
-        ("main.rs", "mod index;\nmod query;\n\nfn main() {\n    println!(\"search-index demo\");\n}\n"),
-        ("lib.rs", "pub mod index;\npub mod query;\n"),
-        ("index/mod.rs", "pub mod postings;\n\npub struct Index {\n    pub postings: postings::Postings,\n}\n"),
-        (
-            "index/postings.rs",
-            "pub struct Postings {\n    docs: Vec<u32>,\n}\n\nimpl Postings {\n    pub fn iter(&self) -> PostingsIter {\n        PostingsIter { docs: &self.docs }\n    }\n}\n\npub struct PostingsIter<'a> {\n    docs: &'a [u32],\n}\n",
-        ),
-        (
-            "query/parser.rs",
-            "pub struct QueryParser;\n\nimpl QueryParser {\n    pub fn parse(&mut self) -> Result<Query, ParseError> {\n        self.token()\n    }\n}\n",
-        ),
-        ("tests/integration_test.rs", "#[test]\nfn finds_matching_documents() {\n    // demo placeholder\n}\n"),
-    ];
-    for (rel, content) in FILES {
-        let path = dir.join(rel);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, content);
-    }
-}
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -142,36 +113,17 @@ fn main() -> io::Result<()> {
     // deletes the demo directory, so it's bound here and just left alone
     // rather than immediately discarded.
     let (target_dir, _demo_guard) = if demo {
-        // Force gitreview::load's mock-data fallback regardless of what
-        // the real cwd happens to be — otherwise `--demo` run from inside
-        // an actual git repo (this one, say) would just show real data,
-        // since App::new loads whatever target_dir resolves to with no
-        // way to ask for fake data on top of a real repo. Deliberately NOT
-        // a git repo itself: `gitreview::load` only takes the mock-data
-        // branch while `is_git_repo` is false, so a real `.git` here would
-        // replace the fabricated demo review with a real (empty) diff on
-        // the very next poll tick. It does need to be a real, populated
-        // directory though — Navigate/Agent read and run against whatever
-        // `target_dir` resolves to on disk regardless of demo mode, so a
-        // path that doesn't exist at all used to surface as a raw
-        // "couldn't read" error and an agent that couldn't even spawn.
-        //
-        // Uses `tempfile::TempDir`, not a predictable `$TMPDIR/hoot-demo-<pid>`
-        // path built by hand: a guessable name in a world-writable temp dir
-        // is plantable — another local user pre-creates that exact path as a
-        // symlink before hoot does, and the `fs::create_dir_all`/`fs::write`
-        // calls below follow it straight into wherever they pointed it.
-        // `TempDir` picks an unpredictable name and creates it atomically, so
-        // there's nothing to plant in advance, and it deletes itself when
-        // dropped instead of accumulating forever across runs.
-        match tempfile::Builder::new().prefix("hoot-demo-").tempdir() {
-            Ok(dir) => {
-                write_demo_files(dir.path());
-                let canonical = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
-                (canonical, Some(dir))
+        // A real git repository in a temp directory, not a hand-written
+        // `Project` of invented hunks — see `demo.rs` for why that matters.
+        // Every screen then runs the same code it would against real work,
+        // and the directory deletes itself on exit.
+        match demo::create_repo() {
+            Ok((guard, repo)) => {
+                let canonical = repo.canonicalize().unwrap_or(repo);
+                (canonical, Some(guard))
             }
             Err(e) => {
-                eprintln!("error: couldn't create a demo directory: {e}");
+                eprintln!("error: couldn't create the demo repository: {e}");
                 std::process::exit(1);
             }
         }
@@ -220,7 +172,7 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    run(&mut terminal, target_dir, keymap, agent_backend)
+    run(&mut terminal, target_dir, keymap, agent_backend, demo)
 }
 
 /// Restores the terminal on the way out, whatever "the way out" turns out
@@ -240,8 +192,9 @@ fn run(
     target_dir: PathBuf,
     keymap: Keymap,
     agent_backend: AgentBackend,
+    demo: bool,
 ) -> io::Result<()> {
-    let mut app = App::new(target_dir, keymap, agent_backend);
+    let mut app = App::new(target_dir, keymap, agent_backend, demo);
     // Only the real production entry point reads real on-disk state for
     // this — see the field's doc comment on why App::new itself doesn't.
     app.agent_trust_acknowledged = trust::is_acknowledged(agent_backend);

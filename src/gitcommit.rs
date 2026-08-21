@@ -24,12 +24,13 @@
 //! a mode-only flip, a new empty file) is a single selectable unit with no
 //! hunks, staged from the header alone.
 //!
-//! Before any of that staging happens, three guards run in order:
+//! Before any of that staging happens, four guards run in order. The
+//! first two are pure checks — an empty commit message, or nothing
+//! selected at all, bails out before a single git command runs, so a
+//! no-op commit attempt is actually a no-op rather than a mutation that
+//! happens to also report an error. Then:
 //!
-//! 1. Nothing selected at all → bail out before touching git. Checked
-//!    first so a no-op commit attempt is actually a no-op, not a mutation
-//!    that happens to also report an error.
-//! 2. The index already has staged content → refuse outright, without
+//! 3. The index already has staged content → refuse outright, without
 //!    touching it. An earlier version of this function instead reset the
 //!    index to HEAD before restaging exactly the selection — correct for
 //!    *this screen's* view of the world, but Curate only knows about
@@ -40,7 +41,7 @@
 //!    telling the user to resolve it themselves (`git status`) is the
 //!    honest option: hoot only ever mutates an index it knows started
 //!    clean.
-//! 3. Each selected file's change is re-fetched from disk and compared
+//! 4. Each selected file's change is re-fetched from disk and compared
 //!    against what `project` (Curate's last synced view) has, immediately
 //!    before *that file* is staged — not trusted from whenever the caller
 //!    last polled, and not checked once upfront for the whole batch
@@ -62,7 +63,7 @@
 //! Any failure along the way — a rejected patch, a stale file, a failed
 //! verification, a `git commit` that a pre-commit hook or a missing
 //! signing key rejects — unstages everything this call staged before
-//! returning. Otherwise a retry would hit guard 2 above with a message
+//! returning. Otherwise a retry would hit guard 3 above with a message
 //! ("staged outside hoot") that's simply false for content hoot itself
 //! just staged, and the user would be stuck manually unstaging before they
 //! could even try again.
@@ -308,10 +309,11 @@ fn rollback(root: &Path, staged: &[Staged]) {
 }
 
 /// Best-effort: unstages exactly `paths` (never a blanket reset) so a
-/// failure inside `commit` leaves the index as clean as it found it. Guard
-/// #2 above already refused to run at all if the index had anything staged
-/// before this call started, so at the point this is called the index can
-/// only contain what this call itself staged. Errors are swallowed — this
+/// failure inside `commit` leaves the index as clean as it found it. The
+/// index-already-staged guard above already refused to run at all if the
+/// index held anything before this call started, so at the point this is
+/// called the index can only contain what this call itself staged — a
+/// blanket reset would be reaching past that. Errors are swallowed — this
 /// only ever runs while already unwinding a real error, and there's nothing
 /// more useful to do with a second one than leave the affected paths staged
 /// for the user to sort out by hand.

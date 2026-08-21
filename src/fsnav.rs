@@ -465,7 +465,7 @@ mod tests {
         // idea what Git ignores, so a gitignored directory full of logs or
         // scratch files (a local tool's working state, a build cache not
         // yet excluded from SKIP_DIRS by name, ...) showed up in the
-        // Navigate sidebar right alongside real tracked/untracked source —
+        // Review sidebar right alongside real tracked/untracked source —
         // and could exhaust TREE_BUDGET before any real file was reached.
         let dir = scratch_dir("tree-gitignore");
         let status = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap();

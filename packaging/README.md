@@ -10,9 +10,9 @@ Pushing a tag like `v0.1.0` runs [`.github/workflows/release.yml`](../.github/wo
 
 That covers "download a binary" and "download a `.deb`/`.rpm`". It does **not** cover Homebrew, Fedora COPR, or the AUR — those each publish through a repo/account only a human can set up. Below is what's left for each, once the project has a real public repo and at least one tagged release to point at.
 
-## Before any of this works
+## What the metadata already covers
 
-- `repository` and the deb `maintainer`/`copyright` in `Cargo.toml` are filled in (`fclaude/hoot`, `Francisco Claude-Faust <fclaude@recoded.cl>`), and the `license = "MIT"` declaration is backed by a `LICENSE` file in the repo root.
+`repository`, the deb `maintainer`/`copyright`, and `license = "MIT"` are all set in `Cargo.toml`, and the license declaration is backed by a `LICENSE` file in the repo root — so `cargo deb` and `cargo generate-rpm` have everything they need without further setup.
 
 ## Testing the deb/rpm build locally
 
@@ -29,7 +29,7 @@ cargo generate-rpm            # -> target/generate-rpm/hoot-*.rpm
 2. Add `Formula/hoot.rb` there, pointing at the release tarball URLs the workflow above produces, with each one's `sha256` (from the release's checksums, or `shasum -a 256` on the downloaded tarball).
 3. Users install with `brew tap fclaude/hoot && brew install hoot`.
 
-A single formula can cover both macOS binaries with an `on_arm`/`on_intel` block. Once there's a real release to point at, ask me to draft the formula.
+A single formula can cover both macOS binaries with an `on_arm`/`on_intel` block — there's nothing to write until a tagged release exists to point at.
 
 ## Fedora (COPR)
 

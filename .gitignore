@@ -1,1 +1,6 @@
 /target
+
+# Local scratch that must never end up in a commit. `.remember/` already
+# excludes itself via its own `.gitignore`; this is the second lock.
+.remember/
+.DS_Store

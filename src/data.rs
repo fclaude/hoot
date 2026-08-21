@@ -1,5 +1,12 @@
-//! Mock data for the `hoot` demo. Content mirrors the worked example used
-//! throughout the source design mockups (a fictional `search-index` crate).
+//! The types every screen shares: a parsed diff (files, hunks, lines), the
+//! metadata git prints around it, and the small per-screen structs built
+//! from those.
+//!
+//! Deliberately holds no data of its own any more. It used to also carry a
+//! hand-written `Project` full of invented hunks for `--demo` to display,
+//! which is exactly what let the demo drift out of step with what Review
+//! read off disk — `demo.rs` builds a real repository instead, and every
+//! screen reads it through the same `gitreview` path as any other repo.
 
 use crate::theme::FileStatus;
 
@@ -22,19 +29,6 @@ pub struct DiffLine {
     /// staging/rendering code doesn't need a fifth `DiffLineKind` it must
     /// otherwise special-case everywhere `kind` is matched exhaustively.
     pub no_newline: bool,
-}
-
-fn ctx(text: &str) -> DiffLine {
-    DiffLine { kind: DiffLineKind::Context, text: text.to_string(), no_newline: false }
-}
-fn add(text: &str) -> DiffLine {
-    DiffLine { kind: DiffLineKind::Added, text: text.to_string(), no_newline: false }
-}
-fn rem(text: &str) -> DiffLine {
-    DiffLine { kind: DiffLineKind::Removed, text: text.to_string(), no_newline: false }
-}
-fn hdr(text: &str) -> DiffLine {
-    DiffLine { kind: DiffLineKind::HunkHeader, text: text.to_string(), no_newline: false }
 }
 
 #[derive(Clone, PartialEq)]
@@ -113,9 +107,13 @@ pub struct FileMeta {
 }
 
 impl FileMeta {
-    /// An ordinary in-place content change to `path` — the shape the demo
-    /// data and hand-built test fixtures use, where no real git header
-    /// exists to preserve.
+    /// An ordinary in-place content change to `path`, with no real git
+    /// header behind it. Test-only: every `FileMeta` in the running app is
+    /// parsed from actual `git diff` output, header included (that header
+    /// is what gets replayed when staging, so a synthesized one would be a
+    /// commit nobody reviewed). This exists so a unit test can hand-build a
+    /// `FileEntry` without a repo on disk.
+    #[cfg(test)]
     pub fn modified(path: &str) -> Self {
         Self { raw_path: path.as_bytes().to_vec(), ..Default::default() }
     }
@@ -308,331 +306,8 @@ pub struct Project {
     pub files: Vec<FileEntry>,
 }
 
-pub fn mock_project() -> Project {
-    // Every file below carries as many hunks as `mock_curation_files`
-    // claims as its "total" — a real `gitreview::load` always keeps
-    // `hunks.len()` and the curation total in lockstep (both come from the
-    // same parsed diff), and the demo used to fall short of that: four of
-    // these six files had an empty `hunks: vec![]` despite claiming 1-3
-    // selectable hunks, so Curate's hunk viewer had nothing to show past
-    // "No cached diff content for this hunk." Content is illustrative
-    // fiction either way (Review's whole-file Context pane reads the real
-    // placeholder files `write_demo_files` puts on disk instead), but it
-    // should at least be *present* everywhere the UI claims it is.
-    let main_hunks = vec![
-        Hunk {
-            lines: vec![
-                hdr("@@ -1,6 +1,8 @@"),
-                ctx(" mod index;"),
-                ctx(" mod query;"),
-                add("+mod cli;"),
-                ctx(""),
-                ctx(" fn main() {"),
-                rem("-    run_search();"),
-                add("+    let args = cli::parse_args();"),
-                add("+    run_search(&args);"),
-                ctx(" }"),
-            ],
-            note: None,
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -14,6 +16,9 @@ fn run_search(args: &Args) {"),
-                ctx("   let index = Index::load(&args.index_path)?;"),
-                ctx("   let query = QueryParser::new(&args.query).parse()?;"),
-                rem("-   let results = index.search(&query);"),
-                add("+   let results = index.search(&query)?;"),
-                add("+   for doc in &results {"),
-                add("+       println!(\"{}\", doc.title);"),
-                add("+   }"),
-            ],
-            note: None,
-        },
-    ];
-
-    let lib_hunks = vec![Hunk {
-        lines: vec![
-            hdr("@@ -1,4 +1,5 @@"),
-            ctx(" pub mod index;"),
-            ctx(" pub mod query;"),
-            add("+pub mod cli;"),
-            ctx(""),
-            ctx(" pub use index::Index;"),
-        ],
-        note: None,
-    }];
-
-    let mod_hunks = vec![
-        Hunk {
-            lines: vec![
-                hdr("@@ -1,5 +1,6 @@"),
-                ctx(" pub mod postings;"),
-                add("+pub mod merge;"),
-                ctx(""),
-                ctx(" pub struct Index {"),
-                ctx("   pub postings: postings::Postings,"),
-                ctx(" }"),
-            ],
-            note: None,
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -12,6 +13,10 @@ impl Index {"),
-                ctx("   pub fn search(&self, query: &Query) -> Vec<DocId> {"),
-                rem("-     self.postings.iter().collect()"),
-                add("+     self.postings"),
-                add("+       .iter()"),
-                add("+       .filter(|doc| self.matches(doc, query))"),
-                add("+       .collect()"),
-                ctx("   }"),
-            ],
-            note: None,
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -30,4 +35,8 @@ impl Index {"),
-                ctx("   fn matches(&self, doc: &DocId, query: &Query) -> bool {"),
-                ctx("     true"),
-                ctx("   }"),
-                add("+"),
-                add("+  pub fn len(&self) -> usize {"),
-                add("+    self.postings.len()"),
-                add("+  }"),
-            ],
-            note: None,
-        },
-    ];
-
-    let postings_hunks = vec![
-        Hunk {
-            lines: vec![
-                hdr("@@ -42,7 +42,11 @@ impl Postings {"),
-                ctx("  pub fn iter(&self) -> PostingsIter {"),
-                ctx("    PostingsIter {"),
-                rem("-     docs: &self.docs,"),
-                add("+     docs: &self.docs,"),
-                add("+     positions: &self.positions,"),
-                add("+     freq: &self.freq,"),
-                add("+     offsets: &self.offsets,"),
-                ctx("    }"),
-                ctx("  }"),
-            ],
-            note: Some(
-                "note to agent: extract this into a named IterState type instead of an anonymous struct literal — reusable from search() too.".to_string(),
-            ),
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -89,9 +97,15 @@ impl Postings {"),
-                ctx("  let phrase = self.parse_phrase(phrase_query)?;"),
-                rem("-   for &doc_id in phrase.docs() {"),
-                add("+   for &doc_id in phrase.docs().iter() {"),
-                ctx("      let postings = self.index.get(doc_id)?;"),
-                ctx("      if postings.contains_all(&phrase.terms) {"),
-                ctx("        results.push(doc_id);"),
-                ctx("      }"),
-            ],
-            note: None,
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -110,6 +118,10 @@ impl Postings {"),
-                ctx("  fn contains_all(&self, terms: &[Term]) -> bool {"),
-                rem("-   terms.iter().all(|t| self.has_term(t))"),
-                add("+   terms.iter().all(|t| self.has_term(t) && self.positions_overlap(t))"),
-                ctx("  }"),
-                add("+"),
-                add("+ fn positions_overlap(&self, term: &Term) -> bool {"),
-                add("+   true"),
-                add("+ }"),
-            ],
-            note: None,
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -140,7 +152,9 @@ impl Postings {"),
-                ctx("  pub fn doc_frequency(&self, term: &Term) -> usize {"),
-                rem("-   self.freq.get(term).copied().unwrap_or(0)"),
-                add("+   self.freq"),
-                add("+     .get(term)"),
-                add("+     .copied()"),
-                add("+     .unwrap_or_default()"),
-                ctx("  }"),
-            ],
-            note: None,
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -170,4 +185,8 @@ impl Postings {"),
-                ctx("  pub fn len(&self) -> usize {"),
-                ctx("    self.docs.len()"),
-                ctx("  }"),
-                add("+"),
-                add("+ pub fn is_empty(&self) -> bool {"),
-                add("+   self.docs.is_empty()"),
-                add("+ }"),
-            ],
-            note: None,
-        },
-    ];
-
-    let parser_hunks = vec![
-        Hunk {
-            lines: vec![
-                hdr("@@ -12,6 +12,9 @@ impl QueryParser {"),
-                ctx("  pub fn parse(&mut self) -> Result<Query, ParseError> {"),
-                rem("-   self.token()?"),
-                add("+   self.token().map_err(|e| e.with_context(self.pos))?"),
-                ctx("  }"),
-            ],
-            note: Some("extract into a named IterState type — reusable from search() too.".to_string()),
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -25,6 +28,11 @@ impl QueryParser {"),
-                ctx("  fn token(&mut self) -> Result<Token, ParseError> {"),
-                rem("-   self.lexer.next()"),
-                add("+   self.lexer"),
-                add("+     .next()"),
-                add("+     .ok_or_else(|| ParseError::UnexpectedEof)"),
-                ctx("  }"),
-            ],
-            note: None,
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -40,7 +48,13 @@ impl QueryParser {"),
-                ctx("  fn parse_phrase(&mut self) -> Result<Phrase, ParseError> {"),
-                ctx("    let terms = self.terms()?;"),
-                add("+   if terms.is_empty() {"),
-                add("+     return Err(ParseError::EmptyPhrase);"),
-                add("+   }"),
-                ctx("    Ok(Phrase { terms })"),
-                ctx("  }"),
-            ],
-            note: None,
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -60,4 +72,7 @@ impl ParseError {"),
-                ctx("  pub fn with_context(self, pos: usize) -> Self {"),
-                ctx("    ParseError::At { pos, source: Box::new(self) }"),
-                ctx("  }"),
-                add("+"),
-                add("+ pub fn is_recoverable(&self) -> bool {"),
-                add("+   matches!(self, ParseError::UnexpectedEof)"),
-                add("+ }"),
-            ],
-            note: None,
-        },
-    ];
-
-    let test_hunks = vec![
-        Hunk {
-            lines: vec![
-                hdr("@@ -1,5 +1,6 @@"),
-                ctx(" use search_index::Index;"),
-                add("+use search_index::QueryParser;"),
-                ctx(""),
-                ctx(" #[test]"),
-                ctx(" fn finds_matching_documents() {"),
-            ],
-            note: None,
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -10,6 +11,12 @@ fn finds_matching_documents() {"),
-                ctx("  let results = index.search(&query).unwrap();"),
-                ctx("  assert_eq!(results.len(), 1);"),
-                add("+  assert_eq!(results[0].title, \"expected title\");"),
-                add("+}"),
-                add("+"),
-                add("+#[test]"),
-                add("+fn empty_query_returns_no_results() {"),
-                add("+  let index = Index::load(\"fixtures/small\").unwrap();"),
-            ],
-            note: None,
-        },
-        Hunk {
-            lines: vec![
-                hdr("@@ -22,3 +29,9 @@ fn finds_matching_documents() {"),
-                ctx("  let results = index.search(&Query::empty()).unwrap();"),
-                ctx("  assert!(results.is_empty());"),
-                ctx(" }"),
-                add("+"),
-                add("+#[test]"),
-                add("+fn phrase_queries_require_adjacent_terms() {"),
-                add("+  let index = Index::load(\"fixtures/small\").unwrap();"),
-                add("+  let results = index.search(&\"exact phrase\".parse().unwrap()).unwrap();"),
-                add("+  assert!(results.is_empty());"),
-                add("+}"),
-            ],
-            note: None,
-        },
-    ];
-
-    let files = vec![
-        FileEntry {
-            path: "main.rs".to_string(),
-            hunk_count: 2,
-            notes: 0,
-            flagged: false,
-            hunks: main_hunks,
-            unsupported: None,
-            meta: FileMeta::modified("main.rs"),
-        },
-        FileEntry {
-            path: "lib.rs".to_string(),
-            hunk_count: 1,
-            notes: 0,
-            flagged: false,
-            hunks: lib_hunks,
-            unsupported: None,
-            meta: FileMeta::modified("lib.rs"),
-        },
-        FileEntry {
-            path: "index/mod.rs".to_string(),
-            hunk_count: 3,
-            notes: 0,
-            flagged: false,
-            hunks: mod_hunks,
-            unsupported: None,
-            meta: FileMeta::modified("index/mod.rs"),
-        },
-        FileEntry {
-            path: "index/postings.rs".to_string(),
-            hunk_count: 5,
-            notes: 2,
-            flagged: true,
-            hunks: postings_hunks,
-            unsupported: None,
-            meta: FileMeta::modified("index/postings.rs"),
-        },
-        FileEntry {
-            path: "query/parser.rs".to_string(),
-            hunk_count: 4,
-            notes: 1,
-            flagged: false,
-            hunks: parser_hunks,
-            unsupported: None,
-            meta: FileMeta::modified("query/parser.rs"),
-        },
-        FileEntry {
-            path: "tests/integration_test.rs".to_string(),
-            hunk_count: 3,
-            notes: 0,
-            flagged: false,
-            hunks: test_hunks,
-            unsupported: None,
-            meta: FileMeta::modified("tests/integration_test.rs"),
-        },
-    ];
-
-    Project { name: "search-index".to_string(), root: "search-index/src".to_string(), files }
-}
-
 // ---------------------------------------------------------------------
-// NAVIGATE
+// FILE TREE
 // ---------------------------------------------------------------------
 
 #[derive(PartialEq)]
@@ -644,9 +319,10 @@ pub struct TreeEntry {
     pub path: std::path::PathBuf,
 }
 
-/// A real, free-text review note — from Hoot (file-level, `line: None`) or
-/// Navigate (a specific line while browsing). Feeds into the real prompt
-/// Hoot's "iterate" sends to `pi`.
+/// A real, free-text review note left in Review — against a whole file
+/// (`line: None`) or against one specific line. Feeds into the prompt
+/// Review's "iterate" sends to the agent (and the identical one `y` copies
+/// to the clipboard).
 pub struct Note {
     pub path: String,
     pub line: Option<usize>,
@@ -721,32 +397,4 @@ impl CurationFile {
     pub fn total(&self) -> u32 {
         self.hunk_selected.len() as u32
     }
-}
-
-pub fn mock_curation_files() -> Vec<CurationFile> {
-    let cf = |path: &str, selected: u32, total: u32, status| CurationFile {
-        path: path.to_string(),
-        hunk_selected: (0..total).map(|i| i < selected).collect(),
-        status,
-    };
-    vec![
-        cf("main.rs", 1, 2, Some(FileStatus::Clean)),
-        cf("lib.rs", 1, 1, Some(FileStatus::Clean)),
-        cf("index/mod.rs", 2, 3, Some(FileStatus::Clean)),
-        cf("index/postings.rs", 0, 5, Some(FileStatus::Flagged)),
-        cf("query/parser.rs", 3, 4, Some(FileStatus::HasNotes)),
-        cf("tests/integration_test.rs", 0, 3, Some(FileStatus::HasNotes)),
-    ]
-}
-
-pub fn mock_commit_message() -> String {
-    "Optimize postings iteration and improve error messages\n\
-     \n\
-     - Extract postings iteration into a dedicated iterator type\n\
-     \x20 for better code reuse across search and merge paths\n\
-     - Improve QueryParser error handling with source context\n\
-     - Add phrase_match optimization for large indices\n\
-     \n\
-     Affected: postings.rs, parser.rs, integration_test.rs"
-        .to_string()
 }

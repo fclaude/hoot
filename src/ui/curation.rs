@@ -99,6 +99,31 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     f.render_widget(Paragraph::new(Line::from(spans)), rows[2]);
 }
 
+/// Where `cf`'s file stands, for the glyph next to it in the sidebar.
+///
+/// `Stale` is the one status that's genuinely *stored* — `sync_review_from_disk`
+/// sets it when a file changed shape underneath an existing review, and
+/// only an explicit re-look clears it, so it has to survive a redraw. The
+/// other three are just a reading of the file's current review state, so
+/// they're derived here rather than stored and kept in sync with a second
+/// copy of the same facts. It's the same flagged/has-notes state Review
+/// already marks its rows with, on the screen where you choose what to
+/// commit — previously nothing set them at all outside the old fabricated
+/// demo data, so every real row rendered blank.
+fn file_status(app: &App, cf: &crate::data::CurationFile) -> Option<theme::FileStatus> {
+    if let Some(stored) = cf.status {
+        return Some(stored);
+    }
+    let file = app.project.files.iter().find(|f| f.path == cf.path)?;
+    Some(if file.flagged {
+        theme::FileStatus::Flagged
+    } else if file.notes > 0 {
+        theme::FileStatus::HasNotes
+    } else {
+        theme::FileStatus::Clean
+    })
+}
+
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(app.project.root.clone(), Style::default().fg(theme::FG))));
@@ -117,7 +142,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         let path = super::truncate_with_ellipsis(&cf.path, path_budget);
 
         let mut spans = vec![Span::styled("\u{258c} ", Style::default().fg(theme::DIM))];
-        if let Some(status) = cf.status {
+        if let Some(status) = file_status(app, cf) {
             spans.push(Span::styled(format!("{} ", status.glyph()), Style::default().fg(status.color())));
         } else {
             spans.push(Span::raw("  "));
@@ -150,10 +175,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_commit_box(f: &mut Frame, app: &App, area: Rect) {
-    // The demo message is static fabricated text (data::mock_commit_message),
-    // not something any model actually drafted — say so plainly rather than
-    // implying a real local inference call happened.
-    let title = if app.review_is_real { "Commit message" } else { "Commit message (editable — fictional demo text)" };
+    let title = "Commit message";
     let mut lines: Vec<Line<'static>> = Vec::new();
     if let Some(status) = &app.commit_message_status {
         lines.push(Line::from(Span::styled(status.clone(), Style::default().fg(theme::ORANGE))));
