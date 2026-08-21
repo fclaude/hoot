@@ -8,7 +8,19 @@ use crate::app::App;
 use crate::theme;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
-    let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(0), Constraint::Length(1)]).split(area);
+    // The result of the last commit gets a row to itself rather than being
+    // appended to the hint row. It used to share that row, and lost: the
+    // hints alone run to about 110 columns, so on any ordinary terminal the
+    // outcome was truncated down to a character or two. That was survivable
+    // while the only outcome was success (the file list emptying says as
+    // much), but a *refusal* — an agent turn still running, an index staged
+    // outside hoot, a selection the index didn't match — is a sentence the
+    // user has to be able to read, and it was the part being cut off.
+    let result_rows = u16::from(app.last_commit.is_some());
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(result_rows), Constraint::Length(1)])
+        .split(area);
 
     // Wide enough that the summary line ("Files: N  Selected hunks: N/N")
     // fits without clipping on its own — it was clipping even at 140
@@ -66,21 +78,25 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
             ("c", "Commit"),
         ])
     };
+    if let Some(result) = &app.last_commit {
+        let (text, color) = match result {
+            Ok(summary) => (format!("\u{2714} {summary}"), theme::GREEN),
+            Err(e) => (format!("\u{2717} {e}"), theme::RED),
+        };
+        let text = super::truncate_with_ellipsis(&text, (rows[1].width as usize).saturating_sub(2));
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
+                Span::styled(text, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            ])),
+            rows[1],
+        );
+    }
+
     let mut spans = vec![Span::styled("\u{258c} ", Style::default().fg(theme::DIM))];
     spans.extend(hints.spans);
-    match &app.last_commit {
-        Some(Ok(summary)) => {
-            spans.push(Span::raw("   "));
-            spans.push(Span::styled(format!("\u{2714} {summary}"), Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD)));
-        }
-        Some(Err(e)) => {
-            spans.push(Span::raw("   "));
-            spans.push(Span::styled(format!("\u{2717} {e}"), Style::default().fg(theme::RED).add_modifier(Modifier::BOLD)));
-        }
-        None => {}
-    }
-    let spans = super::truncate_spans(spans, rows[1].width as usize);
-    f.render_widget(Paragraph::new(Line::from(spans)), rows[1]);
+    let spans = super::truncate_spans(spans, rows[2].width as usize);
+    f.render_widget(Paragraph::new(Line::from(spans)), rows[2]);
 }
 
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
@@ -189,11 +205,13 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
     };
     let file = app.project.files.iter().find(|f| f.path == cf.path);
 
-    // A binary file, pure rename, mode-only change, or submodule update
-    // has nothing the hunk parser can turn into selectable lines — say so
-    // plainly instead of showing a confusing "hunk 1/0" with no
-    // explanation. Committing it whole is still possible via `git add`
-    // outside hoot; there's just nothing to curate here.
+    // Binary content or a submodule pointer: hoot can neither show it as
+    // selectable lines nor stage it faithfully, so it says so plainly
+    // instead of showing a confusing "hunk 1/0" with no explanation, and
+    // offers no selectable unit at all — nothing here can end up in a
+    // commit by accident. (Renames and mode changes used to land here too;
+    // those are real, stageable changes now, not dead ends.) Committing
+    // this one is still possible with plain `git add` outside hoot.
     if let Some(reason) = file.and_then(|f| f.unsupported) {
         let title = format!("{} \u{2014} not curatable here", cf.path);
         let body_width = (area.width as usize).saturating_sub(2);
@@ -218,8 +236,14 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
     let shown_index = app.curation_hunk_index.min(cf.total().saturating_sub(1) as usize);
     let this_selected = cf.hunk_selected.get(shown_index).copied().unwrap_or(false);
 
+    // A change with no hunks of its own — a pure rename, a mode flip, a
+    // new empty file — is still a real change, and still one selectable
+    // unit. Calling it a "hunk" would be a lie about something the user is
+    // about to commit.
+    let metadata_only = file.is_some_and(|f| f.is_metadata_only());
+    let unit = if metadata_only { "change" } else { "hunk" };
     let title = format!(
-        "{} \u{2014} hunk {}/{} ({}) \u{2014} {}/{} selected",
+        "{} \u{2014} {unit} {}/{} ({}) \u{2014} {}/{} selected",
         cf.path,
         shown_index + 1,
         cf.total(),
@@ -229,6 +253,28 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
     );
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    // Everything about this change that isn't line content: which path it
+    // was renamed from, an executable bit that flipped. All of it is staged
+    // along with the hunks below, so all of it has to be *visible* — a mode
+    // change used to ride into a commit without ever appearing on screen.
+    for note in file.map(|f| f.meta.describe()).unwrap_or_default() {
+        lines.push(Line::from(Span::styled(
+            super::truncate_with_ellipsis(&note, (area.width as usize).saturating_sub(2)),
+            Style::default().fg(theme::CYAN),
+        )));
+    }
+    if metadata_only {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            super::truncate_with_ellipsis(
+                "There are no changed lines \u{2014} selecting this commits the change above on its own.",
+                (area.width as usize).saturating_sub(2),
+            ),
+            Style::default().fg(theme::DIM),
+        )));
+    } else if !lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
     // The sidebar's ⚠ glyph alone doesn't explain itself — spell out why
     // this file's hunks all came back deselected right where the user is
     // about to review them, not just as a badge they might not notice.
@@ -242,14 +288,16 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
     match file.and_then(|f| f.hunks.get(shown_index)) {
         Some(hunk) => {
             for dl in &hunk.lines {
-                lines.push(Line::from(Span::styled(super::expand_tabs_for_display(&dl.text), super::diff_line_style(dl.kind))));
+                lines.push(Line::from(super::diff_line_spans(dl, super::diff_line_style(dl.kind))));
             }
         }
+        None if metadata_only => {}
         None => {
             lines.push(Line::from(Span::styled("No cached diff content for this hunk.", Style::default().fg(theme::DIM))));
         }
     }
 
-    let hints = vec![super::key_hints(&[("\u{2190}\u{2192}", "Prev/next hunk"), ("Space", "Select/deselect this hunk")])];
+    let hints =
+        vec![super::key_hints(&[("\u{2190}\u{2192}", &format!("Prev/next {unit}")), ("Space", &format!("Select/deselect this {unit}"))])];
     super::draw_panel(f, area, &title, Paragraph::new(lines), &hints);
 }

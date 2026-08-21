@@ -238,12 +238,19 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
         .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Length(hints.len() as u16)])
         .split(inner);
 
-    let visible_height = rows[0].height as usize;
+    // Everything about the change that isn't line content — renamed from
+    // where, an executable bit that flipped. The diff body below can't show
+    // any of it (a pure rename has no lines at all), so it gets its own
+    // rows above, and the scrollable area shrinks to make room rather than
+    // pushing the last line off the bottom.
+    let meta_notes = file.meta.describe();
+    let visible_height = (rows[0].height as usize).saturating_sub(meta_notes.len());
     let scroll_y = scroll_offset(app.nav_line, numbered.len(), visible_height);
     let scroll_x = app.nav_scroll_x as usize;
 
     let rel = file.path.as_str();
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut lines: Vec<Line<'static>> =
+        meta_notes.iter().map(|n| Line::from(Span::styled(n.clone(), Style::default().fg(theme::CYAN)))).collect();
     for (i, (line_no, dl)) in numbered.iter().enumerate().skip(scroll_y).take(visible_height) {
         let bg = if i == app.nav_line { Some(theme::BG_SELECTION) } else { None };
         let mut style = super::diff_line_style(dl.kind);
@@ -256,6 +263,9 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
         }
         let visible_text: String = super::expand_tabs_for_display(&dl.text).chars().skip(scroll_x).collect();
         spans.push(Span::styled(visible_text, style));
+        if dl.no_newline {
+            spans.push(super::no_newline_span());
+        }
         lines.push(Line::from(spans).style(Style::default().bg(bg.unwrap_or(theme::BG_PANEL))));
     }
     if numbered.is_empty() {
@@ -269,25 +279,26 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
 }
 
 fn draw_diff_split(f: &mut Frame, app: &App, area: Rect, file: &FileEntry) {
-    let title = format!("{} \u{2014} before / after", file.path);
+    let notes = file.meta.describe();
+    let title = if notes.is_empty() {
+        format!("{} \u{2014} before / after", file.path)
+    } else {
+        format!("{} ({}) \u{2014} before / after", file.path, notes.join(", "))
+    };
 
     let mut before: Vec<Line<'static>> = Vec::new();
     let mut after: Vec<Line<'static>> = Vec::new();
 
     for hunk in &file.hunks {
         for dl in &hunk.lines {
-            let text = super::expand_tabs_for_display(&dl.text);
+            let row = |side: &mut Vec<Line<'static>>| side.push(Line::from(super::diff_line_spans(dl, super::diff_line_style(dl.kind))));
             match dl.kind {
                 DiffLineKind::HunkHeader | DiffLineKind::Context => {
-                    before.push(Line::from(Span::styled(text.clone(), super::diff_line_style(dl.kind))));
-                    after.push(Line::from(Span::styled(text, super::diff_line_style(dl.kind))));
+                    row(&mut before);
+                    row(&mut after);
                 }
-                DiffLineKind::Removed => {
-                    before.push(Line::from(Span::styled(text, super::diff_line_style(dl.kind))));
-                }
-                DiffLineKind::Added => {
-                    after.push(Line::from(Span::styled(text, super::diff_line_style(dl.kind))));
-                }
+                DiffLineKind::Removed => row(&mut before),
+                DiffLineKind::Added => row(&mut after),
             }
         }
         let max = before.len().max(after.len());

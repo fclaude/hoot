@@ -57,20 +57,171 @@ impl Hunk {
     }
 }
 
+/// What git said happened to a file, beyond its line content.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ChangeKind {
+    #[default]
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+}
+
+/// Everything about a file's change that *isn't* hunk text: which path(s)
+/// it involves, what kind of change it is, its file modes, and the exact
+/// header lines git itself printed for it.
+///
+/// This exists because a diff is not just its hunks. A rename that also
+/// edits content, an executable-bit flip, a brand-new empty file: all of
+/// those carry their entire meaning in the header, and an earlier version
+/// of this struct kept only the destination path and the text hunks. That
+/// dropped metadata was not merely invisible — it made commits wrong. A
+/// rename staged by path left the *old* path's deletion unstaged, so the
+/// commit contained both copies of the file; a mode flip rode along into a
+/// commit without ever being shown.
+///
+/// `header` is kept verbatim, byte-for-byte as git printed it, rather than
+/// re-rendered from the structured fields. It is what gets replayed to
+/// `git apply --cached`, so re-rendering it would mean re-deriving git's
+/// own path quoting — the exact thing that broke on paths containing
+/// quotes, backslashes, newlines, or non-UTF-8 bytes. The structured
+/// fields below are for *display and comparison*; the header is for git.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct FileMeta {
+    pub change: ChangeKind,
+    /// The pre-rename/copy path, for display. `None` for everything else.
+    pub old_path: Option<String>,
+    /// The new path's real bytes, exactly as they are on disk — which is
+    /// not always what `path` holds, since that one is a lossy, printable
+    /// rendering. Used whenever a path has to be handed back to git as an
+    /// argument (`git reset -- <path>`).
+    pub raw_path: Vec<u8>,
+    pub raw_old_path: Option<Vec<u8>>,
+    /// Set only when git actually printed them, which it does for a mode
+    /// change (`old mode`/`new mode`), a new file (`new` only) or a
+    /// deletion (`old` only) — not for an ordinary edit.
+    pub old_mode: Option<String>,
+    pub new_mode: Option<String>,
+    /// The extended header, verbatim: `diff --git` through `+++`,
+    /// everything before the first `@@`. Replayed as-is when staging.
+    pub header: Vec<String>,
+    /// A gitlink (mode 160000) on either side — a submodule pointer, whose
+    /// "content" is a commit id in another repository. Hoot has no way to
+    /// stage one faithfully, so it refuses rather than guessing.
+    pub submodule: bool,
+}
+
+impl FileMeta {
+    /// An ordinary in-place content change to `path` — the shape the demo
+    /// data and hand-built test fixtures use, where no real git header
+    /// exists to preserve.
+    pub fn modified(path: &str) -> Self {
+        Self { raw_path: path.as_bytes().to_vec(), ..Default::default() }
+    }
+
+    /// True when git reported different modes on the two sides — an
+    /// executable bit flipped, or a regular file turned into a symlink.
+    pub fn mode_changed(&self) -> bool {
+        matches!((&self.old_mode, &self.new_mode), (Some(a), Some(b)) if a != b)
+    }
+
+    /// Short human phrases for everything in here that isn't line content,
+    /// so the UI can *show* the parts of a change that have no hunks of
+    /// their own. Empty for a plain edit, which needs no explaining.
+    pub fn describe(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        match self.change {
+            ChangeKind::Renamed => out.push(format!("renamed from {}", self.old_path.as_deref().unwrap_or("?"))),
+            ChangeKind::Copied => out.push(format!("copied from {}", self.old_path.as_deref().unwrap_or("?"))),
+            ChangeKind::Added => out.push("new file".to_string()),
+            ChangeKind::Deleted => out.push("deleted".to_string()),
+            ChangeKind::Modified => {}
+        }
+        if self.mode_changed() {
+            let (old, new) = (self.old_mode.as_deref().unwrap_or("?"), self.new_mode.as_deref().unwrap_or("?"));
+            out.push(format!("mode {old} \u{2192} {new}{}", mode_meaning(old, new)));
+        }
+        out
+    }
+
+    /// The new path as real filesystem/argv bytes, for handing back to git.
+    pub fn os_path(&self) -> std::ffi::OsString {
+        os_string_from_bytes(&self.raw_path)
+    }
+
+    pub fn os_old_path(&self) -> Option<std::ffi::OsString> {
+        self.raw_old_path.as_deref().map(os_string_from_bytes)
+    }
+}
+
+/// The human-readable half of a mode change, when it's one of the two that
+/// actually mean something to a person — a plain `100644 → 100755` reads
+/// as noise otherwise.
+fn mode_meaning(old: &str, new: &str) -> &'static str {
+    match (old, new) {
+        ("100644", "100755") => " (made executable)",
+        ("100755", "100644") => " (executable bit removed)",
+        (_, "120000") => " (now a symlink)",
+        ("120000", _) => " (no longer a symlink)",
+        _ => "",
+    }
+}
+
+#[cfg(unix)]
+fn os_string_from_bytes(bytes: &[u8]) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::OsStr::from_bytes(bytes).to_os_string()
+}
+
+#[cfg(not(unix))]
+fn os_string_from_bytes(bytes: &[u8]) -> std::ffi::OsString {
+    std::ffi::OsString::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
 /// A file as it appears in the Review tree.
 #[derive(Clone, PartialEq)]
 pub struct FileEntry {
+    /// A printable rendering of the new path — lossy for a name that isn't
+    /// valid UTF-8 (see `gitreview::display_path`). Identity within the
+    /// UI, but never what gets handed to git: `meta.raw_path` is.
     pub path: String,
     pub hunk_count: u32,
     pub notes: u32,
     pub flagged: bool,
     pub hunks: Vec<Hunk>,
-    /// Set when the diff parser found a real change here but nothing it
-    /// can turn into selectable hunks — binary content, a pure rename, a
-    /// mode-only change, or a submodule pointer update. `hunks` is empty
-    /// in that case; this is why, so the UI can say so plainly instead of
+    /// Set when the diff parser found a real change here that hoot cannot
+    /// curate *or* stage — binary content, or a submodule pointer update.
+    /// This is the reason, so the UI can say so plainly instead of
     /// silently showing "0/0 hunks" with no explanation.
+    ///
+    /// Note what is deliberately *not* here any more: pure renames and
+    /// mode-only changes. Those have no hunks either, but they are
+    /// perfectly stageable from their header alone — see `is_metadata_only`.
     pub unsupported: Option<&'static str>,
+    pub meta: FileMeta,
+}
+
+impl FileEntry {
+    /// True when git reported a real change with no hunk content at all,
+    /// yet the change is still something that can be staged faithfully
+    /// from its header alone: a pure rename, a mode-only change, a
+    /// brand-new empty file. Curation gives these a single selectable
+    /// unit — there are no hunks to pick from, but there *is* something to
+    /// commit, and refusing to commit a `git mv` would be its own kind of
+    /// wrong.
+    pub fn is_metadata_only(&self) -> bool {
+        self.hunks.is_empty() && self.unsupported.is_none() && !self.meta.header.is_empty()
+    }
+
+    /// Whether two views of the same path describe the same change —
+    /// content *and* metadata. The freshness check at commit time compares
+    /// this rather than hunks alone: a concurrent `chmod +x` or `git mv`
+    /// leaves every hunk identical while changing what a commit would
+    /// contain, and used to sail straight through.
+    pub fn same_change_as(&self, other: &FileEntry) -> bool {
+        self.hunks == other.hunks && self.meta == other.meta
+    }
 }
 
 /// `hunks` flattened into one line sequence and paired with the
@@ -421,9 +572,33 @@ pub fn mock_project() -> Project {
     ];
 
     let files = vec![
-        FileEntry { path: "main.rs".to_string(), hunk_count: 2, notes: 0, flagged: false, hunks: main_hunks, unsupported: None },
-        FileEntry { path: "lib.rs".to_string(), hunk_count: 1, notes: 0, flagged: false, hunks: lib_hunks, unsupported: None },
-        FileEntry { path: "index/mod.rs".to_string(), hunk_count: 3, notes: 0, flagged: false, hunks: mod_hunks, unsupported: None },
+        FileEntry {
+            path: "main.rs".to_string(),
+            hunk_count: 2,
+            notes: 0,
+            flagged: false,
+            hunks: main_hunks,
+            unsupported: None,
+            meta: FileMeta::modified("main.rs"),
+        },
+        FileEntry {
+            path: "lib.rs".to_string(),
+            hunk_count: 1,
+            notes: 0,
+            flagged: false,
+            hunks: lib_hunks,
+            unsupported: None,
+            meta: FileMeta::modified("lib.rs"),
+        },
+        FileEntry {
+            path: "index/mod.rs".to_string(),
+            hunk_count: 3,
+            notes: 0,
+            flagged: false,
+            hunks: mod_hunks,
+            unsupported: None,
+            meta: FileMeta::modified("index/mod.rs"),
+        },
         FileEntry {
             path: "index/postings.rs".to_string(),
             hunk_count: 5,
@@ -431,8 +606,17 @@ pub fn mock_project() -> Project {
             flagged: true,
             hunks: postings_hunks,
             unsupported: None,
+            meta: FileMeta::modified("index/postings.rs"),
         },
-        FileEntry { path: "query/parser.rs".to_string(), hunk_count: 4, notes: 1, flagged: false, hunks: parser_hunks, unsupported: None },
+        FileEntry {
+            path: "query/parser.rs".to_string(),
+            hunk_count: 4,
+            notes: 1,
+            flagged: false,
+            hunks: parser_hunks,
+            unsupported: None,
+            meta: FileMeta::modified("query/parser.rs"),
+        },
         FileEntry {
             path: "tests/integration_test.rs".to_string(),
             hunk_count: 3,
@@ -440,6 +624,7 @@ pub fn mock_project() -> Project {
             flagged: false,
             hunks: test_hunks,
             unsupported: None,
+            meta: FileMeta::modified("tests/integration_test.rs"),
         },
     ];
 

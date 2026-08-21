@@ -203,18 +203,36 @@ fn main() -> io::Result<()> {
     }));
 
     enable_raw_mode()?;
+    // Ownership of the terminal's state transfers to this guard the moment
+    // raw mode is on, and its Drop is the *only* path that gives it back.
+    // Two things went wrong without it. An error between here and a fully
+    // built `Terminal` — `EnterAlternateScreen` failing, say — returned
+    // straight out of main with `?`, past cleanup that hadn't been reached
+    // yet, leaving the shell in raw mode with no echo. And on the normal
+    // exit path the three restore steps each ended in `?`, so the first one
+    // to fail skipped the two after it: a failed `disable_raw_mode` meant
+    // the alternate screen was never left and the cursor never came back.
+    // Drop can't use `?`, which is exactly the property wanted here — every
+    // step is attempted, independently, however the function ends.
+    let _terminal_guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, target_dir, keymap, agent_backend);
+    run(&mut terminal, target_dir, keymap, agent_backend)
+}
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+/// Restores the terminal on the way out, whatever "the way out" turns out
+/// to be: a clean return, an early `?` on a startup error, or an unwinding
+/// panic.
+struct TerminalGuard;
 
-    result
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+    }
 }
 
 fn run(

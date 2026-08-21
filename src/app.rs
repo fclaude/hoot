@@ -369,6 +369,20 @@ impl App {
 
     /// Commits whatever's currently selected in Curation, for real.
     fn commit_selected(&mut self) {
+        // Hoot's own agent is the one thing here that is *known* to be
+        // writing to the repo right now. Committing on top of a turn in
+        // flight means racing a writer whose edits, by definition, nobody
+        // has reviewed yet — gitcommit's freshness check would catch most
+        // of it and refuse, but refusing after the fact is a worse answer
+        // than not starting. Every other writer (an editor, a second
+        // terminal) is genuinely unknowable from in here and stays the
+        // freshness check's job.
+        if self.agent_running {
+            self.last_commit = Some(Err(
+                "an agent turn is running \u{2014} wait for it to finish, or press Esc to cancel it, before committing".to_string(),
+            ));
+            return;
+        }
         let result = crate::gitcommit::commit(&self.target_dir, &self.project, &self.curation_files, &self.commit_message);
         let ok = result.is_ok();
         self.last_commit = Some(result);
@@ -464,7 +478,7 @@ impl App {
             let old_new =
                 self.project.files.iter().find(|f| f.path == cf.path).zip(review.project.files.iter().find(|f| f.path == cf.path));
             match old_new {
-                Some((old, new)) if old.hunks == new.hunks => {
+                Some((old, new)) if old.same_change_as(new) => {
                     if let Some(old_cf) = self.curation_files.iter().find(|c| c.path == cf.path) {
                         if old_cf.hunk_selected.len() == cf.hunk_selected.len() {
                             cf.hunk_selected = old_cf.hunk_selected.clone();
@@ -553,6 +567,14 @@ impl App {
             .iter()
             .position(|e| e.path == path)
             .or_else(|| path.parent().and_then(|parent| self.tree.iter().position(|e| e.is_dir && e.path == parent)))
+            // A file directly in the repo root has no parent *row* to fall
+            // back to — the tree starts at the root's children, and the
+            // root itself isn't one of them — so the directory lookup above
+            // finds nothing and the cursor would be left parked on whatever
+            // unrelated row it happened to be on, looking selected. Row 0
+            // is the top of the very directory that contains the file, which
+            // is the same answer the directory case gives one level down.
+            .or_else(|| (path.parent() == Some(self.target_dir.as_path()) && !self.tree.is_empty()).then_some(0))
             .unwrap_or(self.tree_index);
         self.refresh_hover();
         self.mode = Mode::Review;
@@ -1906,6 +1928,7 @@ mod tests {
             flagged: false,
             hunks: vec![],
             unsupported: None,
+            meta: crate::data::FileMeta::modified("x.rs"),
         });
         app.nav_file = dir.join("x.rs"); // so current_diff_index() resolves to it
 
@@ -1932,6 +1955,7 @@ mod tests {
             flagged: false,
             hunks: vec![],
             unsupported: None,
+            meta: crate::data::FileMeta::modified("x.rs"),
         });
         app.nav_file = dir.join("x.rs"); // so current_diff_index() resolves to it
         app.on_key(key(KeyCode::Char('c')));
@@ -2686,6 +2710,44 @@ mod tests {
         app.curation_hunk_index = 0;
         app.on_key(key(KeyCode::Char(' ')));
         assert_eq!(app.curation_files[0].status, None, "toggling a hunk should clear the stale badge");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn committing_is_refused_while_an_agent_turn_is_running() {
+        // The agent writes to the same working tree Curate is about to
+        // commit from, and nothing it has written mid-turn has been
+        // reviewed yet. gitcommit's freshness check would catch a file that
+        // had already changed, but the turn is still in flight — the next
+        // write may land between the check and the commit. The only honest
+        // answer is not to start.
+        let dir = scratch_repo("commit-during-turn");
+        fs::write(dir.join("f.txt"), "one\n").unwrap();
+        for args in [["add", "-A"].as_slice(), &["commit", "-q", "-m", "init"]] {
+            Command::new("git").args(args).current_dir(&dir).status().unwrap();
+        }
+        fs::write(dir.join("f.txt"), "one\ntwo\n").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.mode = Mode::Curation;
+        app.commit_message = "Add a line".to_string();
+        app.agent_running = true;
+
+        app.on_key(key(KeyCode::Char('c')));
+
+        let err = app.last_commit.as_ref().expect("a refusal, not silence").as_ref().unwrap_err();
+        assert!(err.contains("agent turn is running"), "{err}");
+
+        let log = Command::new("git").args(["log", "--oneline"]).current_dir(&dir).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 1, "no commit should have landed");
+        let staged = Command::new("git").args(["diff", "--cached"]).current_dir(&dir).output().unwrap().stdout;
+        assert!(staged.is_empty(), "and nothing should have been staged either");
+
+        // Once the turn is over, the same keypress commits normally.
+        app.agent_running = false;
+        app.on_key(key(KeyCode::Char('c')));
+        assert!(app.last_commit.as_ref().unwrap().is_ok(), "{:?}", app.last_commit);
 
         let _ = fs::remove_dir_all(&dir);
     }

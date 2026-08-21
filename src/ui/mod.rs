@@ -180,7 +180,7 @@ pub fn expand_tabs_for_display(s: &str) -> String {
     use unicode_width::UnicodeWidthChar;
 
     const TAB_WIDTH: usize = 4;
-    if !s.contains('\t') {
+    if !s.chars().any(|c| c == '\t' || c.is_control()) {
         return s.to_string();
     }
     let mut out = String::with_capacity(s.len());
@@ -190,12 +190,34 @@ pub fn expand_tabs_for_display(s: &str) -> String {
             let spaces = TAB_WIDTH - (col % TAB_WIDTH);
             out.push_str(&" ".repeat(spaces));
             col += spaces;
+        } else if c.is_control() {
+            out.push(control_picture(c));
+            col += 1;
         } else {
             out.push(c);
             col += c.width().unwrap_or(0);
         }
     }
     out
+}
+
+/// A visible stand-in for a control character, from Unicode's Control
+/// Pictures block — `\r` becomes `␍`, an escape becomes `␛`.
+///
+/// Diff and source lines are file content, and file content can hold any
+/// byte at all. Writing a raw control character into the cell buffer means
+/// handing it to the terminal: a carriage return jumps the cursor back to
+/// the start of the line and overwrites what was just drawn, and an escape
+/// begins a sequence the terminal will happily interpret. Neither is
+/// something a file being reviewed should be able to do to the screen. A
+/// one-column glyph keeps the layout honest as well — every one of these
+/// is exactly one cell wide.
+fn control_picture(c: char) -> char {
+    match c as u32 {
+        0x7f => '\u{2421}',
+        n @ 0..=0x1f => char::from_u32(0x2400 + n).unwrap_or('\u{fffd}'),
+        _ => '\u{fffd}',
+    }
 }
 
 /// Truncates `s` to at most `max_width` display columns, replacing the
@@ -252,6 +274,31 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect { x, y, width, height }
+}
+
+/// The trailing note that marks a diff line as the last one in a file that
+/// doesn't end in a newline — git's own `\ No newline at end of file`,
+/// appended to the line it belongs to rather than given a row of its own.
+///
+/// A row of its own would read more like git, but three different
+/// renderers show the same `DiffLine`s, and two of them anchor real
+/// indices to the row list: the cursor position and line-scoped comments.
+/// An inserted row would shift both. The reason it has to appear at all:
+/// without it, a change that only adds or removes a file's final newline
+/// shows up as an identical line removed and re-added, with nothing
+/// anywhere on screen to explain what the difference is.
+pub fn no_newline_span() -> Span<'static> {
+    Span::styled("  \\ No newline at end of file", Style::default().fg(theme::DIM))
+}
+
+/// `dl` rendered as one row: its text, plus the no-newline marker when it
+/// carries one.
+pub fn diff_line_spans(dl: &crate::data::DiffLine, style: Style) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(expand_tabs_for_display(&dl.text), style)];
+    if dl.no_newline {
+        spans.push(no_newline_span());
+    }
+    spans
 }
 
 pub fn diff_line_style(kind: crate::data::DiffLineKind) -> Style {
@@ -453,6 +500,84 @@ mod tests {
         let screen = render(&app, 120, 30);
         assert!(screen.contains("f.txt"), "{screen}");
         assert!(screen.contains("line1-changed"), "{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_commit_says_why_at_a_normal_terminal_width() {
+        // Regression: the outcome shared the hint row, and the hints alone
+        // run to roughly 110 columns — so at any ordinary width the message
+        // was truncated to a character or two. A refusal nobody can read is
+        // indistinguishable from nothing happening.
+        let dir = scratch_repo("commit-refusal-visible");
+        commit_file(&dir, "f.txt", "one\n");
+        fs::write(dir.join("f.txt"), "one\ntwo\n").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.mode = Mode::Curation;
+        app.last_commit = Some(Err("an agent turn is running \u{2014} wait for it to finish".to_string()));
+
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("an agent turn is running"), "{screen}");
+        assert!(screen.contains("wait for it to finish"), "the whole sentence, not a fragment of it: {screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_final_newline_change_says_so_instead_of_showing_two_identical_lines() {
+        // Removing a file's trailing newline is a real change with no
+        // visible difference: the diff shows `-b` and `+b`, character for
+        // character identical. Without the marker git prints, the screen
+        // gives no way at all to tell what changed — three renderers show
+        // this data and none of them used to include it.
+        let dir = scratch_repo("no-newline-visible");
+        commit_file(&dir, "f.txt", "a\nb\n");
+        fs::write(dir.join("f.txt"), "a\nb").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        let review = render(&app, 120, 30);
+        assert!(review.contains("No newline at end of file"), "Review's diff must say so: {review}");
+
+        app.mode = Mode::Curation;
+        let curate = render(&app, 120, 30);
+        assert!(curate.contains("No newline at end of file"), "and so must Curate's hunk view: {curate}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mode_change_is_visible_in_curate_before_it_can_be_committed() {
+        // It gets staged along with the file's content, so it has to be on
+        // screen. It used to be nowhere: the parser dropped it, and
+        // whole-file staging picked it up off disk anyway.
+        let dir = scratch_repo("mode-visible");
+        commit_file(&dir, "run.sh", "echo hi\n");
+        fs::write(dir.join("run.sh"), "echo hi\necho there\n").unwrap();
+        fs::set_permissions(dir.join("run.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.mode = Mode::Curation;
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("100755"), "the new mode must be shown: {screen}");
+        assert!(screen.contains("executable"), "in terms a person can act on: {screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mode_only_change_reads_as_a_selectable_change_not_an_empty_hunk_view() {
+        let dir = scratch_repo("mode-only-visible");
+        commit_file(&dir, "run.sh", "echo hi\n");
+        fs::set_permissions(dir.join("run.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi);
+        app.mode = Mode::Curation;
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("change 1/1"), "it's a change, not a \"hunk\": {screen}");
+        assert!(screen.contains("no changed lines"), "{screen}");
+        assert!(!screen.contains("No cached diff content"), "{screen}");
 
         let _ = fs::remove_dir_all(&dir);
     }

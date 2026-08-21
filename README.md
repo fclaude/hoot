@@ -33,6 +33,18 @@ Switch with **F1 / F2 / F3**, or **Ctrl+R / Ctrl+U / Ctrl+A** if your laptop map
 
 The first real agent turn on a given machine asks for an explicit confirmation of the above before it runs — a one-time prompt tracked per backend (`~/.hoot-agent-trust-ack-opencode`, `~/.hoot-agent-trust-ack-pi`), not shown again for that backend after you accept it.
 
+### What Curate actually commits
+
+Every selection — one hunk or the whole file — is staged by replaying the patch you just looked at through `git apply --cached`. Nothing is staged by path, so nothing can be picked up off disk after you reviewed it: the bytes in the commit are the bytes that were on screen. Before committing, hoot re-reads the index and checks it holds exactly the selection.
+
+A few consequences worth knowing:
+
+- **Renames and mode changes are shown, and travel with the file.** An executable bit that flipped appears in Curate as `mode 100644 → 100755 (made executable)` and is committed along with the content — never invisibly.
+- **A change with no lines is still a change.** A `chmod +x` on its own, or a new empty file, is one selectable unit with nothing to scroll through.
+- **Binary files and submodule pointers are refused, not guessed at.** They're shown, labelled, and offer nothing to select. Stage those with plain `git add`.
+- **Anything already staged outside hoot blocks the commit** — hoot only mutates an index it knows started clean, rather than deciding on your behalf what to do with work you staged by hand. Note that `git mv` stages the rename itself, so a repo mid-`git mv` falls into this case: finish it with `git commit` directly.
+- **A running agent turn blocks the commit too.** It's writing to the same tree, and nothing it has written mid-turn has been reviewed. `Esc` cancels the turn.
+
 Quitting (`q` or `Ctrl+C`) asks for confirmation first if there's anything in-memory that would be lost — queued notes, flagged files, a drafted commit message, or a turn still running.
 
 ## Keybindings
