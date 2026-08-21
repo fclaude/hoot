@@ -265,7 +265,12 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
             super::key_hints(&[
                 ("v", view_toggle_label),
                 ("s", "Split"),
-                ("i", &format!("Review {} notes \u{2192} send to agent", app.notes_queued())),
+                // Pluralized like the status line and the tree footer: this
+                // hint had kept "1 notes" after both of those were fixed.
+                (
+                    "i",
+                    &format!("Review {} note{} \u{2192} send to agent", app.notes_queued(), if app.notes_queued() == 1 { "" } else { "s" }),
+                ),
                 ("y", "...or copy the prompt to the clipboard"),
             ]),
         ]
@@ -322,7 +327,7 @@ fn draw_diff_scrollable(f: &mut Frame, app: &App, area: Rect, file: &crate::data
     f.render_widget(Paragraph::new(lines), rows[0]);
     let divider = "\u{2500}".repeat(rows[1].width as usize);
     f.render_widget(Paragraph::new(divider).style(Style::default().fg(theme::DIM)), rows[1]);
-    f.render_widget(Paragraph::new(hints), rows[2]);
+    super::draw_hints(f, rows[2], hints);
 }
 
 fn draw_diff_split(f: &mut Frame, app: &App, area: Rect, file: &FileEntry) {
@@ -391,7 +396,7 @@ fn draw_diff_split(f: &mut Frame, app: &App, area: Rect, file: &FileEntry) {
     let divider = "\u{2500}".repeat(rows[1].width as usize);
     f.render_widget(Paragraph::new(divider).style(Style::default().fg(theme::DIM)), rows[1]);
 
-    f.render_widget(Paragraph::new(hints), rows[2]);
+    super::draw_hints(f, rows[2], hints);
 }
 
 fn draw_source(f: &mut Frame, app: &App, area: Rect) {
@@ -459,7 +464,7 @@ fn draw_source(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), rows[0]);
     let divider = "\u{2500}".repeat(rows[1].width as usize);
     f.render_widget(Paragraph::new(divider).style(Style::default().fg(theme::DIM)), rows[1]);
-    f.render_widget(Paragraph::new(hints), rows[2]);
+    super::draw_hints(f, rows[2], hints);
 
     if app.show_hover {
         if let Some(hover) = &app.hover {

@@ -111,10 +111,18 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
 /// wrong regardless.
 fn status_line_padding(mid_gap: usize, left: &str, center: &str, right: &str) -> (usize, usize) {
     use unicode_width::UnicodeWidthStr;
+
+    // Never below a real gap, even when the segments already overflow the
+    // line. Letting the padding collapse to nothing ran the project name
+    // straight into the file path — `search-indexsrc/index/mod.rs:1` —
+    // which reads as corrupted text rather than as a line that ran out of
+    // room. Keeping the separator pushes the overflow off the right edge
+    // instead, where a clipped tail at least looks clipped.
+    const MIN_GAP: usize = 2;
     let used = left.width() + center.width() + right.width() + 2;
     let pad = mid_gap.saturating_sub(used);
     let left_pad = pad / 2;
-    (left_pad, pad - left_pad)
+    (left_pad.max(MIN_GAP), (pad - left_pad).max(MIN_GAP))
 }
 
 /// Bold key glyph + dim action label — the shape every footer hint in the
@@ -325,26 +333,49 @@ pub fn truncate_start_with_ellipsis(s: &str, max_width: usize) -> String {
 /// footer/hint line built from several differently-styled `Span`s (bold
 /// key glyphs, dim labels, an appended status message, ...) rather than one
 /// plain string — keeps each span's own style for whatever fits, and
-/// ellipsis-marks the one span that got cut instead of losing all styling
-/// by flattening to plain text first.
+/// ellipsis-marks the cut instead of losing all styling by flattening to
+/// plain text first.
+///
+/// Whenever anything is dropped the result ends in an ellipsis, and the
+/// result is never wider than `max_width`.
 pub fn truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span<'static>> {
     use unicode_width::UnicodeWidthStr;
 
+    let total: usize = spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+    if total <= max_width {
+        return spans;
+    }
+    if max_width == 0 {
+        return Vec::new();
+    }
+
+    // One column is reserved for the marker up front, rather than trying to
+    // fit it into whatever the last span happens to leave over. That
+    // leftover can be exactly zero — a run that ends flush against the
+    // boundary, which is what a hint row built from fixed-width labels
+    // does regularly — and the old shape then dropped the remaining spans
+    // with nothing at all to show for them. Content disappeared and the
+    // row looked complete.
+    let budget = max_width - 1;
     let mut out = Vec::new();
     let mut used = 0usize;
+    let mut cut_style = None;
     for span in spans {
         let span_width = UnicodeWidthStr::width(span.content.as_ref());
-        if used + span_width <= max_width {
+        if used + span_width <= budget {
             used += span_width;
+            cut_style = Some(span.style);
             out.push(span);
             continue;
         }
-        let remaining = max_width.saturating_sub(used);
+        let remaining = budget - used;
         if remaining > 0 {
-            out.push(Span::styled(truncate_with_ellipsis(&span.content, remaining), span.style));
+            out.push(Span::styled(take_columns(&span.content, remaining), span.style));
         }
-        return out;
+        cut_style = Some(span.style);
+        break;
     }
+    out.push(Span::styled("\u{2026}", cut_style.unwrap_or_default()));
     out
 }
 
@@ -401,6 +432,20 @@ pub fn diff_line_style(kind: crate::data::DiffLineKind) -> Style {
 
 /// Renders a bordered panel with an optional divider + key-hint footer
 /// inside the border — the standard box every screen's panes are built from.
+/// Draws hint rows into `area`, each ellipsis-truncated to its width.
+///
+/// Every hint row in the app goes through here. Review's wide rows are long
+/// enough to overrun the content pane at any terminal width short of about
+/// 160 columns, and a bare `Paragraph` simply stops drawing where it runs
+/// out — leaving "x Fla" and "y ...or copy the prompt to the " on screen,
+/// which reads as a rendering fault rather than as a row with more in it.
+/// Three separate render sites in `review` had their own copy of that bug.
+pub fn draw_hints(f: &mut Frame, area: Rect, hints: Vec<Line<'static>>) {
+    let width = area.width as usize;
+    let rows: Vec<Line<'static>> = hints.into_iter().map(|l| Line::from(truncate_spans(l.spans, width))).collect();
+    f.render_widget(Paragraph::new(rows), area);
+}
+
 pub fn draw_panel(f: &mut Frame, area: Rect, title: &str, body: Paragraph<'static>, hints: &[Line<'static>]) {
     let block = panel_block(title);
     let inner = block.inner(area);
@@ -414,7 +459,7 @@ pub fn draw_panel(f: &mut Frame, area: Rect, title: &str, body: Paragraph<'stati
         f.render_widget(body, chunks[0]);
         let divider = "─".repeat(chunks[1].width as usize);
         f.render_widget(Paragraph::new(divider).style(Style::default().fg(theme::DIM)), chunks[1]);
-        f.render_widget(Paragraph::new(hints.to_vec()), chunks[2]);
+        draw_hints(f, chunks[2], hints.to_vec());
     } else {
         f.render_widget(body, inner);
     }
@@ -486,6 +531,21 @@ mod tests {
     fn expand_tabs_for_display_leaves_tab_free_text_untouched() {
         assert_eq!(expand_tabs_for_display("no tabs here"), "no tabs here");
         assert_eq!(expand_tabs_for_display(""), "");
+    }
+
+    #[test]
+    fn status_line_segments_never_run_together() {
+        // A long file path overflows the line at ordinary widths; when it
+        // does, the segments must still be separated. Collapsing to zero
+        // produced "search-indexsrc/index/postings.rs:1" on screen.
+        let (left_pad, right_pad) = status_line_padding(
+            40,
+            " \u{26a0} DEMO \u{2014} review \u{2014} search-index",
+            "src/index/postings.rs:1",
+            "20 symbols scanned",
+        );
+        assert!(left_pad >= 2, "left gap collapsed: {left_pad}");
+        assert!(right_pad >= 2, "right gap collapsed: {right_pad}");
     }
 
     #[test]
@@ -656,6 +716,28 @@ mod tests {
         assert!(app.review_error.is_some(), "the failure must reach the app");
         let screen = render(&app, 120, 30);
         assert!(screen.contains("couldn't read changes"), "the failure must reach the screen:\n{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overlong_hint_rows_are_ellipsised_rather_than_cut_mid_word() {
+        // Review's wide hint rows don't fit the content pane at any
+        // terminal width short of ~160 columns. Before this, a Paragraph
+        // just stopped drawing where it ran out, leaving "x Fla" and
+        // "y ...or copy the prompt to the " on screen — indistinguishable
+        // from a rendering fault.
+        let dir = scratch_repo("hint-clip");
+        commit_file(&dir, "f.txt", "line1\nline2\n");
+        fs::write(dir.join("f.txt"), "line1-changed\nline2\n").unwrap();
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+
+        let screen = render(&app, 120, 32);
+        let row =
+            screen.lines().find(|l| l.contains("Tab Switch pane")).unwrap_or_else(|| panic!("no hint row on screen:\n{screen}")).trim_end();
+        // The panel's own right border sits past the hint text.
+        let row = row.trim_end_matches('\u{2502}').trim_end();
+        assert!(row.ends_with('\u{2026}'), "hint row was cut instead of ellipsised: {row:?}");
 
         let _ = fs::remove_dir_all(&dir);
     }
