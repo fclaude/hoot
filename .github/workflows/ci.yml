@@ -62,11 +62,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     steps:
-      # `procps` is here because cancelling an agent turn finds the
-      # backend's descendants by parsing `ps`, and these base images ship
-      # without it — a real Debian or Fedora install has it, a container
-      # stripped for size does not. Before checkout, not after: these
-      # images ship without git, and
+      # Deliberately no `procps`: finding the backend's descendants reads
+      # /proc on Linux now, and these images having no `ps` is exactly what
+      # makes them worth running against — if that dependency ever creeps
+      # back, the cancel tests fail here rather than on someone's slim
+      # install. Before checkout, not after: these images ship without
+      # git, and
       # actions/checkout quietly falls back to downloading a tarball when
       # git is missing. That would leave the whole suite running against a
       # directory that is not a git repository — for a tool whose every
@@ -75,18 +76,17 @@ jobs:
         if: matrix.name == 'debian'
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git curl ca-certificates gcc libc6-dev procps
+          apt-get install -y --no-install-recommends git curl ca-certificates gcc libc6-dev
       - name: Install prerequisites (Fedora)
         if: matrix.name == 'fedora'
         # No curl here, unlike the Debian row: the Fedora image already
         # ships curl-minimal, and asking for `curl` makes dnf try to swap
-        # the two rather than treat the need as already met. procps-ng is
-        # Fedora's name for Debian's procps — see below for why `ps` is
-        # not optional. diffutils is in Debian's required set but not in
-        # this image, and the keymap check below is a `diff`.
-        run: dnf install -y git gcc procps-ng diffutils
+        # the two rather than treat the need as already met. diffutils is
+        # in Debian's required set but not in this image, and the keymap
+        # check below is a `diff`.
+        run: dnf install -y git gcc diffutils
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: rustfmt, clippy
@@ -141,7 +141,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
 
       - name: Dependency advisory scan

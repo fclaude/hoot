@@ -121,14 +121,70 @@ fn kill_process_tree(root_pid: i32) {
     }
 }
 
-/// Every `(pid, ppid)` pair currently on the system, via `ps -eo
-/// pid=,ppid=` (the trailing `=` on each key suppresses that column's
-/// header, so every line is just data — no header row to skip, no
-/// header-text to accidentally parse as a pid). Empty (not an error) if
-/// `ps` itself fails to run; the tree walk below degrades to "just the
-/// root" in that case rather than panicking over a best-effort cleanup.
+/// Every `(pid, ppid)` pair currently on the system.
+///
+/// Reads `/proc` directly on Linux and only shells out to `ps` where that
+/// doesn't exist (macOS). `ps` is not part of a base system the way it
+/// looks: it ships in a separate package — `procps` on Debian,
+/// `procps-ng` on Fedora — that a slim install or a container can be
+/// missing entirely. That matters more than the saved fork, because the
+/// failure is silent: no `ps` means an empty table, an empty table means
+/// `descendants_of` finds nothing, and `cancel` quietly falls back to
+/// signalling only the immediate process group — leaving exactly the
+/// grandchild the descendant walk exists to catch still running. The
+/// kernel's own interface can't be uninstalled.
+///
+/// Still empty (not an error) if even that fails; the tree walk degrades
+/// to "just the root" rather than panicking over a best-effort cleanup.
 #[cfg(unix)]
 fn current_process_parents() -> Vec<(i32, i32)> {
+    #[cfg(target_os = "linux")]
+    {
+        let pairs = proc_process_parents();
+        if !pairs.is_empty() {
+            return pairs;
+        }
+    }
+    ps_process_parents()
+}
+
+/// `(pid, ppid)` for every process, read from `/proc/<pid>/stat`.
+#[cfg(target_os = "linux")]
+fn proc_process_parents() -> Vec<(i32, i32)> {
+    let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
+    entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            // Only the numeric entries are processes; /proc is also full
+            // of `self`, `net`, `sys` and friends.
+            let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
+            // A process can exit between the readdir and this read, which
+            // is ordinary rather than exceptional — skip it.
+            let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+            Some((pid, ppid_from_stat(&stat)?))
+        })
+        .collect()
+}
+
+/// The ppid out of one `/proc/<pid>/stat` line.
+///
+/// Split from the *last* `)` rather than by counting whitespace-separated
+/// fields: field two is the executable name, it is wrapped in parentheses
+/// but not escaped, and it may itself contain spaces and parentheses. A
+/// process named `foo bar) baz` is entirely legal, and naive splitting
+/// reads its name fragments as the state and ppid columns. Everything
+/// after the final `)` is positional again: state, then ppid.
+#[cfg(target_os = "linux")]
+fn ppid_from_stat(stat: &str) -> Option<i32> {
+    stat[stat.rfind(')')? + 1..].split_whitespace().nth(1)?.parse().ok()
+}
+
+/// `(pid, ppid)` for every process, via `ps -eo pid=,ppid=` (the trailing
+/// `=` on each key suppresses that column's header, so every line is just
+/// data — no header row to skip, no header text to accidentally parse as
+/// a pid).
+#[cfg(unix)]
+fn ps_process_parents() -> Vec<(i32, i32)> {
     let Ok(out) = std::process::Command::new("ps").args(["-eo", "pid=,ppid="]).output() else { return Vec::new() };
     String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -222,6 +278,58 @@ mod tests {
     fn parses_known_backend_names() {
         assert_eq!(AgentBackend::parse("pi"), Some(AgentBackend::Pi));
         assert_eq!(AgentBackend::parse("opencode"), Some(AgentBackend::OpenCode));
+    }
+
+    /// Whether `pid` is a *running* process, as opposed to merely present
+    /// in the process table.
+    ///
+    /// `kill -0` cannot make that distinction — it succeeds for a zombie
+    /// too — and killing a child orphans its own children, which then sit
+    /// unreaped until pid 1 collects them. That is immediate under a real
+    /// init and never inside a container, whose pid 1 is whatever kept the
+    /// container up. Reads the same `/proc` the production path does, so
+    /// these tests don't reintroduce the `ps` dependency the code just
+    /// dropped; `ps` remains for macOS, which has no `/proc`.
+    fn process_is_running(pid: i32) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+            let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else { return false };
+            return !matches!(rest.split_whitespace().next(), Some("Z") | None);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Ok(out) = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output() else {
+                return false;
+            };
+            let state = String::from_utf8_lossy(&out.stdout);
+            let state = state.trim();
+            !state.is_empty() && !state.starts_with('Z')
+        }
+    }
+
+    #[test]
+    fn the_process_table_includes_this_very_process() {
+        // Covers whichever source this platform actually uses. A /proc
+        // parse that silently produced nothing would otherwise look
+        // exactly like a machine with no descendants to kill.
+        let pairs = current_process_parents();
+        assert!(!pairs.is_empty(), "the process table should never be empty");
+        let me = std::process::id() as i32;
+        let (_, ppid) = pairs.iter().copied().find(|&(pid, _)| pid == me).expect("this process must appear in its own process table");
+        assert!(ppid > 0, "this process must have a real parent, got {ppid}");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_process_name_containing_spaces_and_parens_does_not_shift_the_ppid() {
+        // /proc/<pid>/stat's comm field is unescaped and can hold both, so
+        // counting whitespace-separated fields reads fragments of the name
+        // as the state and ppid columns.
+        assert_eq!(ppid_from_stat("42 (sleep) S 7 42 42 0 -1 4194304"), Some(7));
+        assert_eq!(ppid_from_stat("42 (foo bar) baz) S 7 42 42 0 -1 4194304"), Some(7));
+        assert_eq!(ppid_from_stat("42 (weird )( name) R 1234 42 42"), Some(1234));
+        assert_eq!(ppid_from_stat("nonsense with no paren"), None);
     }
 
     #[test]
@@ -329,14 +437,7 @@ mod tests {
         // the pid lingered and this read a correctly-killed process as
         // still running. `ps` state `Z` is the distinction; an empty
         // result means the pid is gone entirely.
-        let alive = |pid: i32| -> bool {
-            let Ok(out) = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output() else {
-                return false;
-            };
-            let state = String::from_utf8_lossy(&out.stdout);
-            let state = state.trim();
-            !state.is_empty() && !state.starts_with('Z')
-        };
+        let alive = |pid: i32| process_is_running(pid);
         // Dying isn't instantaneous: cancel() signals, and the kernel gets
         // to the rest in its own time.
         let settles_dead = |pid: i32| {
