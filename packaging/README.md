@@ -5,7 +5,7 @@
 Pushing a tag like `v0.1.0` runs [`.github/workflows/release.yml`](../.github/workflows/release.yml), which:
 
 - builds native release binaries for macOS (Intel + Apple Silicon) and Linux (x86_64 + arm64)
-- builds a `.deb` and `.rpm` (x86_64 only, via `cargo-deb` / `cargo-generate-rpm`, configured in [`Cargo.toml`](../Cargo.toml))
+- builds a `.deb` and `.rpm` for x86_64 and arm64 (via `cargo-deb` / `cargo-generate-rpm`, configured in [`Cargo.toml`](../Cargo.toml)), each built and install-tested on a runner of its own architecture
 - attaches all of it to a GitHub Release
 
 That covers "download a binary" and "download a `.deb`/`.rpm`". It does **not** cover Homebrew, Fedora COPR, or the AUR — those each publish through a repo/account only a human can set up. Below is what's left for each, once the project has a real public repo and at least one tagged release to point at.

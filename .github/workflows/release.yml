@@ -1,6 +1,8 @@
-# Builds release binaries + a .deb and .rpm, installs each package on the
-# distribution it targets to confirm it actually works, and attaches them
-# all to a GitHub Release, whenever a `vX.Y.Z` tag is pushed.
+# Builds release binaries + a .deb and .rpm for x86_64 and arm64, installs
+# each package on the distribution and architecture it targets to confirm
+# it actually works, and attaches them all to a GitHub Release, whenever a
+# `vX.Y.Z` tag is pushed. Can also be run manually, which does everything
+# except the publishing step.
 #
 # Deliberately uses native runners per architecture where they still exist
 # (Linux x86_64/arm64) instead of `cross` or Docker-based cross-compilation
@@ -26,6 +28,12 @@ name: release
 on:
   push:
     tags: ["v*.*.*"]
+  # Manual runs build, package and install-test everything and then stop
+  # short of publishing (see the `release` job's `if`). Without this the
+  # only way to find out whether a change to this file works is to tag a
+  # release and watch — which is the one moment when finding out is most
+  # expensive.
+  workflow_dispatch:
 
 # The `check` job below duplicates ci.yml's checks deliberately: a tag can
 # be pushed to a commit that never went through a PR, and a release that
@@ -67,6 +75,8 @@ jobs:
             --ignore RUSTSEC-2026-0253
 
       - name: Tag matches Cargo.toml version
+        # Nothing to match on a manual run — there is no tag.
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
@@ -116,12 +126,24 @@ jobs:
           path: hoot-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
 
   package-linux:
-    # .deb and .rpm are x86_64-only for now — see packaging/README.md for
-    # adding an arm64 pass if it's ever worth the extra CI time.
+    # One pass per architecture, each on a runner of that architecture.
+    # Native rather than cross-built on purpose: `cargo deb` and
+    # `cargo generate-rpm` both take the architecture from the binary they
+    # find in target/release, so a native build needs no arch plumbing in
+    # Cargo.toml and no cross toolchain — and a package built by a
+    # compiler that never ran on the target is a harder thing to trust.
     needs: check
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -146,9 +168,14 @@ jobs:
       # `files: dist/*` glob wouldn't pick up correctly.
       - run: mkdir dist-stage && cp target/debian/*.deb target/generate-rpm/*.rpm dist-stage/
 
+      # Per-arch artifact name: upload-artifact rejects two uploads under
+      # the same name, and the release job downloads all of them together
+      # anyway. The files inside carry their own architecture
+      # (`hoot_0.1.0-1_arm64.deb`, `hoot-0.1.0-1.aarch64.rpm`), so nothing
+      # collides once merged.
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: hoot-deb-rpm
+          name: hoot-deb-rpm-${{ matrix.arch }}
           path: dist-stage/*
 
   verify-packages:
@@ -166,16 +193,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Each package installed on a runner of its own architecture —
+          # an arm64 .deb on an x86_64 host would be refused as a foreign
+          # architecture, which would prove nothing about whether it
+          # works.
           - name: debian
             container: debian:stable
+            os: ubuntu-latest
+            arch: x86_64
           - name: fedora
             container: fedora:latest
-    runs-on: ubuntu-latest
+            os: ubuntu-latest
+            arch: x86_64
+          - name: debian
+            container: debian:stable
+            os: ubuntu-24.04-arm
+            arch: aarch64
+          - name: fedora
+            container: fedora:latest
+            os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     steps:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          name: hoot-deb-rpm
+          name: hoot-deb-rpm-${{ matrix.arch }}
           path: dist
 
       # `apt-get install ./file.deb` (rather than `dpkg -i`) so the
@@ -201,6 +244,10 @@ jobs:
           hoot --version
 
   release:
+    # Tags only. A manual run is a rehearsal: everything above it still
+    # runs, so a broken build or a package that won't install is found the
+    # same way, but nothing is published and no release notes are written.
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [build, package-linux, verify-packages]
     permissions:
       contents: write
