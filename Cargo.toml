@@ -27,7 +27,11 @@ extended-description = """\
 A terminal UI for reviewing a git working tree alongside an AI coding \
 agent (opencode by default, or pi): see what changed, chat with the \
 agent, and pick exactly which hunks go into a commit."""
-depends = "$auto, git"
+# `procps` for `ps`: cancelling an agent turn parses it to find the
+# backend's descendants, and without it that silently degrades to killing
+# only the immediate process group. `$auto` can't see it — it's a
+# subprocess this calls by name, not a library it links against.
+depends = "$auto, git, procps"
 section = "utils"
 priority = "optional"
 assets = [
@@ -48,3 +52,5 @@ assets = [
 
 [package.metadata.generate-rpm.requires]
 git = "*"
+# Fedora's name for Debian's procps — see the `depends` note above.
+procps-ng = "*"
