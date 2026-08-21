@@ -111,15 +111,24 @@ pub fn spawn(prompt: &str, cwd: &Path, session_file: &Path, tools: ToolProfile) 
 
     let wait_child = child.clone();
     thread::spawn(move || {
+        let mut said_something = false;
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
             let Ok(line) = line else { break };
             if !line.trim().is_empty() {
+                said_something = true;
                 let _ = tx.send(AgentEvent::Error(line));
             }
         }
         if let Ok(mut child) = wait_child.lock() {
-            let _ = child.wait();
+            // See `opencode_client` for why the status is checked rather
+            // than discarded: a silent non-zero exit otherwise presents as
+            // a completed turn.
+            if let Ok(status) = child.wait() {
+                if !status.success() && !said_something {
+                    let _ = tx.send(AgentEvent::Error(format!("pi exited unsuccessfully ({status})")));
+                }
+            }
         }
     });
 

@@ -42,4 +42,4 @@ A single formula can cover both macOS binaries with an `on_arm`/`on_intel` block
 1. Create an AUR account and register an SSH key at [aur.archlinux.org](https://aur.archlinux.org).
 2. Write (or generate with `cargo-aur`) a `PKGBUILD` — most Rust CLIs publish a `hoot-bin` package that just downloads the release tarball, rather than building from source, since it installs instantly.
 3. `git push` it to the AUR's git remote for the package.
-4. Users install with `yay -S hoot` or `paru -S hoot` (or any other AUR helper).
+4. Users install with `yay -S hoot-bin` or `paru -S hoot-bin` (or any other AUR helper) — matching the package name from step 2. A plain `hoot` would be the build-from-source package, which is a second, separate submission.

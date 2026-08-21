@@ -1,6 +1,6 @@
 # hoot keybindings
 
-This is generated from `src/keymap.rs` (run `hoot --print-keymap` to regenerate) — it always matches what the binary actually does.
+This is generated from `src/keymap.rs` (run `hoot --print-keymap` to regenerate) — every binding name and chord below is the real one. The descriptions are prose from that same table, so treat them as documentation that is kept beside the code rather than as something checked against it.
 
 ## Overriding
 
@@ -14,7 +14,7 @@ review_toggle_hover = "H"
 
 Chords are `mod+mod+key`, e.g. `ctrl+e`, `f1`, `space`, `/`, `g`, or a single uppercase letter like `H`. Modifiers: `ctrl`, `shift`, `alt`. Bind more than one chord to the same action with a comma, e.g. `f1,ctrl+r`. Unknown binding names or unparsable chords are reported as warnings on startup and otherwise ignored — they never prevent hoot from starting.
 
-Not overridable: `Ctrl+C` (always gets you out — same quit-confirmation as `q` if there's unsent work, but a second `Ctrl+C` always confirms immediately), and raw text entry (typing/Backspace) in the agent prompt, symbol filter, and commit message editor.
+Not overridable: `Ctrl+C` (always gets you out — same quit-confirmation as `q` if there's unsent work, but a second `Ctrl+C` always confirms immediately), and raw text entry (typing/Backspace) in the agent prompt, the note input, the symbol filter, and the file finder. The commit message is edited in `$EDITOR`, not in hoot, so its keys are your editor's.
 
 Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don't work in most terminals — the terminal collapses them to the same byte sequence as the bare key, so no modifier survives for hoot to see. Prefer a plain letter or `ctrl+<letter>` chord instead. `shift+<letter>` has the same problem for a different reason: most terminals report Shift+letter as the uppercase character itself, not as a separate Shift bit — so write the literal uppercase letter (`"H"`) rather than `"shift+h"`.
 
@@ -45,12 +45,12 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | `review_scroll_right` | Scroll right | `→` |  | Scroll the content pane right, while it's focused (source or diff view; not the before/after split) |
 | `review_toggle_hover` | Toggle hover | `h` |  | Show/hide symbol info for the current line (source view only) |
 | `review_open_symbol_jump` | Open symbol jump | `/` |  | Open the fuzzy symbol-jump overlay |
-| `review_toggle_view` | Toggle diff/source | `v` |  | Switch the content pane between diff and source (only if the file has changes) |
+| `review_toggle_view` | Toggle full context | `v` |  | Switch the content pane between the whole file with changes overlaid and just the changed lines (3 lines of context either side). Only does anything for a file that has changes |
 | `review_mark_good` | Mark good | `g` |  | Clear notes/flag on the open file |
 | `review_flag_rework` | Flag rework | `x` |  | Flag the open file as needing a redo |
 | `review_clear_file_notes` | Clear file notes | `d` |  | Clear notes on the open file, without touching its flag (unlike Mark Good) |
 | `review_clear_all_notes` | Clear all notes | `D` |  | Clear every queued note across the whole tree |
-| `review_comment` | Comment | `c` |  | In source view: comment on the current line. Otherwise: comment on the whole file |
+| `review_comment` | Comment | `c` |  | With the content pane focused: comment on the current line — in plain source or in the unified diff. From the tree, in the before/after split, or on a line with no counterpart in the file (a removed line): comment on the whole file |
 | `review_split_view` | Split view | `s` |  | Switch the diff view to before/after columns |
 | `review_unified_view` | Unified view | `u` |  | Switch the diff view back to unified |
 | `review_iterate` | Iterate | `i` |  | Send queued notes to the real agent |

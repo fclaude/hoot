@@ -136,7 +136,17 @@ pub fn commit(root: &Path, project: &Project, curation_files: &[CurationFile], m
         // operation this whole screen exists for over commit-time
         // latency, on an action a user triggers occasionally, not in a
         // hot loop.
-        let current = crate::gitreview::diff_files(root);
+        // A git failure here is its own error, not a stale-file verdict:
+        // rolling back and saying "it changed since you reviewed it" for a
+        // repo git simply couldn't read sends the user to re-check a file
+        // that is very likely fine.
+        let current = match crate::gitreview::diff_files(root) {
+            Ok(files) => files,
+            Err(e) => {
+                rollback(root, &staged);
+                return Err(format!("{}: couldn't re-check it before staging \u{2014} {e}", cf.path));
+            }
+        };
         let fresh = current.iter().find(|f| f.path == cf.path).is_some_and(|now| now.same_change_as(file));
         if !fresh {
             rollback(root, &staged);
@@ -282,7 +292,12 @@ fn summarize(file: &FileEntry, selected: &[bool]) -> ChangeSummary {
 /// Reads the index back and confirms it holds exactly what was selected —
 /// no more files, no fewer, and the same change for each.
 fn verify_index(root: &Path, staged: &[Staged]) -> Result<(), String> {
-    let actual = crate::gitreview::staged_files(root);
+    // Unreadable index means unverified, which means not committed. This
+    // is the check the whole screen's guarantee rests on; degrading it to
+    // "found nothing staged" on a git failure would turn it into a check
+    // that passes hardest exactly when git is least trustworthy.
+    let actual = crate::gitreview::staged_files(root)
+        .map_err(|e| format!("couldn't read the index back to verify it \u{2014} {e}; nothing has been committed"))?;
     let actual: Vec<ChangeSummary> = actual.iter().map(|f| summarize(f, &vec![true; f.hunks.len()])).collect();
 
     for entry in staged {
@@ -488,7 +503,7 @@ mod tests {
         assert!(committed.contains("line20\n"), "line20 should not be committed yet: {committed}");
 
         // The second hunk should still show up as an outstanding real diff.
-        let remaining = crate::gitreview::diff_files(&dir);
+        let remaining = crate::gitreview::diff_files(&dir).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].hunks.len(), 1);
         assert!(remaining[0].hunks[0].lines.iter().any(|l| l.text.contains("line20-CHANGED")));

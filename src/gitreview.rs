@@ -10,6 +10,7 @@
 //! with a clean tree reports an honest empty changeset.
 
 use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -18,13 +19,26 @@ use crate::data::{ChangeKind, CurationFile, DiffLine, DiffLineKind, FileEntry, F
 pub struct ReviewData {
     pub project: Project,
     pub curation_files: Vec<CurationFile>,
+    /// Why the changeset below is empty, when it's empty because git
+    /// couldn't be read rather than because nothing changed. Surfaced in
+    /// Review's footer — an unreadable repo must never look like a clean
+    /// one. `None` on the normal path, including for a genuinely clean
+    /// tree.
+    pub error: Option<String>,
 }
 
 /// The working-tree review for `root`. A directory that isn't a git
 /// repository has nothing to review and reports exactly that — an empty
 /// changeset — rather than standing in fake content for it.
 pub fn load(root: &Path) -> ReviewData {
-    let files = if is_git_repo(root) { diff_files(root) } else { Vec::new() };
+    let (files, error) = if is_git_repo(root) {
+        match diff_files(root) {
+            Ok(files) => (files, None),
+            Err(e) => (Vec::new(), Some(e)),
+        }
+    } else {
+        (Vec::new(), None)
+    };
 
     let curation_files =
         files.iter().map(|f| CurationFile { path: f.path.clone(), hunk_selected: vec![true; selectable_units(f)], status: None }).collect();
@@ -32,7 +46,7 @@ pub fn load(root: &Path) -> ReviewData {
     let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.display().to_string());
     let project = Project { name: name.clone(), root: name, files };
 
-    ReviewData { project, curation_files }
+    ReviewData { project, curation_files, error }
 }
 
 /// How many independently selectable units a file offers in Curation: one
@@ -53,9 +67,9 @@ pub fn selectable_units(f: &FileEntry) -> usize {
 
 /// The parsed working-tree diff for `root`: empty if it's not a git repo or
 /// has no changes.
-pub fn diff_files(root: &Path) -> Vec<FileEntry> {
-    let diff_text = run_git_diff(root);
-    parse_unified_diff(&diff_text)
+pub fn diff_files(root: &Path) -> Result<Vec<FileEntry>, String> {
+    let diff_text = run_git_diff(root)?;
+    Ok(parse_unified_diff(&diff_text))
 }
 
 /// Every git invocation in this module goes through here, and every one of
@@ -70,7 +84,7 @@ pub fn diff_files(root: &Path) -> Vec<FileEntry> {
 ///   prefixes that both this parser and `git apply` expect. A user with
 ///   `diff.noprefix=true` in their global config would otherwise get diffs
 ///   this code can't read and git can't re-apply.
-fn git(root: &Path, args: &[&str]) -> Option<Output> {
+fn git<S: AsRef<OsStr>>(root: &Path, args: &[S]) -> Option<Output> {
     Command::new("git")
         .args(["-c", "core.quotePath=true", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false"])
         .args(args)
@@ -151,7 +165,7 @@ pub fn ignored_paths(root: &Path) -> HashSet<PathBuf> {
 /// Curation's per-hunk selection and partial commits rely on, so it needs
 /// real, separate hunk boundaries, not one hunk spanning the whole file.
 /// See `file_diff_in_context` for the Review screen's whole-file view.
-fn run_git_diff(root: &Path) -> String {
+fn run_git_diff(root: &Path) -> Result<String, String> {
     let has_head = git(root, &["rev-parse", "--verify", "-q", "HEAD"]).map(|o| o.status.success()).unwrap_or(false);
     // `--find-renames`: off by default for `git diff` (unlike `git status`)
     // unless `diff.renames` is configured. Without it, a plain `git mv`
@@ -161,7 +175,7 @@ fn run_git_diff(root: &Path) -> String {
     // from/to" entry `parse_unified_diff`'s unsupported-change handling
     // expects and Curation has nothing useful to do with either way.
     let mut diff = if has_head {
-        diff_text(root, &["HEAD"])
+        diff_text(root, &["HEAD"])?
     } else {
         // Plain `git diff` alone only shows index-vs-worktree (unstaged)
         // changes — with no HEAD to compare against, anything already
@@ -172,28 +186,139 @@ fn run_git_diff(root: &Path) -> String {
         // so staged content shows as a normal "new file" diff (confirmed
         // by testing) — same union of staged+unstaged that `git diff HEAD`
         // gives once a commit exists.
-        let staged = diff_text(root, &["--cached"]);
-        let unstaged = diff_text(root, &[]);
+        let staged = diff_text(root, &["--cached"])?;
+        let unstaged = diff_text::<&str>(root, &[])?;
         staged + &unstaged
     };
     diff.push_str(&untracked_files_diff(root));
-    diff
+    Ok(diff)
 }
 
 /// `git diff <args>` with this module's fixed flags, as text.
-fn diff_text(root: &Path, args: &[&str]) -> String {
-    let mut all: Vec<&str> = vec!["diff"];
-    all.extend(DIFF_FLAGS);
-    all.extend(args);
-    git(root, &all).map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+///
+/// Errors rather than returning an empty string when git itself fails. The
+/// old behavior swallowed the exit status entirely and handed back
+/// `String::new()` for a git that never ran, a corrupt index, an
+/// unreadable config — all of which then parsed into zero changed files
+/// and presented as a clean working tree. "I could not find out what
+/// changed" and "nothing changed" are opposite answers, and a tool whose
+/// whole job is showing you what changed must never confuse them.
+fn diff_text<S: AsRef<OsStr>>(root: &Path, args: &[S]) -> Result<String, String> {
+    // `OsString`, not `&str`: a pathspec argument can be a filename that
+    // isn't valid UTF-8, and there is no `&str` that names such a file.
+    // Going through `OsStr` hands git the actual bytes.
+    let mut all: Vec<OsString> = Vec::with_capacity(1 + DIFF_FLAGS.len() + args.len());
+    all.push(OsString::from("diff"));
+    all.extend(DIFF_FLAGS.iter().map(OsString::from));
+    all.extend(args.iter().map(|a| a.as_ref().to_os_string()));
+    let out = git(root, &all).ok_or_else(|| format!("could not run git in {}", root.display()))?;
+    // `git diff` normally exits 0 whether or not it printed anything. The
+    // one exception here is `--no-index`, which reports "these differ" as
+    // exit 1 — a normal answer, not a failure — the same way
+    // `gitcommit::index_has_staged_changes` reads `--quiet`. Anything else
+    // non-zero is a real error and is reported as one.
+    let no_index = args.iter().any(|a| a.as_ref() == OsStr::new("--no-index"));
+    match out.status.code() {
+        Some(0) => {}
+        Some(1) if no_index => {}
+        _ => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let detail = stderr.trim();
+            let detail = if detail.is_empty() { "git exited unsuccessfully" } else { detail };
+            return Err(format!("git diff: {detail}"));
+        }
+    }
+    Ok(decode_diff(out.stdout))
+}
+
+/// Turns git's raw diff bytes into the `String` the rest of this module
+/// works in, without ever lossily rewriting file content.
+///
+/// The overwhelmingly common case is a diff that is already valid UTF-8,
+/// which costs one validation and no copying. The interesting case is the
+/// other one: git decides "binary" by scanning for NUL bytes, which is not
+/// the same question as "is this valid UTF-8". A Latin-1 encoded source
+/// file with no NULs is emitted as an ordinary *text* diff, and
+/// `String::from_utf8_lossy` would turn each undecodable byte into U+FFFD
+/// — producing hunks that look perfectly reviewable and that staging would
+/// then replay verbatim, committing the mangled version. That is exactly
+/// the trap `synthetic_new_file_diff` already refuses to walk into for
+/// untracked files; this closes the same hole on the tracked side.
+fn decode_diff(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(e) => redact_non_utf8_files(e.as_bytes()),
+    }
+}
+
+/// Rebuilds a diff containing invalid UTF-8 into one that doesn't, by
+/// replacing *only* the individual file sections that carry bad bytes with
+/// a binary stanza. Scoped per file on purpose: one Latin-1 file in the
+/// tree must not cost you the review of every other file changed alongside
+/// it.
+fn redact_non_utf8_files(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for section in split_file_sections(bytes) {
+        match std::str::from_utf8(section) {
+            Ok(text) => out.push_str(text),
+            Err(_) => out.push_str(&binary_stanza(section)),
+        }
+    }
+    out
+}
+
+/// Splits raw diff bytes at each `diff --git ` that begins a line. Any
+/// preamble before the first one (there shouldn't be any) is kept as its
+/// own leading section so no bytes are silently dropped.
+fn split_file_sections(bytes: &[u8]) -> Vec<&[u8]> {
+    const MARKER: &[u8] = b"diff --git ";
+    let mut starts: Vec<usize> = Vec::new();
+    let mut at_line_start = true;
+    for i in 0..bytes.len() {
+        if at_line_start && bytes[i..].starts_with(MARKER) {
+            starts.push(i);
+        }
+        at_line_start = bytes[i] == b'\n';
+    }
+    if starts.first() != Some(&0) {
+        starts.insert(0, 0);
+    }
+    let mut sections = Vec::with_capacity(starts.len());
+    for (n, &start) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).copied().unwrap_or(bytes.len());
+        if start < end {
+            sections.push(&bytes[start..end]);
+        }
+    }
+    sections
+}
+
+/// One file section rewritten as "binary content": its header lines (pure
+/// ASCII, because `git` is pinned to `core.quotePath=true` above, so the
+/// paths in them survive) followed by the marker `read_header_line` reads
+/// to flag a file as something hoot can't stage. Everything from the first
+/// `@@` on is dropped — those are the bytes that couldn't be trusted.
+fn binary_stanza(section: &[u8]) -> String {
+    let mut out = String::new();
+    for line in section.split(|b| *b == b'\n') {
+        if line.starts_with(b"@@ ") {
+            break;
+        }
+        if let Ok(text) = std::str::from_utf8(line) {
+            out.push_str(text);
+            out.push('\n');
+        }
+    }
+    out.push_str("Binary files differ\n");
+    out
 }
 
 /// What is currently staged in the index, parsed exactly like the
 /// working-tree diff. Used to verify, after staging and before committing,
 /// that the index really does hold what was selected — see
 /// `gitcommit::commit`.
-pub fn staged_files(root: &Path) -> Vec<FileEntry> {
-    parse_unified_diff(&diff_text(root, &["--cached"]))
+pub fn staged_files(root: &Path) -> Result<Vec<FileEntry>, String> {
+    Ok(parse_unified_diff(&diff_text(root, &["--cached"])?))
 }
 
 /// Builds a "new file" unified diff for each untracked, non-ignored file
@@ -351,13 +476,24 @@ const FULL_CONTEXT: &str = "-U100000";
 /// shows, as opposed to the small, separately-loaded hunks `run_git_diff`
 /// returns for Curation. `rel_path` is relative to `root`. Returns an
 /// empty list for a file with no changes (or that doesn't exist).
-pub fn file_diff_in_context(root: &Path, rel_path: &str) -> Vec<Hunk> {
+pub fn file_diff_in_context(root: &Path, rel_path: &Path) -> Vec<Hunk> {
     let has_head = git(root, &["rev-parse", "--verify", "-q", "HEAD"]).map(|o| o.status.success()).unwrap_or(false);
-    let mut diff =
-        if has_head { diff_text(root, &["HEAD", FULL_CONTEXT, "--", rel_path]) } else { diff_text(root, &[FULL_CONTEXT, "--", rel_path]) };
+    // Unlike the canonical `run_git_diff` path, a failure here is not
+    // mistakable for "clean tree": this only ever fills one already-known
+    // changed file's content pane, and the file list it came from is
+    // loaded (and error-checked) separately by `load`. An empty result
+    // shows as a file with nothing to display rather than as a repo with
+    // nothing changed, so absorbing the error is safe here.
+    let spec = rel_path.as_os_str();
+    let mut diff = if has_head {
+        diff_text(root, &[OsStr::new("HEAD"), OsStr::new(FULL_CONTEXT), OsStr::new("--"), spec]).unwrap_or_default()
+    } else {
+        diff_text(root, &[OsStr::new(FULL_CONTEXT), OsStr::new("--"), spec]).unwrap_or_default()
+    };
     if diff.trim().is_empty() {
         // Not a tracked change — might be untracked entirely.
-        diff = diff_text(root, &[FULL_CONTEXT, "--no-index", "--", "/dev/null", rel_path]);
+        let args = [OsStr::new(FULL_CONTEXT), OsStr::new("--no-index"), OsStr::new("--"), OsStr::new("/dev/null"), spec];
+        diff = diff_text(root, &args).unwrap_or_default();
     }
     parse_unified_diff(&diff).into_iter().next().map(|f| f.hunks).unwrap_or_default()
 }
@@ -616,6 +752,20 @@ fn display_path(bytes: &[u8]) -> String {
     }
 }
 
+/// A real filesystem path rendered the way this module names files —
+/// i.e. the exact string `FileEntry.path` holds for that file.
+///
+/// The app and UI sides used `Path::display().to_string()` for this, which
+/// is a *lossy* rendering: a filename with non-UTF-8 bytes came out full of
+/// U+FFFD, while `FileEntry.path` holds git's reversible C-quoted form for
+/// the same file. The two never compared equal, so for those files Review
+/// silently couldn't associate the open file with its own diff. Anything
+/// that has to match a `FileEntry` — or display a name beside one — goes
+/// through here.
+pub fn display_path_of(path: &Path) -> String {
+    display_path(&path_to_bytes(path))
+}
+
 /// `<prefix><path>` rendered for a diff header, quoted exactly when git
 /// would quote it. Used for the synthetic untracked-file diffs this module
 /// builds by hand, which are fed back to `git apply` when staging.
@@ -841,6 +991,125 @@ index 111..222 100644
     }
 
     // --- integration: exercises is_git_repo/run_git_diff/load against a real repo ---
+
+    #[test]
+    fn a_tracked_non_utf8_text_file_is_refused_rather_than_lossily_decoded() {
+        // git decides "binary" by looking for NUL bytes, which is not the
+        // same question as "is this valid UTF-8". A Latin-1 file with no
+        // NULs comes back as an ordinary *text* diff, and decoding it
+        // lossily would put U+FFFD where the real bytes were — hunks that
+        // look reviewable and that staging would replay verbatim,
+        // committing the mangled version. `synthetic_new_file_diff`
+        // already refuses this for untracked files; this is the tracked
+        // side of the same hole.
+        let dir = scratch_repo("latin1-tracked");
+        // `caf\xe9.txt` content: invalid UTF-8, no NUL anywhere.
+        fs::write(dir.join("notes.txt"), b"caf\xe9 original\n").unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "init"]);
+        fs::write(dir.join("notes.txt"), b"caf\xe9 changed\n").unwrap();
+
+        let files = diff_files(&dir).unwrap();
+        assert_eq!(files.len(), 1, "paths = {:?}", paths(&files));
+        assert_eq!(files[0].unsupported, Some("binary content"), "a lossily-decodable file must not be offered for curation");
+        assert!(files[0].hunks.is_empty(), "nothing replayable should survive: {} hunks", files[0].hunks.len());
+        assert_eq!(selectable_units(&files[0]), 0, "and it must not be selectable");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_non_utf8_file_does_not_cost_the_review_of_the_files_beside_it() {
+        // The redaction is per file section on purpose: a single Latin-1
+        // file in the tree must not blank out every other file changed
+        // alongside it.
+        let dir = scratch_repo("latin1-mixed");
+        fs::write(dir.join("a-notes.txt"), b"caf\xe9 original\n").unwrap();
+        fs::write(dir.join("b-code.txt"), "fn main() {}\n").unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "init"]);
+        fs::write(dir.join("a-notes.txt"), b"caf\xe9 changed\n").unwrap();
+        fs::write(dir.join("b-code.txt"), "fn main() { println!(); }\n").unwrap();
+
+        let files = diff_files(&dir).unwrap();
+        assert_eq!(files.len(), 2, "paths = {:?}", paths(&files));
+        let bad = files.iter().find(|f| f.path.contains("a-notes")).expect("the latin-1 file");
+        let good = files.iter().find(|f| f.path.contains("b-code")).expect("the ordinary file");
+        assert_eq!(bad.unsupported, Some("binary content"));
+        assert_eq!(good.unsupported, None, "the readable file beside it is still fully reviewable");
+        assert!(!good.hunks.is_empty(), "and still has its real hunks");
+        let good_text: Vec<&str> = good.hunks.iter().flat_map(|h| h.lines.iter()).map(|l| l.text.as_str()).collect();
+        assert!(good_text.iter().any(|t| t.contains("println")), "{good_text:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_git_failure_is_reported_rather_than_reported_as_a_clean_tree() {
+        // The failure mode this guards: `diff_text` used to swallow the
+        // exit status and hand back an empty string, which parsed into
+        // zero changed files — so a repo git couldn't read rendered
+        // identically to one with nothing to review.
+        let dir = scratch_repo("broken-index");
+        fs::write(dir.join("f.txt"), "line1\n").unwrap();
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "init"]);
+        fs::write(dir.join("f.txt"), "line1-changed\n").unwrap();
+
+        // A corrupt index fails `git diff` while leaving `rev-parse
+        // --is-inside-work-tree` (and so `is_git_repo`) perfectly happy —
+        // exactly the shape of failure that used to read as "clean".
+        fs::write(dir.join(".git").join("index"), b"not an index at all").unwrap();
+        assert!(is_git_repo(&dir), "still looks like a repo, which is the point");
+
+        let err = match diff_files(&dir) {
+            Err(e) => e,
+            Ok(files) => panic!("a corrupt index must not read as an empty changeset; got {} files", files.len()),
+        };
+        assert!(err.contains("git diff"), "{err}");
+
+        // And `load` surfaces it rather than presenting an empty project.
+        let review = load(&dir);
+        assert!(review.error.is_some(), "load must carry the failure, not just an empty file list");
+        assert!(review.project.files.is_empty(), "there is genuinely nothing trustworthy to show");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_path_renders_to_the_same_name_the_diff_parser_gives_it() {
+        // The bug this pins: the app side named files with
+        // `Path::display().to_string()` (lossy — U+FFFD for any invalid
+        // byte) while `FileEntry.path` holds git's reversible C-quoted
+        // form. For a non-UTF-8 filename the two never compared equal, so
+        // Review couldn't associate the open file with its own diff.
+        //
+        // Built from raw bytes rather than from a real file on purpose:
+        // APFS rejects filenames that aren't valid UTF-8, so this case
+        // can't be reproduced through the filesystem on macOS at all —
+        // but the rendering mismatch is what actually broke, and that is
+        // testable everywhere.
+        use std::os::unix::ffi::OsStrExt;
+
+        let raw = b"caf\xe9.txt";
+        let path = Path::new(std::ffi::OsStr::from_bytes(raw));
+
+        // What the parser would call this file, from the same bytes.
+        // 0xe9 is octal 351, and git quotes the whole name when it does this.
+        let parsed_name = display_path(raw);
+        assert_eq!(parsed_name, r#""caf\351.txt""#, "git's C-quoted form");
+
+        assert_eq!(display_path_of(path), parsed_name, "the app side must produce the identical name");
+        assert_ne!(path.display().to_string(), parsed_name, "and the old lossy rendering really was different");
+
+        // Ordinary names are untouched by the round trip.
+        assert_eq!(display_path_of(Path::new("src/main.rs")), "src/main.rs");
+    }
+
+    fn paths(files: &[FileEntry]) -> Vec<&str> {
+        files.iter().map(|f| f.path.as_str()).collect()
+    }
 
     fn scratch_repo(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

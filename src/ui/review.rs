@@ -91,9 +91,11 @@ fn tree_footer_counts(files: usize, notes: u32, flagged: usize, width: usize) ->
 
 fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     let tick_color = if app.nav_focus == NavFocus::Tree { theme::CYAN } else { theme::DIM };
-    // 2 rows reserved either way: the summary line, plus room for a
-    // transient clipboard-copy status line under it when there is one.
-    let footer_lines: u16 = 2;
+    // Counts + blank separator, plus a row for each optional notice that is
+    // actually showing. Fixed at 2 before, which meant a git error or a
+    // truncation notice silently pushed the counts row out of the pane.
+    let optional_rows = app.review_error.is_some() as u16 + app.tree_truncated as u16 + app.review_clipboard_status.is_some() as u16;
+    let footer_lines: u16 = 2 + optional_rows;
     // 1 row for the root path, 1 blank separator, then the footer.
     let visible = area.height.saturating_sub(2 + footer_lines) as usize;
     let scroll = scroll_offset(app.tree_index, app.tree.len(), visible);
@@ -139,7 +141,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled("\u{2717}", Style::default().fg(theme::RED)));
             }
         } else if !entry.is_dir {
-            let rel = entry.path.strip_prefix(&app.target_dir).unwrap_or(&entry.path).display().to_string();
+            let rel = crate::gitreview::display_path_of(entry.path.strip_prefix(&app.target_dir).unwrap_or(&entry.path));
             if app.notes.iter().any(|n| n.path == rel) {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled("\u{1f4cc}", Style::default().fg(theme::PINK)));
@@ -167,6 +169,31 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::FG),
         ),
     ]));
+
+    // An unreadable repo and a clean one produce the same empty file list,
+    // so the difference has to be stated outright rather than left to the
+    // counts above — this is the one message that must never be missed.
+    if let Some(e) = &app.review_error {
+        lines.push(Line::from(vec![
+            Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
+            Span::styled(
+                super::truncate_with_ellipsis(&format!("\u{2717} couldn't read changes: {e}"), area.width.saturating_sub(2) as usize),
+                Style::default().fg(theme::RED),
+            ),
+        ]));
+    }
+    if app.tree_truncated {
+        lines.push(Line::from(vec![
+            Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
+            Span::styled(
+                super::truncate_with_ellipsis(
+                    "\u{2026} tree truncated \u{2014} some files aren't listed or findable",
+                    area.width.saturating_sub(2) as usize,
+                ),
+                Style::default().fg(theme::ORANGE),
+            ),
+        ]));
+    }
 
     match &app.review_clipboard_status {
         Some(Ok(msg)) => lines.push(Line::from(vec![
@@ -368,7 +395,7 @@ fn draw_diff_split(f: &mut Frame, app: &App, area: Rect, file: &FileEntry) {
 }
 
 fn draw_source(f: &mut Frame, app: &App, area: Rect) {
-    let name = app.nav_file.strip_prefix(&app.target_dir).unwrap_or(&app.nav_file).display().to_string();
+    let name = crate::gitreview::display_path_of(app.nav_file.strip_prefix(&app.target_dir).unwrap_or(&app.nav_file));
 
     let focused = app.nav_focus == NavFocus::Content;
     let scroll_x = app.nav_scroll_x as usize;
@@ -382,14 +409,16 @@ fn draw_source(f: &mut Frame, app: &App, area: Rect) {
     hints.push(("h", "Hover"));
     hints.push(("/", "Symbols"));
     hints.push(("c", "Comment"));
-    if app.current_diff_index().is_some() {
-        hints.push(("v", "View diff"));
-    }
+    // No `v` hint here. This pane only ever draws for a file with no diff
+    // to show (see `draw_content`), so the guard that used to gate one —
+    // `current_diff_index().is_some()` — could never be true, and the
+    // "View diff" label it carried described a source/diff toggle `v`
+    // stopped being some time ago. Both were leftovers.
     let mut hints = vec![super::key_hints(&hints)];
     // Its own row, not appended to the line above: that line already
     // packs in enough hints to fill a typical terminal width with nothing
-    // left over (there's no wrap/truncate on it), so anything appended
-    // past "View diff" was silently invisible regardless of what it was.
+    // left over (there's no wrap/truncate on it), so anything appended to
+    // it was silently invisible regardless of what it was.
     // A turn started from Agent keeps running in the background if you
     // switch here to look something up — Esc still reaches it.
     if app.agent_running {

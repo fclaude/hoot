@@ -28,6 +28,16 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     if results.is_empty() {
         lines.push(Line::from(Span::styled("No matches.", Style::default().fg(theme::DIM))));
     }
+    // Without this, a symbol the scan never reached is indistinguishable
+    // from one that doesn't exist — "No matches" would be a claim the scan
+    // isn't actually in a position to make.
+    if app.symbols_truncated {
+        lines.push(Line::from(Span::styled(
+            "\u{2026} symbol scan hit its limit \u{2014} this repo has symbols it didn't reach",
+            Style::default().fg(theme::ORANGE),
+        )));
+        lines.push(Line::raw(""));
+    }
 
     for (i, sym) in results.iter().enumerate().take(15) {
         let marker = if i == app.symbol_index { "\u{25b6}" } else { " " };

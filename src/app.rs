@@ -124,6 +124,15 @@ pub struct App {
     /// Result of the last `y` (copy prompt) press, shown next to the tree
     /// footer until the next one overwrites it.
     pub review_clipboard_status: Option<Result<String, String>>,
+    /// Set when the last diff read failed outright, so Review's footer can
+    /// say the changeset is unknown instead of letting an unreadable repo
+    /// render identically to a clean one. See `gitreview::ReviewData`.
+    pub review_error: Option<String>,
+    /// Whether `tree`/`symbols` are complete. Both scans stop at a budget
+    /// (see `fsnav`), and a capped list looks exactly like a small repo
+    /// unless something says otherwise — which is what these drive.
+    pub tree_truncated: bool,
+    pub symbols_truncated: bool,
 
     // AGENT
     pub target_dir: PathBuf,
@@ -250,14 +259,16 @@ fn diff_context_for(target_dir: &std::path::Path, file: &std::path::Path) -> Vec
     if rel.as_os_str().is_empty() {
         return Vec::new();
     }
-    crate::gitreview::file_diff_in_context(target_dir, &rel.display().to_string())
+    crate::gitreview::file_diff_in_context(target_dir, rel)
 }
 
 impl App {
     pub fn new(target_dir: PathBuf, keymap: Keymap, agent_backend: AgentBackend, demo: bool) -> Self {
         let review = crate::gitreview::load(&target_dir);
-        let tree = fsnav::build_tree(&target_dir);
-        let symbols = fsnav::scan_symbols(&target_dir);
+        let tree_scan = fsnav::build_tree(&target_dir);
+        let symbol_scan = fsnav::scan_symbols(&target_dir);
+        let (tree, tree_truncated) = (tree_scan.entries, tree_scan.truncated);
+        let (symbols, symbols_truncated) = (symbol_scan.results, symbol_scan.truncated);
         // Opens on the first *changed* file when there is one, rather than
         // wherever alphabetical tree order happens to land — a file with
         // an actual diff to look at is a far more useful place to start
@@ -279,6 +290,9 @@ impl App {
             last_fs_poll: Instant::now(),
 
             project: review.project,
+            review_error: review.error,
+            tree_truncated,
+            symbols_truncated,
             demo,
             split_diff: false,
 
@@ -359,7 +373,7 @@ impl App {
     /// `ui::review` can annotate tree rows for files other than the one
     /// currently open.
     pub(crate) fn diff_index_for(&self, path: &std::path::Path) -> Option<usize> {
-        let rel = path.strip_prefix(&self.target_dir).unwrap_or(path).display().to_string();
+        let rel = crate::gitreview::display_path_of(path.strip_prefix(&self.target_dir).unwrap_or(path));
         self.project.files.iter().position(|f| f.path == rel)
     }
 
@@ -461,6 +475,11 @@ impl App {
     /// "commit everything" risks staging content the user never reviewed.
     fn sync_review_from_disk(&mut self) {
         let mut review = crate::gitreview::load(&self.target_dir);
+        // Before the early return below, not after: a failed read produces
+        // an empty file list, which compares equal to a genuinely clean
+        // tree — so bailing out first would leave a stale (or absent)
+        // error on screen for exactly the repo that most needs one.
+        self.review_error = review.error.take();
         if review.project.files == self.project.files {
             return;
         }
@@ -524,11 +543,14 @@ impl App {
     /// rather than on every poll, since a full symbol scan is the more
     /// expensive of the two and a same-file content edit doesn't need it.
     fn sync_tree_from_disk(&mut self) {
-        let new_tree = fsnav::build_tree(&self.target_dir);
-        if new_tree != self.tree {
-            self.tree = new_tree;
+        let scan = fsnav::build_tree(&self.target_dir);
+        self.tree_truncated = scan.truncated;
+        if scan.entries != self.tree {
+            self.tree = scan.entries;
             self.tree_index = self.tree_index.min(self.tree.len().saturating_sub(1));
-            self.symbols = fsnav::scan_symbols(&self.target_dir);
+            let symbol_scan = fsnav::scan_symbols(&self.target_dir);
+            self.symbols = symbol_scan.results;
+            self.symbols_truncated = symbol_scan.truncated;
             self.symbol_index = self.symbol_index.min(self.symbols.len().saturating_sub(1));
         }
 
@@ -742,7 +764,19 @@ impl App {
                 continue;
             }
             let Some(file) = self.project.files.iter().find(|f| f.path == cf.path) else { continue };
-            out.push_str(&format!("diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n", cf.path));
+            // git's own header, not a reconstructed one. The old synthetic
+            // `diff --git a/p b/p` + `---`/`+++` triple dropped every piece
+            // of extended metadata git puts there — `rename from`/`to`,
+            // `new file mode`, `deleted file mode`, `old mode`/`new mode`
+            // — so a pure rename, a chmod, or a deletion reached the model
+            // as a contentless stub and came back with a commit message
+            // describing nothing. This is the same header `build_patch`
+            // replays when staging, so the message is drafted from the
+            // same framing the commit is actually built from.
+            for line in &file.meta.header {
+                out.push_str(line);
+                out.push('\n');
+            }
             for (hunk, &sel) in file.hunks.iter().zip(&cf.hunk_selected) {
                 if !sel {
                     continue;
@@ -854,11 +888,15 @@ impl App {
         // uncommitted there is exactly what this turn (and anything else
         // outstanding) changed — pull Review's view of it forward
         // immediately rather than waiting for the next background poll.
-        let n = crate::gitreview::diff_files(&self.target_dir).len();
-        let text = if n == 0 {
-            "  (no file changes)".to_string()
-        } else {
-            format!("{n} file{} changed \u{2014} see Review (F1) for the diff", if n == 1 { "" } else { "s" })
+        let text = match crate::gitreview::diff_files(&self.target_dir) {
+            Ok(files) if files.is_empty() => "  (no file changes)".to_string(),
+            Ok(files) => {
+                format!("{} file{} changed \u{2014} see Review (F1) for the diff", files.len(), if files.len() == 1 { "" } else { "s" })
+            }
+            // Not "(no file changes)": the turn may well have written
+            // plenty, and saying otherwise here is the one summary the user
+            // is most likely to act on without opening Review.
+            Err(e) => format!("  (couldn't read the diff after this turn: {e})"),
         };
         self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
         self.sync_review_from_disk();
@@ -1195,7 +1233,7 @@ impl App {
             let line_target =
                 if self.nav_focus == NavFocus::Content && !self.split_diff { self.current_content_line_number() } else { None };
             if let Some(line) = line_target {
-                let rel = self.nav_file.strip_prefix(&self.target_dir).unwrap_or(&self.nav_file).display().to_string();
+                let rel = crate::gitreview::display_path_of(self.nav_file.strip_prefix(&self.target_dir).unwrap_or(&self.nav_file));
                 self.open_note_input(rel, Some(line));
             } else if let Some(i) = self.current_diff_index() {
                 let path = self.project.files[i].path.clone();
@@ -1301,7 +1339,7 @@ impl App {
             .enumerate()
             .filter(|(_, e)| !e.is_dir)
             .filter(|(_, e)| {
-                let rel = e.path.strip_prefix(&self.target_dir).unwrap_or(&e.path).display().to_string();
+                let rel = crate::gitreview::display_path_of(e.path.strip_prefix(&self.target_dir).unwrap_or(&e.path));
                 fsnav::fuzzy_match(&self.file_finder_filter, &rel)
             })
             .map(|(i, _)| i)
@@ -1446,7 +1484,7 @@ impl App {
         match key.code {
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.agent_trust_acknowledged = true;
-                crate::trust::acknowledge(self.agent_backend);
+                crate::trust::acknowledge(self.agent_backend, self.demo);
                 self.overlay = Overlay::None;
                 if let Some((prompt, cwd, tools, purpose)) = self.pending_turn.take() {
                     self.spawn_turn_now(prompt, cwd, tools, purpose);
@@ -2473,6 +2511,25 @@ mod tests {
         assert!(text.contains("a.txt"), "{text}");
         assert!(text.contains("a1-changed"), "{text}");
         assert!(!text.contains("b1-changed"), "{text}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn selected_diff_text_carries_gits_own_header_so_a_pure_rename_isnt_contentless() {
+        // A rename with no content change has no hunks at all — everything
+        // that says what happened lives in the extended header. Drafting a
+        // commit message from a reconstructed `diff --git`/`---`/`+++`
+        // triple threw exactly that away and asked the model to summarize
+        // a stub.
+        let dir = scratch_repo("rename-header");
+        commit_file(&dir, "before.txt", "unchanged contents\n");
+        Command::new("git").args(["mv", "before.txt", "after.txt"]).current_dir(&dir).status().unwrap();
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+
+        let text = app.selected_diff_text();
+        assert!(text.contains("rename from before.txt"), "{text}");
+        assert!(text.contains("rename to after.txt"), "{text}");
 
         let _ = fs::remove_dir_all(&dir);
     }

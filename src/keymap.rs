@@ -2,15 +2,21 @@
 //!
 //! Every *command* key (mode switches, navigation, toggles, submit actions)
 //! goes through here. Raw text entry — typing into the agent prompt, the
-//! symbol filter, or the commit message editor, and Backspace within those —
-//! is deliberately NOT part of this table: those aren't "bindings" to remap,
-//! they're literal character input. Ctrl+C-to-quit is also intentionally
+//! note input, the symbol filter, or the file finder, and Backspace within
+//! those — is deliberately NOT part of this table: those aren't "bindings"
+//! to remap, they're literal character input. (The commit message is edited
+//! in `$EDITOR`, so it never reaches hoot's key handling at all.) Ctrl+C-to-quit is also intentionally
 //! fixed outside the keymap, as a safety net that can't be remapped away.
 //!
 //! [`BINDINGS`] is the single source of truth: it drives the runtime
 //! defaults, the `~/.hoot.toml` override parser, and the generated
-//! `KEYBINDINGS.md` (see `--print-keymap`), so the doc can't drift from the
-//! code.
+//! `KEYBINDINGS.md` (see `--print-keymap`). That keeps the *names, chords
+//! and groups* in the doc exactly what the binary uses. It does not check
+//! the prose: a `help:` string here that no longer describes what its
+//! handler does regenerates into an equally wrong `KEYBINDINGS.md`, and CI
+//! compares the file against this table, not against behavior. Both of the
+//! descriptions that had gone stale this way (`v`, `c`) passed that check
+//! for as long as they were wrong.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -172,10 +178,11 @@ pub const BINDINGS: &[Binding] = &[
     b!(
         Action::ReviewToggleView,
         "review_toggle_view",
-        "Toggle diff/source",
+        "Toggle full context",
         "Review",
         "v",
-        "Switch the content pane between diff and source (only if the file has changes)"
+        "Switch the content pane between the whole file with changes overlaid and just the changed lines \
+         (3 lines of context either side). Only does anything for a file that has changes"
     ),
     b!(Action::ReviewMarkGood, "review_mark_good", "Mark good", "Review", "g", "Clear notes/flag on the open file"),
     b!(Action::ReviewFlagRework, "review_flag_rework", "Flag rework", "Review", "x", "Flag the open file as needing a redo"),
@@ -207,7 +214,9 @@ pub const BINDINGS: &[Binding] = &[
         "Comment",
         "Review",
         "c",
-        "In source view: comment on the current line. Otherwise: comment on the whole file"
+        "With the content pane focused: comment on the current line \u{2014} in plain source or in the \
+         unified diff. From the tree, in the before/after split, or on a line with no counterpart in \
+         the file (a removed line): comment on the whole file"
     ),
     b!(Action::ReviewSplitView, "review_split_view", "Split view", "Review", "s", "Switch the diff view to before/after columns"),
     b!(Action::ReviewUnifiedView, "review_unified_view", "Unified view", "Review", "u", "Switch the diff view back to unified"),
@@ -456,13 +465,17 @@ impl Keymap {
 }
 
 /// Generates KEYBINDINGS.md content from [`BINDINGS`] (+ `keymap`'s current,
-/// possibly-overridden chords) so the doc can never drift from the code.
+/// possibly-overridden chords), so the names and chords it lists are
+/// always the real ones — see the module doc for what this does *not*
+/// guarantee about the descriptions.
 pub fn generate_markdown(keymap: &Keymap) -> String {
     let mut out = String::new();
     out.push_str("# hoot keybindings\n\n");
     out.push_str(
         "This is generated from `src/keymap.rs` (run `hoot --print-keymap` to regenerate) — \
-         it always matches what the binary actually does.\n\n",
+         every binding name and chord below is the real one. The descriptions are prose from that \
+         same table, so treat them as documentation that is kept beside the code rather than as \
+         something checked against it.\n\n",
     );
     out.push_str(
         "## Overriding\n\n\
@@ -479,7 +492,9 @@ pub fn generate_markdown(keymap: &Keymap) -> String {
          hoot from starting.\n\n\
          Not overridable: `Ctrl+C` (always gets you out — same quit-confirmation as `q` if there's \
          unsent work, but a second `Ctrl+C` always confirms immediately), and raw text entry \
-         (typing/Backspace) in the agent prompt, symbol filter, and commit message editor.\n\n\
+         (typing/Backspace) in the agent prompt, the note input, the symbol filter, and the file \
+         finder. The commit message is edited in `$EDITOR`, not in hoot, so its keys are your \
+         editor's.\n\n\
          Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don't work \
          in most terminals — the terminal collapses them to the same byte sequence as the bare \
          key, so no modifier survives for hoot to see. Prefer a plain letter or `ctrl+<letter>` \

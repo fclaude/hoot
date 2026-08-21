@@ -134,15 +134,28 @@ pub fn spawn(prompt: &str, cwd: &Path, session_id: Option<&str>, tools: ToolProf
 
     let wait_child = child.clone();
     thread::spawn(move || {
+        let mut said_something = false;
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
             let Ok(line) = line else { break };
             if !line.trim().is_empty() {
+                said_something = true;
                 let _ = tx.send(AgentEvent::Error(line));
             }
         }
         if let Ok(mut child) = wait_child.lock() {
-            let _ = child.wait();
+            // A backend that fails without printing anything to stderr —
+            // a missing binary's exec failure, a config error it reports
+            // by exit code, an OOM kill — used to be indistinguishable
+            // from a turn that finished normally, because the status was
+            // dropped on the floor here. Only reported when stderr was
+            // silent: when it wasn't, the real message is already on
+            // screen and a generic code adds nothing.
+            if let Ok(status) = child.wait() {
+                if !status.success() && !said_something {
+                    let _ = tx.send(AgentEvent::Error(format!("opencode exited unsuccessfully ({status})")));
+                }
+            }
         }
         // `prompt_file` stays alive (and thus on disk) until here — the
         // child has now fully exited, so it's definitely done reading it.

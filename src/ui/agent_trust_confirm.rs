@@ -23,7 +23,18 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         (intro, theme::FG, true),
         (scope, theme::FG, false),
         ("git diff/git log let you review and revert tracked-file edits \u{2014} not a full undo.".to_string(), theme::DIM, false),
-        ("Asked once per machine \u{2014} not shown again after this.".to_string(), theme::DIM, false),
+        // Demo runs deliberately don't persist the confirmation (see
+        // `trust::acknowledge_at`), so promising "not shown again" there
+        // would be a promise this build doesn't keep.
+        (
+            if app.demo {
+                "Demo run \u{2014} this confirmation isn't remembered, so you'll be asked again next time.".to_string()
+            } else {
+                "Asked once per machine \u{2014} not shown again after this.".to_string()
+            },
+            theme::DIM,
+            false,
+        ),
     ];
 
     let mut lines: Vec<Line<'static>> = Vec::new();

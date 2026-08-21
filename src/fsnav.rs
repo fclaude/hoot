@@ -23,14 +23,31 @@ const SKIP_DIRS: &[&str] =
     &[".git", "target", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".idea", ".vscode", ".DS_Store"];
 const SOURCE_EXTS: &[&str] = &["rs", "ts", "tsx", "js", "jsx", "go", "py", "java", "c", "h", "cpp", "hpp", "rb", "swift", "kt"];
 const TREE_BUDGET: usize = 400;
+/// How many lines of a file the content pane will show. Named rather than
+/// inlined so the truncation notice and the cut itself can't drift apart.
+const MAX_DISPLAY_LINES: usize = 4000;
 const SCAN_FILE_BUDGET: usize = 500;
 const SYMBOL_BUDGET: usize = 500;
 
-pub fn build_tree(root: &Path) -> Vec<TreeEntry> {
+/// A tree walk together with whether it saw everything.
+///
+/// `truncated` exists because the budgets below are silent by nature: a
+/// walk that stops at `TREE_BUDGET` produces a perfectly ordinary-looking
+/// tree with no hint that files are missing from it, and the file finder
+/// searches this same list — so on a large repo a file could simply not be
+/// findable, with nothing on screen to say so. The caps stay (they keep a
+/// poll-tick walk cheap); the silence doesn't.
+pub struct TreeScan {
+    pub entries: Vec<TreeEntry>,
+    pub truncated: bool,
+}
+
+pub fn build_tree(root: &Path) -> TreeScan {
     let mut out = Vec::new();
     let ignored = crate::gitreview::ignored_paths(root);
     walk(root, 0, &mut out, &ignored);
-    out
+    let truncated = out.len() >= TREE_BUDGET;
+    TreeScan { entries: out, truncated }
 }
 
 fn walk(dir: &Path, depth: u8, out: &mut Vec<TreeEntry>, ignored: &HashSet<PathBuf>) {
@@ -119,7 +136,17 @@ pub fn read_file(path: &Path) -> Vec<String> {
         return vec!["(file too large to display)".to_string()];
     }
     match fs::read_to_string(path) {
-        Ok(content) => content.lines().take(4000).map(|l| l.to_string()).collect(),
+        Ok(content) => {
+            let mut lines: Vec<String> = content.lines().take(MAX_DISPLAY_LINES).map(|l| l.to_string()).collect();
+            // Marked, not just cut. Silently ending at line 4000 renders as
+            // a file that simply finishes there — and since a symbol jump
+            // past the cut can only scroll as far as this list goes, it
+            // would land on an unrelated line with nothing to indicate why.
+            if content.lines().nth(MAX_DISPLAY_LINES).is_some() {
+                lines.push(format!("(\u{2026} truncated at {MAX_DISPLAY_LINES} lines \u{2014} open it in $EDITOR to see the rest)"));
+            }
+            lines
+        }
         Err(e) => vec![format!("(couldn't read {}: {e})", path.display())],
     }
 }
@@ -171,9 +198,20 @@ fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>, ignored: &HashSet<Pa
     }
 }
 
-pub fn scan_symbols(root: &Path) -> Vec<SymbolResult> {
+/// A symbol scan together with whether it saw everything — `truncated` is
+/// set when either budget stopped it, since a symbol jump that silently
+/// can't offer a symbol is indistinguishable from one that doesn't exist.
+pub struct SymbolScan {
+    pub results: Vec<SymbolResult>,
+    pub truncated: bool,
+}
+
+pub fn scan_symbols(root: &Path) -> SymbolScan {
     let mut files = Vec::new();
     collect_source_files(root, &mut files, &crate::gitreview::ignored_paths(root));
+    // Both budgets count: hitting the file cap means whole files went
+    // unscanned, hitting the symbol cap means the scan stopped mid-file.
+    let mut truncated = files.len() >= SCAN_FILE_BUDGET;
 
     let mut out = Vec::new();
     'files: for path in &files {
@@ -183,11 +221,12 @@ pub fn scan_symbols(root: &Path) -> Vec<SymbolResult> {
                 out.push(SymbolResult { name, path: path.clone(), line: i + 1, preview: line.trim().to_string() });
             }
             if out.len() >= SYMBOL_BUDGET {
+                truncated = true;
                 break 'files;
             }
         }
     }
-    out
+    SymbolScan { results: out, truncated }
 }
 
 fn extract_symbol_name(line: &str) -> Option<String> {
@@ -360,7 +399,7 @@ mod tests {
         fs::write(dir.join("app.py"), "class Widget:\n    async def render(self):\n        pass\n").unwrap();
         fs::write(dir.join("skip.bin"), "not source").unwrap();
 
-        let symbols = scan_symbols(&dir);
+        let symbols = scan_symbols(&dir).results;
         let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"Handle"), "names = {names:?}");
         assert!(names.contains(&"Server"), "names = {names:?}");
@@ -390,7 +429,7 @@ mod tests {
         let link = dir.join("evil.rs");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
 
-        let symbols = scan_symbols(&dir);
+        let symbols = scan_symbols(&dir).results;
         let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(!names.contains(&"top_secret_function"), "symlink target leaked into symbol scan: {names:?}");
 
@@ -412,7 +451,7 @@ mod tests {
         // entirely.
         fs::write(dir.join("small.rs"), "fn kept() {}\n").unwrap();
 
-        let symbols = scan_symbols(&dir);
+        let symbols = scan_symbols(&dir).results;
         let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"kept"), "names = {names:?}");
         assert!(!names.contains(&"should_not_appear"), "oversized file should have been skipped entirely: {names:?}");
@@ -430,7 +469,7 @@ mod tests {
         fs::write(dir.join("target/junk"), "").unwrap();
         fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
 
-        let tree = build_tree(&dir);
+        let tree = build_tree(&dir).entries;
         let labels: Vec<&str> = tree.iter().map(|e| e.label.as_str()).collect();
         assert!(labels.contains(&"src/"), "labels = {labels:?}");
         assert!(labels.contains(&"main.rs"), "labels = {labels:?}");
@@ -450,7 +489,7 @@ mod tests {
         fs::write(dir.join(".gitignore"), "/target\n").unwrap();
         fs::write(dir.join(".github/workflows/release.yml"), "name: release\n").unwrap();
 
-        let tree = build_tree(&dir);
+        let tree = build_tree(&dir).entries;
         let labels: Vec<&str> = tree.iter().map(|e| e.label.as_str()).collect();
         assert!(labels.contains(&".gitignore"), "labels = {labels:?}");
         assert!(labels.contains(&".github/"), "labels = {labels:?}");
@@ -476,7 +515,7 @@ mod tests {
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
 
-        let tree = build_tree(&dir);
+        let tree = build_tree(&dir).entries;
         let labels: Vec<&str> = tree.iter().map(|e| e.label.as_str()).collect();
         assert!(!labels.contains(&"ignored-dir/"), "labels = {labels:?}");
         assert!(labels.contains(&"src/"), "labels = {labels:?}");

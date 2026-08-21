@@ -169,12 +169,16 @@ fn descendants_of(root: i32, pairs: &[(i32, i32)]) -> Vec<i32> {
 
 /// Which tools a spawned turn is allowed to use.
 ///
-/// `ReadOnly` is for normal chat/Q&A in the Agent pane — the backend can
-/// inspect the real target directory but never write to it. `ReadWrite`
-/// writes straight to the real target directory: Review's diff view and
-/// plain `git` are the review/undo mechanism, same as any other change made
-/// to the repo — see `pi_client`'s doc comment for why there's no
-/// filesystem-level staging gate either way.
+/// `ReadWrite` is what an ordinary Agent turn runs with, chat included: it
+/// writes straight to the real target directory, and Review's diff view
+/// plus plain `git` are the review/undo mechanism, same as any other change
+/// made to the repo — see `pi_client`'s doc comment for why there's no
+/// filesystem-level staging gate.
+///
+/// `ReadOnly` is used for exactly one thing today: drafting a commit
+/// message (`App::generate_commit_message`), a silent turn that only needs
+/// to read the diff it was handed. This comment used to have the two the
+/// wrong way round, describing `ReadOnly` as the normal chat profile.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolProfile {
     ReadOnly,

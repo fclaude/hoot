@@ -47,7 +47,13 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let status_lines = if app.commit_message_status.is_some() { 2 } else { 0 };
     const CHROME: usize = 4; // border (2) + divider (1) + hint row (1)
     let commit_height = (message_lines + status_lines + CHROME) as u16;
-    let commit_height = commit_height.clamp(6, (cols[1].height * 3) / 5);
+    // `clamp` panics when min > max, which a short terminal produces for
+    // real: at a pane height of 9 or less the 60% ceiling falls below the
+    // 6-row floor and this took the whole app down rather than simply
+    // drawing a cramped panel. The ceiling wins when they cross — on a
+    // pane that small there is no room to honor the floor anyway.
+    let ceiling = (cols[1].height * 3) / 5;
+    let commit_height = commit_height.min(ceiling).max(6).min(cols[1].height);
 
     let right = Layout::default()
         .direction(Direction::Vertical)

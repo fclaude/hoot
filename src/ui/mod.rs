@@ -63,7 +63,7 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
 
     let center = match app.mode {
         Mode::Review => {
-            let name = app.nav_file.strip_prefix(&app.target_dir).unwrap_or(&app.nav_file).display().to_string();
+            let name = crate::gitreview::display_path_of(app.nav_file.strip_prefix(&app.target_dir).unwrap_or(&app.nav_file));
             if narrow {
                 format!("{} changed", app.project.files.len())
             } else {
@@ -140,14 +140,21 @@ pub fn key_hints(items: &[(&str, &str)]) -> Line<'static> {
 /// widget and trusting whatever it decides to draw. A single word longer
 /// than `width` is left on its own (slightly overflowing) line rather than
 /// hard-split — simpler, and rare for natural-language text.
+///
+/// Measures in terminal columns (`unicode_width`), not `char`s: a CJK
+/// character or an emoji occupies two cells, so a char count says a line
+/// fits when it is in fact up to twice the width of the pane it is being
+/// laid into — and callers here do their own row math on the result.
 pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width < 4 {
         return vec![text.to_string()];
     }
+    use unicode_width::UnicodeWidthStr;
+
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
-        let would_be = if current.is_empty() { word.chars().count() } else { current.chars().count() + 1 + word.chars().count() };
+        let would_be = if current.is_empty() { word.width() } else { current.width() + 1 + word.width() };
         if would_be > width && !current.is_empty() {
             lines.push(std::mem::take(&mut current));
         }
@@ -232,15 +239,64 @@ fn control_picture(c: char) -> char {
 /// tail with an ellipsis if it doesn't fit — so a too-narrow area loses a
 /// clearly-marked suffix of the text instead of silently having it cut off
 /// mid-character by the renderer with no indication anything's missing.
+///
+/// "Columns" here means real terminal columns (`unicode_width`), the same
+/// measure ratatui's own cell buffer uses. This counted `char`s before,
+/// which is the same number only for single-width text: a CJK path or an
+/// emoji in a filename measured as half its real width and overflowed the
+/// area anyway — the exact failure the ellipsis exists to prevent.
 pub fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
-    if s.chars().count() <= max_width {
+    use unicode_width::UnicodeWidthStr;
+
+    if s.width() <= max_width {
         return s.to_string();
     }
     match max_width {
         0 => String::new(),
         1 => "\u{2026}".to_string(),
-        n => s.chars().take(n - 1).collect::<String>() + "\u{2026}",
+        n => take_columns(s, n - 1) + "\u{2026}",
     }
+}
+
+/// The longest prefix of `s` that fits in `max_width` terminal columns.
+///
+/// Character-by-character rather than `chars().take(n)`: the two agree
+/// only for text that is entirely single-width. A wide character is never
+/// split across the boundary — if it would straddle it, it is left out,
+/// so the result is always *at most* `max_width` columns and never
+/// overflows the area it was measured for.
+fn take_columns(s: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut out = String::with_capacity(s.len());
+    let mut used = 0usize;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > max_width {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out
+}
+
+/// The longest *suffix* of `s` that fits in `max_width` terminal columns —
+/// `take_columns` from the other end, with the same no-split guarantee.
+fn take_columns_from_end(s: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 0usize;
+    for c in s.chars().rev() {
+        let w = c.width().unwrap_or(0);
+        if used + w > max_width {
+            break;
+        }
+        kept.push(c);
+        used += w;
+    }
+    kept.into_iter().rev().collect()
 }
 
 /// Truncates `s` to `max_width` columns by dropping characters off the
@@ -253,14 +309,15 @@ pub fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
 /// keeping the head leaves `/private/var/folders/yc/2l75gz293hj1m_`, and
 /// keeping the tail leaves `\u{2026}hoot-demo-VZhR5A/search-index`.
 pub fn truncate_start_with_ellipsis(s: &str, max_width: usize) -> String {
-    let count = s.chars().count();
-    if count <= max_width {
+    use unicode_width::UnicodeWidthStr;
+
+    if s.width() <= max_width {
         return s.to_string();
     }
     match max_width {
         0 => String::new(),
         1 => "\u{2026}".to_string(),
-        n => "\u{2026}".to_string() + &s.chars().skip(count - (n - 1)).collect::<String>(),
+        n => "\u{2026}".to_string() + &take_columns_from_end(s, n - 1),
     }
 }
 
@@ -271,10 +328,12 @@ pub fn truncate_start_with_ellipsis(s: &str, max_width: usize) -> String {
 /// ellipsis-marks the one span that got cut instead of losing all styling
 /// by flattening to plain text first.
 pub fn truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthStr;
+
     let mut out = Vec::new();
     let mut used = 0usize;
     for span in spans {
-        let span_width = span.content.chars().count();
+        let span_width = UnicodeWidthStr::width(span.content.as_ref());
         if used + span_width <= max_width {
             used += span_width;
             out.push(span);
@@ -465,6 +524,46 @@ mod tests {
     }
 
     #[test]
+    fn wide_characters_are_measured_in_columns_not_chars() {
+        use unicode_width::UnicodeWidthStr;
+
+        // Each of these is two terminal cells wide, so eight chars is
+        // sixteen columns — a char count called this "fits in 10" and let
+        // it overflow the pane it was measured for.
+        let cjk = "\u{4f60}\u{597d}\u{4e16}\u{754c}\u{4f60}\u{597d}\u{4e16}\u{754c}";
+        assert_eq!(cjk.chars().count(), 8);
+        assert_eq!(cjk.width(), 16);
+
+        for width in 0..20usize {
+            let head = truncate_with_ellipsis(cjk, width);
+            assert!(head.width() <= width, "head {head:?} is {} columns, over {width}", head.width());
+            let tail = truncate_start_with_ellipsis(cjk, width);
+            assert!(tail.width() <= width, "tail {tail:?} is {} columns, over {width}", tail.width());
+        }
+
+        // And the ellipsis really is a marker of loss, not decoration.
+        assert!(truncate_with_ellipsis(cjk, 10).ends_with('\u{2026}'));
+        assert!(truncate_start_with_ellipsis(cjk, 10).starts_with('\u{2026}'));
+        // Text that genuinely fits is returned untouched.
+        assert_eq!(truncate_with_ellipsis(cjk, 16), cjk);
+    }
+
+    #[test]
+    fn wrapped_lines_respect_the_column_width_they_were_given() {
+        use unicode_width::UnicodeWidthStr;
+
+        let text = "\u{4f60}\u{597d} \u{4e16}\u{754c} \u{4f60}\u{597d} \u{4e16}\u{754c} \u{4f60}\u{597d}";
+        for width in 4..20usize {
+            for line in wrap_text(text, width) {
+                // A single word wider than the pane is left overflowing by
+                // design (documented on `wrap_text`); everything else must
+                // fit the width it was asked for.
+                assert!(line.width() <= width || line.split_whitespace().count() == 1, "{line:?} exceeds {width} columns");
+            }
+        }
+    }
+
+    #[test]
     fn truncate_with_ellipsis_leaves_short_text_alone() {
         assert_eq!(truncate_with_ellipsis("hi", 10), "hi");
         assert_eq!(truncate_with_ellipsis("exact", 5), "exact");
@@ -538,6 +637,53 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn a_repo_git_cannot_read_says_so_instead_of_looking_clean() {
+        // The user-facing half of the "unreadable is not clean" fix: a
+        // failed diff read produces an empty file list, which renders
+        // exactly like a repo with nothing to review unless the footer
+        // says otherwise.
+        let dir = scratch_repo("unreadable");
+        commit_file(&dir, "f.txt", "line1\n");
+        fs::write(dir.join("f.txt"), "line1-changed\n").unwrap();
+
+        // A corrupt index leaves `is_git_repo` happy and breaks `git diff`.
+        fs::write(dir.join(".git").join("index"), b"not an index at all").unwrap();
+        let app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+
+        assert!(app.review_error.is_some(), "the failure must reach the app");
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("couldn't read changes"), "the failure must reach the screen:\n{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_screen_survives_a_tiny_terminal() {
+        // Regression: Curate sized its commit panel with
+        // `clamp(6, height * 3 / 5)`, and below a pane height of about ten
+        // that ceiling drops under the floor — `clamp` panics when
+        // min > max, so the whole app went down instead of drawing a
+        // cramped panel. Nothing here asserts on content: the assertion is
+        // that drawing completes at all, at sizes a real user produces by
+        // dragging a window edge.
+        let dir = scratch_repo("tiny-term");
+        commit_file(&dir, "f.txt", "line1\nline2\n");
+        fs::write(dir.join("f.txt"), "line1-changed\nline2\n").unwrap();
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+
+        for mode in [Mode::Review, Mode::Curation, Mode::Agent] {
+            app.mode = mode;
+            for height in 1..=14u16 {
+                for width in [1u16, 2, 8, 20, 40, 80] {
+                    let _ = render(&app, width, height);
+                }
+            }
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

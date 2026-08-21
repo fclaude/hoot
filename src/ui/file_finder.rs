@@ -63,7 +63,7 @@ fn draw_results(f: &mut Frame, app: &App, results: &[&crate::data::TreeEntry], a
     }
 
     for (i, entry) in results.iter().enumerate().take(area.height.saturating_sub(2) as usize) {
-        let rel = entry.path.strip_prefix(&app.target_dir).unwrap_or(&entry.path).display().to_string();
+        let rel = crate::gitreview::display_path_of(entry.path.strip_prefix(&app.target_dir).unwrap_or(&entry.path));
         let marker = if i == app.file_finder_index { "\u{25b6} " } else { "  " };
         let style = if i == app.file_finder_index {
             Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)
@@ -82,7 +82,7 @@ fn draw_preview(f: &mut Frame, app: &App, entry: Option<&crate::data::TreeEntry>
         return;
     };
 
-    let rel = entry.path.strip_prefix(&app.target_dir).unwrap_or(&entry.path).display().to_string();
+    let rel = crate::gitreview::display_path_of(entry.path.strip_prefix(&app.target_dir).unwrap_or(&entry.path));
     let mut lines: Vec<Line<'static>> =
         vec![Line::from(Span::styled(rel, Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD))), Line::raw("")];
 
