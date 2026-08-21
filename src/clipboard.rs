@@ -44,16 +44,28 @@ fn copy_with(candidates: &[(&str, &[&str])], text: &str) -> Result<(), String> {
 fn try_one(cmd: &str, args: &[&str], text: &str) -> Option<Result<(), String>> {
     let mut child = match Command::new(cmd).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         Ok(c) => c,
-        Err(_) => return None,
+        // Only "no such command" means move on to the next candidate. Any
+        // other spawn failure — a permission problem, a missing
+        // interpreter — used to be reported as "no clipboard tool found",
+        // which sends someone looking for a tool that is installed and
+        // sitting right there.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return Some(Err(format!("{cmd}: {e}"))),
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(e) = stdin.write_all(text.as_bytes()) {
-            return Some(Err(format!("{cmd}: {e}")));
-        }
-    }
+    // Held rather than returned on. A tool that exits before reading its
+    // stdin makes this write fail with EPIPE, and returning that lost the
+    // exit status underneath — reporting "Broken pipe" for what is really
+    // "xclip died with status 1". The broken pipe is the symptom; the
+    // status is the cause, so the status wins when there is one. Taking
+    // stdin also closes it here, which is what lets a tool that *does*
+    // read to EOF finish.
+    let write_err = child.stdin.take().and_then(|mut stdin| stdin.write_all(text.as_bytes()).err());
     Some(match child.wait() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("{cmd} exited with {status}")),
+        Ok(status) if !status.success() => Err(format!("{cmd} exited with {status}")),
+        Ok(_) => match write_err {
+            Some(e) => Err(format!("{cmd}: {e}")),
+            None => Ok(()),
+        },
         Err(e) => Err(format!("{cmd}: {e}")),
     })
 }
@@ -61,58 +73,62 @@ fn try_one(cmd: &str, args: &[&str], text: &str) -> Option<Result<(), String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// A throwaway `#!/bin/sh` script standing in for a real clipboard
-    /// tool, so tests never touch the actual system clipboard. `body` is
-    /// free to use `"$CAPTURE"` — it's set to a scratch file path this
-    /// script can write its stdin to, so the test can inspect what a
-    /// "copy" actually received.
-    fn script(body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    /// A scratch file path for a stand-in clipboard tool to write its
+    /// stdin to, so tests never touch the actual system clipboard.
+    ///
+    /// The stand-in is `sh -c <body>` rather than a generated executable.
+    /// Writing a script and immediately exec'ing it races with every other
+    /// test thread: a concurrent `fork` inherits the still-open write
+    /// descriptor, and the `exec` then fails with ETXTBSY ("text file
+    /// busy") — intermittently, on whichever machine happens to interleave
+    /// them that way. Nothing here needs a file to exist to test the
+    /// candidate logic, and `sh` is already required by every other test
+    /// in this file.
+    fn capture_path(tag: &str) -> std::path::PathBuf {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let script_path = std::env::temp_dir().join(format!("hoot-clipboard-test-{}-{suffix}", std::process::id()));
-        let capture_path = std::env::temp_dir().join(format!("hoot-clipboard-capture-{}-{suffix}", std::process::id()));
-        let mut f = std::fs::File::create(&script_path).unwrap();
-        writeln!(f, "#!/bin/sh\nCAPTURE={:?}\n{body}", capture_path.to_str().unwrap()).unwrap();
-        drop(f);
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        (script_path, capture_path)
+        std::env::temp_dir().join(format!("hoot-clipboard-capture-{}-{tag}-{suffix}", std::process::id()))
     }
 
     #[test]
     fn copies_to_the_first_available_candidate() {
-        let (script_path, capture_path) = script("cat > \"$CAPTURE\"");
-        let candidates: Vec<(&str, &[&str])> = vec![(script_path.to_str().unwrap(), &[])];
+        let capture = capture_path("first");
+        let body = format!("cat > {}", capture.to_str().unwrap());
+        let args = ["-c", body.as_str()];
+        let candidates: Vec<(&str, &[&str])> = vec![("sh", &args)];
 
         copy_with(&candidates, "hello clipboard").unwrap();
-        assert_eq!(std::fs::read_to_string(&capture_path).unwrap(), "hello clipboard");
+        assert_eq!(std::fs::read_to_string(&capture).unwrap(), "hello clipboard");
 
-        let _ = std::fs::remove_file(&script_path);
-        let _ = std::fs::remove_file(&capture_path);
+        let _ = std::fs::remove_file(&capture);
     }
 
     #[test]
     fn falls_through_to_the_next_candidate_when_the_first_is_missing() {
-        let (script_path, capture_path) = script("cat > \"$CAPTURE\"");
-        let candidates: Vec<(&str, &[&str])> = vec![("hoot-definitely-not-a-real-binary-xyz", &[]), (script_path.to_str().unwrap(), &[])];
+        let capture = capture_path("fallthrough");
+        let body = format!("cat > {}", capture.to_str().unwrap());
+        let args = ["-c", body.as_str()];
+        let candidates: Vec<(&str, &[&str])> = vec![("hoot-definitely-not-a-real-binary-xyz", &[]), ("sh", &args)];
 
         copy_with(&candidates, "second candidate wins").unwrap();
-        assert_eq!(std::fs::read_to_string(&capture_path).unwrap(), "second candidate wins");
+        assert_eq!(std::fs::read_to_string(&capture).unwrap(), "second candidate wins");
 
-        let _ = std::fs::remove_file(&script_path);
-        let _ = std::fs::remove_file(&capture_path);
+        let _ = std::fs::remove_file(&capture);
     }
 
     #[test]
     fn reports_a_real_failure_instead_of_trying_the_next_candidate() {
-        let (script_path, _capture_path) = script("exit 1");
-        let candidates: Vec<(&str, &[&str])> = vec![(script_path.to_str().unwrap(), &[]), ("cat", &[])];
+        // `exit 1` without reading stdin, deliberately: that is what makes
+        // the parent's write fail with EPIPE, and the whole point is that
+        // the exit status is reported rather than the broken pipe it
+        // caused. Whether the write loses the race is timing-dependent —
+        // this passed for a long time simply by usually winning it.
+        let args = ["-c", "exit 1"];
+        let candidates: Vec<(&str, &[&str])> = vec![("sh", &args), ("cat", &[])];
 
         let err = copy_with(&candidates, "whatever").unwrap_err();
         assert!(err.contains("exited"), "{err}");
-
-        let _ = std::fs::remove_file(&script_path);
     }
 
     #[test]

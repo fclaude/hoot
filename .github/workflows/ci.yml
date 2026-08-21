@@ -82,8 +82,9 @@ jobs:
         # ships curl-minimal, and asking for `curl` makes dnf try to swap
         # the two rather than treat the need as already met. procps-ng is
         # Fedora's name for Debian's procps — see below for why `ps` is
-        # not optional.
-        run: dnf install -y git gcc procps-ng
+        # not optional. diffutils is in Debian's required set but not in
+        # this image, and the keymap check below is a `diff`.
+        run: dnf install -y git gcc procps-ng diffutils
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -116,7 +117,13 @@ jobs:
         # The file is generated from src/keymap.rs; nothing but habit keeps
         # the checked-in copy current after a binding changes.
         run: |
-          set -euo pipefail
+          set -eu
+          # Checked separately so a missing `diff` reports itself. Without
+          # this the `||` below swallows "diff: command not found" and
+          # announces a stale KEYBINDINGS.md instead — sending someone to
+          # regenerate a file that was correct all along.
+          command -v diff >/dev/null 2>&1 \
+            || { echo "::error::diff is not installed on this runner, so the keymap check cannot run"; exit 1; }
           cargo run --locked --quiet -- --print-keymap > /tmp/keybindings.md
           diff -u KEYBINDINGS.md /tmp/keybindings.md \
             || { echo "::error::KEYBINDINGS.md is stale — run 'cargo run -- --print-keymap > KEYBINDINGS.md'"; exit 1; }
