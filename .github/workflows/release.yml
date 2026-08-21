@@ -1,5 +1,6 @@
-# Builds release binaries + a .deb and .rpm, and attaches them all to a
-# GitHub Release, whenever a `vX.Y.Z` tag is pushed.
+# Builds release binaries + a .deb and .rpm, installs each package on the
+# distribution it targets to confirm it actually works, and attaches them
+# all to a GitHub Release, whenever a `vX.Y.Z` tag is pushed.
 #
 # Deliberately uses native runners per architecture where they still exist
 # (Linux x86_64/arm64) instead of `cross` or Docker-based cross-compilation
@@ -150,8 +151,57 @@ jobs:
           name: hoot-deb-rpm
           path: dist-stage/*
 
+  verify-packages:
+    # Building a .deb and an .rpm proves the packaging metadata parses. It
+    # does not prove either one installs, that the declared dependencies
+    # are the real ones, or that the binary inside runs on the
+    # distribution it is aimed at — a release-day discovery otherwise,
+    # since nothing else here ever installs what it ships. Each package is
+    # installed into a clean container of its target distribution and the
+    # installed binary is run from PATH.
+    needs: package-linux
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian
+            container: debian:stable
+          - name: fedora
+            container: fedora:latest
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hoot-deb-rpm
+          path: dist
+
+      # `apt-get install ./file.deb` (rather than `dpkg -i`) so the
+      # dependencies the package declares — `$auto` plus git — are
+      # resolved and installed too. A missing runtime dependency is
+      # exactly the kind of thing this job exists to catch, and `dpkg -i`
+      # would leave it unconfigured instead of failing.
+      - name: Install the .deb and run it
+        if: matrix.name == 'debian'
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends ./dist/*.deb
+          command -v hoot
+          hoot --version
+
+      - name: Install the .rpm and run it
+        if: matrix.name == 'fedora'
+        run: |
+          set -eux
+          dnf install -y ./dist/*.rpm
+          command -v hoot
+          hoot --version
+
   release:
-    needs: [build, package-linux]
+    needs: [build, package-linux, verify-packages]
     permissions:
       contents: write
       attestations: write
