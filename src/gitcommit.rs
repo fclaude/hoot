@@ -446,9 +446,7 @@ mod tests {
 
         let (project, mut cfs) = project_and_curation(&dir);
         for cf in &mut cfs {
-            for s in &mut cf.hunk_selected {
-                *s = false;
-            }
+            cf.hunk_selected.fill(false);
         }
         let err = commit(&dir, &project, &cfs, "should not land").unwrap_err();
         assert!(err.contains("nothing selected"), "{err}");
@@ -575,9 +573,7 @@ mod tests {
 
         let (project, mut cfs) = project_and_curation(&dir);
         for cf in &mut cfs {
-            for s in &mut cf.hunk_selected {
-                *s = false;
-            }
+            cf.hunk_selected.fill(false);
         }
 
         let err = commit(&dir, &project, &cfs, "should not run").unwrap_err();

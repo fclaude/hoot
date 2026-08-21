@@ -2411,9 +2411,7 @@ mod tests {
         let (mut app, dir) = two_file_app("gen-none-selected");
         app.mode = Mode::Curation;
         for cf in &mut app.curation_files {
-            for s in &mut cf.hunk_selected {
-                *s = false;
-            }
+            cf.hunk_selected.fill(false);
         }
         app.on_key(key(KeyCode::Char('g')));
         assert!(!app.agent_running);
@@ -2504,9 +2502,7 @@ mod tests {
     fn selected_diff_text_includes_only_selected_hunks() {
         let (mut app, dir) = two_file_app("diff-text");
         // a.txt selected (default), b.txt deselected.
-        for s in &mut app.curation_files[1].hunk_selected {
-            *s = false;
-        }
+        app.curation_files[1].hunk_selected.fill(false);
         let text = app.selected_diff_text();
         assert!(text.contains("a.txt"), "{text}");
         assert!(text.contains("a1-changed"), "{text}");
