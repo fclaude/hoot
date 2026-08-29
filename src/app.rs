@@ -4243,4 +4243,42 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn re_anchoring_never_follows_a_symlink_out_of_the_repo() {
+        // The same threat `fsnav::read_file` and
+        // `gitreview::synthetic_new_file_diff` already refuse: a symlink
+        // in the tree pointing at something outside it. Re-anchoring reads
+        // files off disk by path, so it is a third way into that content
+        // unless it looks at the link rather than through it. A matched
+        // anchor would move the note onto a line of the target file — and
+        // the line number is what `i`/`y` then hand to a real agent.
+        let dir = scratch_repo("anchor-symlink");
+        let outside = std::env::temp_dir().join(format!("hoot-anchor-outside-{}", std::process::id()));
+        fs::write(&outside, "one\ntwo\nTOP_SECRET_SHOULD_NEVER_APPEAR\nfour\n").unwrap();
+        commit_file(&dir, "placeholder.txt", "x\n");
+        std::os::unix::fs::symlink(&outside, dir.join("link.txt")).unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+        // A note pinned to the symlink's row, anchored to whatever hoot
+        // displays for a symlink — the target's *path*, never its content.
+        let anchor = data::NoteAnchor::capture(&fsnav::read_file(&dir.join("link.txt")), 1);
+        assert!(
+            !anchor.as_ref().is_some_and(|a| a.line_text().contains("TOP_SECRET")),
+            "the anchor itself must never capture the target's content: {anchor:?}",
+            anchor = anchor.as_ref().map(|a| a.line_text())
+        );
+        app.notes.push(Note::on_line("link.txt".to_string(), 1, anchor, "what is this".to_string()));
+
+        // Force a re-anchor pass over the symlinked path.
+        app.reanchor_notes(&["link.txt".to_string()]);
+
+        // Reading through the link would find four lines and re-place the
+        // note somewhere in them; refusing to leaves it exactly as it was.
+        assert_eq!(app.notes[0].line, Some(1), "the note must not be re-placed against a file outside the repo");
+        assert!(!app.notes[0].stale, "and not judged stale off a file that was never read either");
+
+        let _ = fs::remove_file(&outside);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
