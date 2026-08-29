@@ -42,8 +42,8 @@ It polls the working tree every second, so changes from elsewhere — another ag
 
 Switch with **F1 / F2 / F3**, or **Ctrl+R / Ctrl+U / Ctrl+A** if your laptop maps F1–F3 to brightness and the like. Review and Curate — the two you'll actually live in — get F1/F2; Agent is F3.
 
-- **Review** — file tree + diff. Leave notes (`c`), flag files for rework (`x`), mark a file good (`g`), clear stale notes with `d` (this file) or `D` (everywhere), then either `i` to send it all to the agent or `y` to copy the same prompt to your clipboard if you're running the agent somewhere else. `v` collapses the unchanged stretches of a long diff; `s` switches to before/after columns.
-- **Curate** — select hunks per file, draft a commit message with the agent (`g`), give it a last look in `$EDITOR` (`e`), commit (`c`). `r` jumps to the current hunk's file in Review, tree and content both.
+- **Review** — file tree + diff. Leave notes (`c`), flag files for rework (`x`), mark a file good (`g`), clear stale notes with `d` (this file) or `D` (everywhere), then either `i` to send it all to the agent or `y` to copy the same prompt to your clipboard if you're running the agent somewhere else. `v` collapses the unchanged stretches of a long diff; `s` switches to before/after columns. `t` narrows the tree to just the files the last agent turn wrote — see [After a turn](#after-a-turn).
+- **Curate** — select hunks per file, draft a commit message with the agent (`g`), give it a last look in `$EDITOR` (`e`), commit (`c`). `r` jumps to the current hunk's file in Review, tree and content both. `D` throws the shown hunk away instead — see [Discarding a hunk](#discarding-a-hunk).
 - **Agent** — chat with a real agent session (opencode by default, pi with `--agent pi`); it reads and writes the repo directly, with tool-call permissions auto-approved (opencode's `--auto`) — there's no sandbox or approval prompt. pi additionally runs every turn, including read-only ones, with `--approve` ("trust project-local files for this run" — real code execution from whatever's in the repo, independent of the tool permissions). `git diff`/`git log` let you review and revert tracked-file edits, but that's not a full undo: a deleted untracked file, a shell command it ran, or anything it read outside the repo isn't something git can take back. Point it at repos and prompts you'd trust with your own shell. `Esc` kills a turn mid-run (also works while Curate is generating a commit message) — nothing else stops one short of quitting hoot entirely.
 
 From anywhere: **Ctrl+F** is a fuzzy file finder with a live preview, **Ctrl+K** a fuzzy symbol jump. The symbol scan is a heuristic — it matches common definition shapes (`fn`, `func`, `def`, `class`, `struct`, ...) by prefix rather than parsing anything, so treat it as a fast way to get near something, not as a language server.
@@ -51,6 +51,24 @@ From anywhere: **Ctrl+F** is a fuzzy file finder with a live preview, **Ctrl+K**
 **What leaves your machine.** hoot has no network code of its own, but it drives a real agent CLI, and everything it hands that CLI goes wherever that CLI's configured model provider is. That's three things: what you type in Agent, the review prompt `i` sends (your notes and rework flags, with the file and line each is attached to — not the diff itself), and — when you press `g` in Curate — the diff of every hunk you've selected. The agent also reads the repo directly under its own steam, so in practice assume anything in the tree is reachable. On a repo whose contents you can't send to a third party, that's the constraint to check first, and it's a property of the backend you picked and how it's configured, not something hoot can contain.
 
 The first real agent turn on a given machine asks for an explicit confirmation of the above before it runs — a one-time prompt tracked per backend (`~/.hoot-agent-trust-ack-opencode`, `~/.hoot-agent-trust-ack-pi`), not shown again for that backend after you accept it.
+
+### After a turn
+
+Review is scoped, not just refreshed. When a turn is spawned hoot snapshots the changeset as it stands right then — a plain `git diff`, no blobs written and nothing copied to disk — and "what this turn wrote" is every file whose change differs from that snapshot. So the summary line at the end of a turn counts the turn's own files rather than every dirty file in the repo, and pressing **F1** lands on exactly those. `t` toggles back to the whole tree and back again; the sidebar footer always names which of the two you're looking at, because a filtered tree is hiding files that really are dirty.
+
+A cancelled turn is treated identically — `Esc` kills the process, but whatever it had already written is still yours to look at, and it's still worth seeing on its own.
+
+The snapshot is dropped when you commit: it describes a comparison against the old `HEAD`, and once `HEAD` moves there is no honest way to reinterpret it. Review goes back to showing everything.
+
+### Notes survive the agent editing under them
+
+A line-scoped note records the text around the line, not just the number. When a file changes, each note on it is re-placed against the new content: if the line moved, the note moves with it and `i`/`y` send the line it's on *now*. If the line is genuinely gone — rewritten, or ambiguous enough that guessing would land the note on some unrelated closing brace — the note isn't deleted (you wrote it), it's marked, counted in the sidebar, and sent as "was on line N, which no longer exists" rather than quoting a number that now means something else. That's what makes `i` a loop rather than a one-shot: the second review starts from the notes you left, not from whichever ones happen to still point at the right integers.
+
+### Discarding a hunk
+
+`D` in Curate is Commit's mirror image, and it works the same way: the hunk you looked at is reverse-applied to the working tree, so `git` is checking your patch against the file rather than re-reading whatever the file contains by the time you press the key. That's the same race `git restore` and `git checkout -p` leave open. The same guards apply — nothing happens while an agent turn is running, an index with content staged outside hoot is refused untouched, and a file that changed since Curate last read it is refused rather than reversed. `git apply` is all-or-nothing over one invocation, so a refusal leaves the tree exactly as it was.
+
+It asks first, and it's the only thing in hoot that does so for a reason other than losing in-memory state: the content being removed was never committed, so there is no git object anywhere holding a copy. Discarding a brand-new file is a deletion, and the prompt says so in those words.
 
 ### What Curate actually commits
 

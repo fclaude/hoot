@@ -1,6 +1,7 @@
 mod agent;
 mod agent_trust_confirm;
 mod curation;
+mod discard_confirm;
 mod file_finder;
 mod note_input;
 mod quit_confirm;
@@ -13,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, Mode, Overlay};
+use crate::app::{App, Mode, Overlay, ReviewScope};
 use crate::theme;
 
 #[cfg(test)]
@@ -41,6 +42,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::NoteInput => note_input::draw(f, app, area),
         Overlay::QuitConfirm => quit_confirm::draw(f, app, area),
         Overlay::AgentTrustConfirm => agent_trust_confirm::draw(f, app, area),
+        Overlay::DiscardConfirm => discard_confirm::draw(f, app, area),
         Overlay::None => {}
     }
 }
@@ -64,16 +66,19 @@ fn draw_status_line(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     let center = match app.mode {
         Mode::Review => {
             let name = crate::gitreview::display_path_of(app.nav_file.strip_prefix(&app.target_dir).unwrap_or(&app.nav_file));
+            // Counts whatever Review is currently showing. Leaving this on
+            // the whole changeset put "3 changed" a line above a sidebar
+            // reading "2 this turn", with nothing to say which of the two
+            // the tree below them was.
+            let changed = match app.review_scope {
+                ReviewScope::Turn => format!("{} this turn", app.turn_scope_len()),
+                ReviewScope::All => format!("{} changed", app.project.files.len()),
+            };
             if narrow {
-                format!("{} changed", app.project.files.len())
+                changed
             } else {
                 let notes = app.notes_queued();
-                format!(
-                    "{name}:{}  \u{b7}  {} changed  \u{b7}  {notes} note{}",
-                    app.nav_line + 1,
-                    app.project.files.len(),
-                    if notes == 1 { "" } else { "s" }
-                )
+                format!("{name}:{}  \u{b7}  {changed}  \u{b7}  {notes} note{}", app.nav_line + 1, if notes == 1 { "" } else { "s" })
             }
         }
         Mode::Agent => {
@@ -1290,6 +1295,101 @@ mod tests {
         assert!(status_line.contains("changed"), "{status_line}");
         assert!(status_line.contains("notes"), "{status_line}");
         assert!(status_line.contains("symbols scanned"), "{status_line}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_turn_scoped_review_lists_only_that_turns_files_and_says_it_is_filtered() {
+        // A filtered tree is hiding files that really are dirty, so the
+        // notice is not decoration: without it, a narrowed Review and a
+        // mostly-clean repo look identical.
+        let dir = scratch_repo("review-turn-scope");
+        commit_file(&dir, "touched.txt", "one\n");
+        commit_file(&dir, "untouched.txt", "one\n");
+        fs::write(dir.join("untouched.txt"), "one\nedited before the turn\n").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+        app.run_fake_turn(|| fs::write(dir.join("touched.txt"), "one\nwritten by the agent\n").unwrap());
+
+        let all = render(&app, 120, 30);
+        assert!(all.contains("untouched.txt"), "unfiltered, both files are listed:\n{all}");
+        assert!(all.contains("2 changed"), "{all}");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        let scoped = render(&app, 120, 30);
+        assert!(scoped.contains("touched.txt"), "{scoped}");
+        assert!(!scoped.contains("untouched.txt"), "the file the turn never opened is filtered out:\n{scoped}");
+        assert!(scoped.contains("1 this turn"), "the footer counts the turn, not the tree:\n{scoped}");
+        assert!(scoped.contains("this turn only"), "and says outright that it's filtered:\n{scoped}");
+        assert!(scoped.contains("t: all"), "with the way back out still legible:\n{scoped}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_says_when_a_note_has_lost_the_line_it_was_written_against() {
+        let dir = scratch_repo("review-stale-note");
+        commit_file(&dir, "f.rs", "fn one() {\n    let a = 1;\n}\n\nfn two() {\n    let b = 2;\n}\n");
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.nav_line = 5;
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        for ch in "shadowed".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let before = render(&app, 120, 30);
+        assert!(!before.contains("lost its line"), "{before}");
+
+        app.run_fake_turn(|| fs::write(dir.join("f.rs"), "fn one() {\n    let a = 1;\n}\n").unwrap());
+        let after = render(&app, 120, 30);
+        assert!(after.contains("1 note lost its line"), "{after}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_discard_prompt_names_the_hunk_and_says_it_cannot_be_restored() {
+        let dir = scratch_repo("discard-prompt");
+        let base: String = (1..=20).map(|n| format!("line{n}\n")).collect();
+        commit_file(&dir, "f.txt", &base);
+        let mut edited: Vec<String> = (1..=20).map(|n| format!("line{n}")).collect();
+        edited[1] = "line2-EDIT".to_string();
+        edited[17] = "line18-EDIT".to_string();
+        fs::write(dir.join("f.txt"), edited.join("\n") + "\n").unwrap();
+
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+        app.mode = Mode::Curation;
+        app.on_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("Discard?"), "{screen}");
+        assert!(screen.contains("hunk 1/2 of f.txt"), "the prompt names exactly what goes:\n{screen}");
+        assert!(screen.contains("no copy to restore"), "and that git can't give it back:\n{screen}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curate_shows_a_failed_discard_rather_than_the_previous_commits_result() {
+        // One result row for two operations: a stale success line from the
+        // last commit sitting under a refused discard would read as though
+        // the discard had worked.
+        let dir = scratch_repo("discard-result-row");
+        commit_file(&dir, "f.txt", "one\n");
+        fs::write(dir.join("f.txt"), "one\ntwo\n").unwrap();
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+        app.mode = Mode::Curation;
+        app.last_commit = Some(Ok("abc1234 an earlier commit".to_string()));
+        app.agent_running = true;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("agent turn is running"), "{screen}");
+        assert!(!screen.contains("an earlier commit"), "the stale success line must not survive:\n{screen}");
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, ContentView, NavFocus};
+use crate::app::{App, ContentView, NavFocus, ReviewScope};
 use crate::data::{DiffLineKind, FileEntry};
 use crate::syntax::TokenKind;
 use crate::theme;
@@ -76,16 +76,44 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
 ///
 /// Takes the counts rather than an `&App` so the thing it actually does —
 /// fit text into a width — is testable without a repo on disk behind it.
-fn tree_footer_counts(files: usize, notes: u32, flagged: usize, width: usize) -> String {
+///
+/// `subject` is what the leading count is counting: "changed" for the
+/// whole uncommitted changeset, "this turn" when Review is narrowed to
+/// what the last agent turn wrote. It has to travel with the number,
+/// because "3 changed" and "3 this turn" are different claims about the
+/// same repo and only one of them is true at a time.
+fn tree_footer_counts(files: usize, subject: &str, notes: u32, flagged: usize, width: usize) -> String {
     let budget = width.saturating_sub(2);
     let plural = if notes == 1 { "" } else { "s" };
     let candidates = [
-        format!("{files} changed \u{b7} {notes} note{plural} \u{b7} {flagged} flagged"),
-        format!("{files} changed \u{b7} {notes} note{plural}"),
+        format!("{files} {subject} \u{b7} {notes} note{plural} \u{b7} {flagged} flagged"),
+        format!("{files} {subject} \u{b7} {notes} note{plural}"),
     ];
     match candidates.iter().find(|c| c.chars().count() <= budget) {
         Some(c) => c.clone(),
         None => super::truncate_with_ellipsis(&candidates[1], budget),
+    }
+}
+
+/// The "you are not seeing everything" line under a turn-scoped tree,
+/// in the longest form that fits `width`.
+///
+/// The way back out (`t`) is the half that has to survive the squeeze, not
+/// the uncommitted tally — a notice that says the tree is filtered but not
+/// how to unfilter it leaves the user hunting through KEYBINDINGS.md for a
+/// key they pressed by accident. Fitted rather than truncated for the same
+/// reason `tree_footer_counts` is: at the sidebar's real 38 columns the
+/// long form runs over, and truncation ate exactly the useful end of it.
+fn tree_scope_notice(uncommitted: usize, width: usize) -> String {
+    let budget = width.saturating_sub(2);
+    let candidates = [
+        format!("\u{21b3} this turn only ({uncommitted} uncommitted) \u{b7} t: all"),
+        "\u{21b3} this turn only \u{b7} t: all".to_string(),
+        "\u{21b3} turn only \u{b7} t: all".to_string(),
+    ];
+    match candidates.iter().find(|c| c.chars().count() <= budget) {
+        Some(c) => c.clone(),
+        None => super::truncate_with_ellipsis(&candidates[2], budget),
     }
 }
 
@@ -94,11 +122,22 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     // Counts + blank separator, plus a row for each optional notice that is
     // actually showing. Fixed at 2 before, which meant a git error or a
     // truncation notice silently pushed the counts row out of the pane.
-    let optional_rows = app.review_error.is_some() as u16 + app.tree_truncated as u16 + app.review_clipboard_status.is_some() as u16;
+    let scoped = app.review_scope == ReviewScope::Turn;
+    let optional_rows = app.review_error.is_some() as u16
+        + app.tree_truncated as u16
+        + app.review_status.is_some() as u16
+        + (scoped || app.has_turn_baseline()) as u16
+        + (app.notes_stale() > 0) as u16;
     let footer_lines: u16 = 2 + optional_rows;
     // 1 row for the root path, 1 blank separator, then the footer.
     let visible = area.height.saturating_sub(2 + footer_lines) as usize;
-    let scroll = scroll_offset(app.tree_index, app.tree.len(), visible);
+    // Scrolling is over the rows actually being drawn, not over the whole
+    // scan: under a turn scope most of `app.tree` isn't on screen at all,
+    // and offsetting by its indices would scroll the pane off into a run
+    // of hidden rows.
+    let rows = app.visible_tree_rows();
+    let cursor = rows.iter().position(|i| *i == app.tree_index).unwrap_or(0);
+    let scroll = scroll_offset(cursor, rows.len(), visible);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     // Ellipsised from the front, not hard-clipped: the sidebar is far
@@ -112,7 +151,8 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(theme::FG),
     )));
 
-    for (i, entry) in app.tree.iter().enumerate().skip(scroll).take(visible) {
+    for &i in rows.iter().skip(scroll).take(visible) {
+        let entry = &app.tree[i];
         let indent = "\u{2502}  ".repeat(entry.depth as usize);
         let mut spans =
             vec![Span::styled("\u{258c} ", Style::default().fg(tick_color)), Span::styled(indent, Style::default().fg(theme::DIM))];
@@ -135,6 +175,9 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
             if file.notes > 0 {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(format!("\u{270e}{}", file.notes), Style::default().fg(theme::ORANGE)));
+                if app.notes.iter().any(|n| n.path == file.path && n.stale) {
+                    spans.push(Span::styled("\u{26a0}", Style::default().fg(theme::ORANGE)));
+                }
             }
             if file.flagged {
                 spans.push(Span::raw(" "));
@@ -157,18 +200,61 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(spans).style(style));
     }
 
-    if app.tree.is_empty() {
-        lines.push(Line::from(Span::styled("(empty directory)", Style::default().fg(theme::DIM))));
+    if rows.is_empty() {
+        let empty = if scoped { "(that turn changed nothing)" } else { "(empty directory)" };
+        lines.push(Line::from(Span::styled(empty, Style::default().fg(theme::DIM))));
     }
 
     lines.push(Line::raw(""));
+    let (count, subject) = if scoped { (app.turn_scope_len(), "this turn") } else { (app.project.files.len(), "changed") };
     lines.push(Line::from(vec![
         Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
         Span::styled(
-            tree_footer_counts(app.project.files.len(), app.notes_queued(), app.files_flagged(), area.width as usize),
+            tree_footer_counts(count, subject, app.notes_queued(), app.files_flagged(), area.width as usize),
             Style::default().fg(theme::FG),
         ),
     ]));
+
+    // A filtered tree is missing files that really are dirty, so it has to
+    // say so outright — the same rule the truncation notice below follows.
+    // A quiet filter and a clean repo look identical otherwise.
+    if scoped {
+        lines.push(Line::from(vec![
+            Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
+            Span::styled(tree_scope_notice(app.project.files.len(), area.width as usize), Style::default().fg(theme::CYAN)),
+        ]));
+    } else if app.has_turn_baseline() {
+        // The other half of the same row: once a turn has run there is
+        // somewhere to narrow to, and `t` is otherwise only discoverable
+        // from the transcript line that scrolls away.
+        lines.push(Line::from(vec![
+            Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
+            Span::styled(
+                super::truncate_with_ellipsis(
+                    &format!("\u{21b3} t: this turn ({})", app.turn_scope_len()),
+                    area.width.saturating_sub(2) as usize,
+                ),
+                Style::default().fg(theme::DIM),
+            ),
+        ]));
+    }
+
+    // Notes whose line is gone still go to the agent — they just go
+    // without a line number (see App::reanchor_notes). Saying how many
+    // here is what keeps `d`/`D` a decision rather than a guess.
+    let stale_notes = app.notes_stale();
+    if stale_notes > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
+            Span::styled(
+                super::truncate_with_ellipsis(
+                    &format!("\u{26a0} {stale_notes} note{} lost its line", if stale_notes == 1 { "" } else { "s" }),
+                    area.width.saturating_sub(2) as usize,
+                ),
+                Style::default().fg(theme::ORANGE),
+            ),
+        ]));
+    }
 
     // An unreadable repo and a clean one produce the same empty file list,
     // so the difference has to be stated outright rather than left to the
@@ -195,7 +281,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    match &app.review_clipboard_status {
+    match &app.review_status {
         Some(Ok(msg)) => lines.push(Line::from(vec![
             Span::styled("\u{258c} ", Style::default().fg(theme::DIM)),
             Span::styled(format!("\u{2714} {msg}"), Style::default().fg(theme::GREEN)),
@@ -514,7 +600,7 @@ mod tests {
         // mid-word with nothing to indicate it.
         for width in [10usize, 16, 24, 30, 36, 38, 44] {
             for files in [0usize, 1, 12] {
-                let s = tree_footer_counts(files, 3, 2, width);
+                let s = tree_footer_counts(files, "changed", 3, 2, width);
                 assert!(s.chars().count() <= width.saturating_sub(2), "{s:?} overflows a {width}-column sidebar");
             }
         }
@@ -526,7 +612,7 @@ mod tests {
         // it's where the old text was silently cut off. All three counts
         // have to survive at that width, including for two-digit tallies.
         for (files, notes, flagged) in [(5usize, 3u32, 2usize), (12, 10, 3)] {
-            let s = tree_footer_counts(files, notes, flagged, 38);
+            let s = tree_footer_counts(files, "changed", notes, flagged, 38);
             assert_eq!(s, format!("{files} changed \u{b7} {notes} notes \u{b7} {flagged} flagged"), "at 38 columns");
             assert!(s.chars().count() <= 36, "{s:?}");
         }
@@ -536,20 +622,36 @@ mod tests {
     fn tree_footer_drops_the_flagged_count_only_when_it_cannot_fit() {
         // The 24-column narrow sidebar: no room for all three, so the
         // flagged tally goes rather than the text being cut mid-word.
-        assert_eq!(tree_footer_counts(5, 3, 2, 24), "5 changed \u{b7} 3 notes");
+        assert_eq!(tree_footer_counts(5, "changed", 3, 2, 24), "5 changed \u{b7} 3 notes");
     }
 
     #[test]
     fn tree_footer_pluralizes_the_note_count() {
         // Every other count line in the app gets this right; this one used
         // to read "1 notes queued".
-        assert!(tree_footer_counts(2, 1, 0, 38).contains("1 note \u{b7}"), "{:?}", tree_footer_counts(2, 1, 0, 38));
-        assert!(tree_footer_counts(2, 0, 0, 38).contains("0 notes"), "{:?}", tree_footer_counts(2, 0, 0, 38));
+        assert!(tree_footer_counts(2, "changed", 1, 0, 38).contains("1 note \u{b7}"), "{:?}", tree_footer_counts(2, "changed", 1, 0, 38));
+        assert!(tree_footer_counts(2, "changed", 0, 0, 38).contains("0 notes"), "{:?}", tree_footer_counts(2, "changed", 0, 0, 38));
+    }
+
+    #[test]
+    fn the_scope_notice_keeps_the_way_out_when_it_has_to_drop_something() {
+        // 38 is the real sidebar width, and the long form doesn't fit it —
+        // which is exactly the case where truncation used to eat "t: all"
+        // and leave a filtered tree with no visible way back.
+        for width in [10usize, 16, 24, 30, 36, 38, 44, 80] {
+            let s = tree_scope_notice(12, width);
+            assert!(s.chars().count() <= width.saturating_sub(2), "{s:?} overflows a {width}-column sidebar");
+            if width >= 24 {
+                assert!(s.contains("t: all"), "{s:?} at {width} columns doesn't say how to get back");
+            }
+        }
+        assert_eq!(tree_scope_notice(12, 80), "\u{21b3} this turn only (12 uncommitted) \u{b7} t: all");
+        assert_eq!(tree_scope_notice(12, 38), "\u{21b3} this turn only \u{b7} t: all", "the tally is what goes first");
     }
 
     #[test]
     fn tree_footer_falls_back_to_an_ellipsis_when_nothing_fits() {
-        let tiny = tree_footer_counts(5, 3, 2, 8);
+        let tiny = tree_footer_counts(5, "changed", 3, 2, 8);
         assert!(tiny.ends_with('\u{2026}'), "{tiny:?}");
         assert!(tiny.chars().count() <= 6, "{tiny:?}");
     }

@@ -54,6 +54,7 @@ pub enum Action {
     ReviewCopyPrompt,
     ReviewClearFileNotes,
     ReviewClearAllNotes,
+    ReviewToggleScope,
 
     SymbolUp,
     SymbolDown,
@@ -78,6 +79,7 @@ pub enum Action {
     CurateHunkPrev,
     CurateHunkNext,
     CurateToggleHunk,
+    CurateDiscardHunk,
     CurateOpenInReview,
     CurateEditMessage,
     CurateGenerateMessage,
@@ -234,6 +236,15 @@ pub const BINDINGS: &[Binding] = &[
         "y",
         "Copy the same assembled review prompt to the system clipboard, for pasting into an agent running elsewhere"
     ),
+    b!(
+        Action::ReviewToggleScope,
+        "review_toggle_scope",
+        "Toggle turn scope",
+        "Review",
+        "t",
+        "Narrow the tree to the files the last agent turn changed, or widen it back to the whole repo. \
+         Does nothing until a turn has actually run \u{2014} there is no baseline to measure against before that"
+    ),
     b!(Action::SymbolUp, "symbol_up", "Move up", "Symbol Jump", "up", "Move the result selection up"),
     b!(Action::SymbolDown, "symbol_down", "Move down", "Symbol Jump", "down", "Move the result selection down"),
     b!(Action::SymbolJumpTo, "symbol_jump_to", "Jump", "Symbol Jump", "enter", "Jump to the selected symbol's definition"),
@@ -260,6 +271,19 @@ pub const BINDINGS: &[Binding] = &[
     b!(Action::CurateHunkPrev, "curate_hunk_prev", "Previous hunk", "Curate", "left", "View the previous hunk in this file"),
     b!(Action::CurateHunkNext, "curate_hunk_next", "Next hunk", "Curate", "right", "View the next hunk in this file"),
     b!(Action::CurateToggleHunk, "curate_toggle_hunk", "Toggle hunk", "Curate", "space", "Select/deselect the hunk currently shown"),
+    // Uppercase, and behind a confirmation: this is the one key in hoot
+    // that destroys work rather than moving it around. Same reasoning as
+    // Review's "D" — the bigger, less recoverable version of an action
+    // gets the shifted key.
+    b!(
+        Action::CurateDiscardHunk,
+        "curate_discard_hunk",
+        "Discard hunk",
+        "Curate",
+        "D",
+        "Throw away the hunk currently shown by reverse-applying it to the working tree, after a confirmation. \
+         Not undoable by git \u{2014} the content was never committed"
+    ),
     b!(
         Action::CurateOpenInReview,
         "curate_open_in_review",

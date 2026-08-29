@@ -16,7 +16,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
     // much), but a *refusal* — an agent turn still running, an index staged
     // outside hoot, a selection the index didn't match — is a sentence the
     // user has to be able to read, and it was the part being cut off.
-    let result_rows = u16::from(app.last_commit.is_some());
+    let result = app.last_discard.as_ref().or(app.last_commit.as_ref());
+    let result_rows = u16::from(result.is_some());
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(result_rows), Constraint::Length(1)])
@@ -68,6 +69,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
             ("\u{2191}\u{2193}", "File"),
             ("\u{2190}\u{2192}", "Prev/next hunk"),
             ("Space", "Toggle hunk"),
+            ("D", "Discard hunk"),
             ("r", "Open in Review"),
             ("Esc", "Cancel agent turn"),
             ("e", "Edit in $EDITOR"),
@@ -78,13 +80,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, narrow: bool) {
             ("\u{2191}\u{2193}", "File"),
             ("\u{2190}\u{2192}", "Prev/next hunk"),
             ("Space", "Toggle hunk"),
+            ("D", "Discard hunk"),
             ("r", "Open in Review"),
             ("g", "Generate message"),
             ("e", "Edit in $EDITOR"),
             ("c", "Commit"),
         ])
     };
-    if let Some(result) = &app.last_commit {
+    if let Some(result) = result {
         let (text, color) = match result {
             Ok(summary) => (format!("\u{2714} {summary}"), theme::GREEN),
             Err(e) => (format!("\u{2717} {e}"), theme::RED),
@@ -325,7 +328,10 @@ fn draw_hunk_box(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let hints =
-        vec![super::key_hints(&[("\u{2190}\u{2192}", &format!("Prev/next {unit}")), ("Space", &format!("Select/deselect this {unit}"))])];
+    let hints = vec![super::key_hints(&[
+        ("\u{2190}\u{2192}", &format!("Prev/next {unit}")),
+        ("Space", &format!("Select/deselect this {unit}")),
+        ("D", &format!("Discard this {unit}")),
+    ])];
     super::draw_panel(f, area, &title, Paragraph::new(lines), &hints);
 }

@@ -68,6 +68,14 @@
 //! just staged, and the user would be stuck manually unstaging before they
 //! could even try again.
 
+//! `discard` is the same machinery pointed the other way: instead of
+//! replaying the reviewed patch into the index, it replays it in reverse
+//! over the working tree, so "I don't want this" is answered by the same
+//! bytes the screen showed rather than by `git restore`/`checkout -p`
+//! re-reading whatever the file happens to contain by then. It runs the
+//! same freshness check, refuses the same already-staged index, and — like
+//! staging — never touches a file it couldn't parse faithfully.
+
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::Path;
@@ -183,6 +191,87 @@ pub fn commit(root: &Path, project: &Project, curation_files: &[CurationFile], m
             Err(e)
         }
     }
+}
+
+/// Throws away one reviewed unit of `path`'s change — hunk number `unit`,
+/// or the whole header-only change when the file has no hunks — by
+/// reverse-applying exactly the patch Curate displayed to the working
+/// tree.
+///
+/// The point of going through the patch rather than out to `git restore`
+/// or `git checkout -p` is the same one staging makes: those re-read the
+/// file at the moment they run, so anything written between the review and
+/// the keypress is discarded along with what was actually looked at. A
+/// reverse patch can only remove the lines it names, and git refuses it
+/// outright if the file no longer contains them.
+///
+/// Guards, in order, mirroring `commit`:
+///
+/// 1. Nothing hoot can't stage faithfully (a binary file, a submodule
+///    pointer) can be discarded either — it was never parsed into
+///    something replayable.
+/// 2. An index with content staged outside hoot is refused untouched.
+///    Reverse-applying to the working tree alone would leave that staged
+///    copy holding the change that just vanished from disk, which is a
+///    confusing half-state to hand back to someone; and the rule that hoot
+///    only mutates a tree whose index it knows is clean is worth more than
+///    the convenience.
+/// 3. The file is re-read from git and compared against what Curate is
+///    showing. A stale view means the hunk on screen is not the hunk on
+///    disk, and reversing it would take out lines nobody looked at.
+///
+/// There is no rollback here because there is nothing to roll back:
+/// `git apply` without `--3way` is all-or-nothing within a single
+/// invocation, and this is one invocation over one file. A rejected patch
+/// leaves the tree exactly as it was.
+///
+/// This is not undoable. The content being removed is uncommitted, so
+/// there is no git object holding a copy — which is precisely why the
+/// caller confirms first.
+pub fn discard(root: &Path, project: &Project, path: &str, unit: usize) -> Result<String, String> {
+    let Some(file) = project.files.iter().find(|f| f.path == path) else {
+        return Err(format!("{path}: no longer in the changeset \u{2014} nothing to discard"));
+    };
+    if let Some(reason) = file.unsupported {
+        return Err(format!("{path}: this is {reason} \u{2014} hoot can't discard it; use `git checkout`/`rm` outside hoot"));
+    }
+    let units = crate::gitreview::selectable_units(file);
+    if unit >= units {
+        return Err(format!("{path}: there is no hunk {} to discard", unit + 1));
+    }
+    if index_has_staged_changes(root)? {
+        return Err(
+            "there are changes already staged outside hoot (see `git status`) \u{2014} resolve or unstage those first, then try again"
+                .to_string(),
+        );
+    }
+    let current = crate::gitreview::diff_files(root).map_err(|e| format!("{path}: couldn't re-check it before discarding \u{2014} {e}"))?;
+    if !current.iter().any(|now| now.path == path && now.same_change_as(file)) {
+        return Err(format!("{path} changed since it was last reviewed here \u{2014} re-open Curate and check it again"));
+    }
+
+    // Exactly one unit selected, so the patch reversed is the patch shown.
+    let mut selected = vec![false; file.hunks.len()];
+    if let Some(s) = selected.get_mut(unit) {
+        *s = true;
+    }
+    let patch = build_patch(file, &selected)?;
+    let out = run_git_with_stdin(root, &["apply", "--reverse", "--whitespace=nowarn", "-"], patch.as_bytes())?;
+    if !out.status.success() {
+        return Err(format!("git apply --reverse {path}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(discard_summary(file, unit, units))
+}
+
+/// What `discard` just removed, phrased the way the confirmation asked
+/// about it — see `App::describe_discard`, which has to agree with this.
+fn discard_summary(file: &FileEntry, unit: usize, units: usize) -> String {
+    if file.is_metadata_only() {
+        let what = file.meta.describe().join(", ");
+        let what = if what.is_empty() { "change".to_string() } else { what };
+        return format!("Discarded {}'s {what}", file.path);
+    }
+    format!("Discarded hunk {}/{} of {}", unit + 1, units, file.path)
 }
 
 /// Replays `file`'s reviewed patch into the index: git's own header lines
@@ -1159,6 +1248,142 @@ mod tests {
         assert!(committed.ends_with("line20-CHANGED"), "{committed}");
         assert!(!committed.ends_with('\n'), "committed content should still have no trailing newline: {committed:?}");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------------
+    // DISCARD
+    // -------------------------------------------------------------
+
+    /// One committed file with two independent edits, left unstaged.
+    fn two_hunk_repo(label: &str) -> PathBuf {
+        let dir = scratch_repo(label);
+        let base: String = (1..=20).map(|n| format!("line{n}\n")).collect();
+        fs::write(dir.join("f.txt"), &base).unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+        let mut edited: Vec<String> = (1..=20).map(|n| format!("line{n}")).collect();
+        edited[1] = "line2-FIRST".to_string();
+        edited[17] = "line18-SECOND".to_string();
+        fs::write(dir.join("f.txt"), edited.join("\n") + "\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn discard_reverses_exactly_the_reviewed_hunk() {
+        let dir = two_hunk_repo("discard-reverses");
+        let (project, _) = project_and_curation(&dir);
+        assert_eq!(project.files[0].hunks.len(), 2);
+
+        let summary = discard(&dir, &project, "f.txt", 1).unwrap();
+        assert!(summary.contains("hunk 2/2"), "{summary}");
+
+        let on_disk = fs::read_to_string(dir.join("f.txt")).unwrap();
+        assert!(on_disk.contains("line2-FIRST"), "the untouched hunk stays:\n{on_disk}");
+        assert!(on_disk.contains("line18\n"), "the discarded one is back to HEAD:\n{on_disk}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_leaves_the_index_alone() {
+        // It writes the working tree only. Nothing gets staged on the way
+        // through, so a discard can never contribute to a commit.
+        let dir = two_hunk_repo("discard-index-untouched");
+        let (project, _) = project_and_curation(&dir);
+        discard(&dir, &project, "f.txt", 0).unwrap();
+
+        assert!(!index_has_staged_changes(&dir).unwrap(), "discard must not stage anything");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_refuses_when_something_is_staged_outside_hoot() {
+        let dir = two_hunk_repo("discard-dirty-index");
+        let (project, _) = project_and_curation(&dir);
+        fs::write(dir.join("other.txt"), "staged by hand\n").unwrap();
+        Command::new("git").args(["add", "other.txt"]).current_dir(&dir).status().unwrap();
+
+        let before = fs::read_to_string(dir.join("f.txt")).unwrap();
+        let err = discard(&dir, &project, "f.txt", 0).unwrap_err();
+        assert!(err.contains("already staged outside hoot"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("f.txt")).unwrap(), before, "and it changed nothing");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_refuses_a_file_that_moved_since_it_was_reviewed() {
+        // The whole reason this replays a patch instead of shelling out to
+        // `git restore`: the hunk on screen has to still be the hunk on
+        // disk, or reversing it takes out lines nobody looked at.
+        let dir = two_hunk_repo("discard-stale");
+        let (project, _) = project_and_curation(&dir);
+
+        let mut edited: Vec<String> = (1..=20).map(|n| format!("line{n}")).collect();
+        edited[1] = "line2-FIRST".to_string();
+        edited[17] = "line18-SECOND".to_string();
+        edited[9] = "line10-SNUCK-IN-AFTERWARDS".to_string();
+        fs::write(dir.join("f.txt"), edited.join("\n") + "\n").unwrap();
+
+        let err = discard(&dir, &project, "f.txt", 0).unwrap_err();
+        assert!(err.contains("changed since it was last reviewed"), "{err}");
+        assert!(fs::read_to_string(dir.join("f.txt")).unwrap().contains("line10-SNUCK-IN-AFTERWARDS"), "and nothing was reversed");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_refuses_a_hunk_that_is_not_there() {
+        let dir = two_hunk_repo("discard-out-of-range");
+        let (project, _) = project_and_curation(&dir);
+        let err = discard(&dir, &project, "f.txt", 7).unwrap_err();
+        assert!(err.contains("no hunk 8"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_refuses_a_path_that_has_left_the_changeset() {
+        let dir = two_hunk_repo("discard-gone");
+        let (project, _) = project_and_curation(&dir);
+        let err = discard(&dir, &project, "never-existed.txt", 0).unwrap_err();
+        assert!(err.contains("no longer in the changeset"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_refuses_a_binary_file_rather_than_guessing() {
+        let dir = scratch_repo("discard-binary");
+        fs::write(dir.join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+        fs::write(dir.join("blob.bin"), [0u8, 9, 9, 9]).unwrap();
+
+        let (project, _) = project_and_curation(&dir);
+        assert!(project.files[0].unsupported.is_some(), "the fixture needs an unsupported change");
+        let err = discard(&dir, &project, "blob.bin", 0).unwrap_err();
+        assert!(err.contains("can't discard it"), "{err}");
+        assert_eq!(fs::read(dir.join("blob.bin")).unwrap(), vec![0u8, 9, 9, 9]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_undoes_a_rename_from_its_header_alone() {
+        // A pure rename has no hunks at all — its entire meaning is in the
+        // header, and reversing that header is what puts the file back.
+        let dir = scratch_repo("discard-rename");
+        fs::write(dir.join("old.txt"), "content\n").unwrap();
+        Command::new("git").args(["add", "-A"]).current_dir(&dir).status().unwrap();
+        Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(&dir).status().unwrap();
+        fs::rename(dir.join("old.txt"), dir.join("new.txt")).unwrap();
+
+        let (project, _) = project_and_curation(&dir);
+        // An unstaged rename reads as a delete plus an untracked add, which
+        // is two entries rather than one `rename from/to` — discard each
+        // half and the tree is back where it started either way.
+        for file in &project.files {
+            discard(&dir, &project, &file.path, 0).unwrap();
+        }
+
+        assert!(dir.join("old.txt").exists(), "the original should be back");
+        assert!(!dir.join("new.txt").exists(), "and the new name gone");
         let _ = fs::remove_dir_all(&dir);
     }
 }

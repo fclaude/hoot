@@ -18,8 +18,10 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, rect);
 
     let target = match &app.note_target {
-        Some((path, Some(line))) => format!("{path}:{line}"),
-        Some((path, None)) => path.clone(),
+        Some(t) => match t.line {
+            Some(line) => format!("{}:{line}", t.path),
+            None => t.path.clone(),
+        },
         None => String::new(),
     };
 

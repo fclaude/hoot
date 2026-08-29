@@ -28,6 +28,7 @@ pub enum Overlay {
     NoteInput,
     QuitConfirm,
     AgentTrustConfirm,
+    DiscardConfirm,
 }
 
 /// Which pane arrow keys currently move.
@@ -50,6 +51,25 @@ pub enum NavFocus {
 pub enum ContentView {
     Context,
     Focused,
+}
+
+/// Which slice of the working tree Review is currently looking at.
+///
+/// `All` is the whole uncommitted changeset — everything `git diff HEAD`
+/// plus untracked reports, which is what Review has always shown. `Turn`
+/// narrows that to the files the current (or most recent) agent turn
+/// actually changed, measured against the changeset snapshotted the
+/// instant that turn was spawned.
+///
+/// The distinction only exists for *presentation*. Both scopes read the
+/// same HEAD-anchored diff, and Curate keeps seeing the whole changeset
+/// regardless — a scope that also changed which patch got staged would
+/// mean two different diff vocabularies in one app, and the one Curate
+/// replays through `git apply --cached` has to stay anchored to HEAD.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReviewScope {
+    All,
+    Turn,
 }
 
 /// What an in-flight agent turn is for. `Chat` (the normal Agent-pane
@@ -115,15 +135,17 @@ pub struct App {
 
     // NOTES (real free-text review notes, left while reviewing)
     pub notes: Vec<Note>,
-    pub(crate) note_target: Option<(String, Option<usize>)>,
+    pub(crate) note_target: Option<NoteTarget>,
     pub note_input: String,
     pub note_cursor: usize,
     /// The assembled iterate prompt, shown in `$EDITOR` for a last-pass
     /// edit (via `EditorTarget::IteratePrompt`) before it's ever sent.
     pub iterate_draft: String,
-    /// Result of the last `y` (copy prompt) press, shown next to the tree
-    /// footer until the next one overwrites it.
-    pub review_clipboard_status: Option<Result<String, String>>,
+    /// Result of the last Review action with something to say for itself —
+    /// `y` (copy prompt), or a scope toggle that couldn't do what was
+    /// asked. Shown under the tree footer until the next one overwrites
+    /// it.
+    pub review_status: Option<Result<String, String>>,
     /// Set when the last diff read failed outright, so Review's footer can
     /// say the changeset is unknown instead of letting an unreadable repo
     /// render identically to a clean one. See `gitreview::ReviewData`.
@@ -133,6 +155,36 @@ pub struct App {
     /// unless something says otherwise — which is what these drive.
     pub tree_truncated: bool,
     pub symbols_truncated: bool,
+    /// Whether Review is showing the whole uncommitted changeset or just
+    /// what the last agent turn wrote — see `ReviewScope`.
+    pub review_scope: ReviewScope,
+    /// The changeset exactly as it stood the instant the current (or most
+    /// recent) chat turn was spawned, re-read from git at that moment
+    /// rather than taken from the last poll — a poll tick of staleness
+    /// here would attribute someone else's edit to the turn.
+    ///
+    /// This is what makes `ReviewScope::Turn` mean anything: "changed this
+    /// turn" is "this file's change identity differs from its identity in
+    /// here". `None` until the first turn runs, which is why `Turn` scope
+    /// is unreachable before then.
+    ///
+    /// A snapshot of the *changeset*, not of the tree: no blobs are
+    /// written, no index is built, and nothing is copied to disk. It costs
+    /// what a `git diff` costs, once per turn, and it answers the only
+    /// question the scope actually asks — which paths moved.
+    turn_baseline: Option<Vec<data::FileEntry>>,
+    /// Paths in `project.files` that differ from `turn_baseline`. Cached
+    /// rather than recomputed per tree row: `draw_tree` asks about every
+    /// visible row, every frame.
+    turn_scope: Vec<String>,
+    /// One flag per `tree` row: whether Review currently shows it. Always
+    /// all-true under `ReviewScope::All`; under `Turn` it's the files this
+    /// turn changed plus the directories leading down to them. Kept
+    /// parallel to `tree` rather than filtering `tree` itself so
+    /// `tree_index` keeps meaning what it always did — an index into the
+    /// full scan — and every existing "find this file's row" path stays
+    /// correct whichever scope is active.
+    tree_visible: Vec<bool>,
 
     // AGENT
     pub target_dir: PathBuf,
@@ -210,6 +262,36 @@ pub struct App {
     /// Terminal, so it can only request the suspend/resume, not do it.
     pub open_editor_requested: Option<EditorTarget>,
     pub last_commit: Option<Result<String, String>>,
+    /// The hunk `Overlay::DiscardConfirm` is asking about: which file, and
+    /// which of its selectable units. Held here rather than re-derived
+    /// when the answer comes back so the thing that gets thrown away is
+    /// the thing the prompt named, even if the cursor moved.
+    pub(crate) pending_discard: Option<PendingDiscard>,
+    /// Outcome of the last discard, shown in Curate the same way
+    /// `last_commit` is.
+    pub last_discard: Option<Result<String, String>>,
+}
+
+/// A discard waiting on its confirmation.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct PendingDiscard {
+    pub path: String,
+    /// Index into the file's selectable units — a hunk, or unit 0 for a
+    /// change that lives entirely in its header.
+    pub unit: usize,
+    /// What the confirmation prompt says is about to go, phrased once here
+    /// so the prompt and the result line can't describe it differently.
+    pub what: String,
+}
+
+/// What the open note overlay is about to attach a note to. Carries the
+/// anchor as well as the line number, captured when the overlay opened so
+/// the note records the file as the user was actually looking at it.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct NoteTarget {
+    pub path: String,
+    pub line: Option<usize>,
+    pub anchor: Option<crate::data::NoteAnchor>,
 }
 
 /// Which buffer a requested `$EDITOR` session is for.
@@ -262,6 +344,66 @@ fn diff_context_for(target_dir: &std::path::Path, file: &std::path::Path) -> Vec
     crate::gitreview::file_diff_in_context(target_dir, rel)
 }
 
+/// Beyond this, a file is not re-read to re-place notes on it. Nothing
+/// hoot displays gets near it (`fsnav`'s own display reader gives up an
+/// order of magnitude sooner), so a file this size is one that grew into
+/// something else entirely since the note was written.
+const MAX_ANCHOR_FILE_SIZE: u64 = 32 * 1024 * 1024;
+
+/// What re-anchoring has to work with for one file.
+enum AnchorSource {
+    /// The file's current lines.
+    Lines(Vec<String>),
+    /// The file is verifiably not there any more, so neither is any line
+    /// in it — a definite answer, not a failure to get one.
+    Gone,
+    /// It couldn't be read. That says nothing about the notes on it, so
+    /// they are left exactly as they are.
+    Unreadable,
+}
+
+/// `path`'s lines for note re-anchoring. Split with `lines()` to match how
+/// the anchor was captured, so a `\r\n` file and an `\n` file compare the
+/// same either way.
+fn read_lines_for_anchoring(path: &std::path::Path) -> AnchorSource {
+    // `symlink_metadata`, not `metadata`: the same reason `fsnav` and
+    // `gitreview` use it — following a symlink here would read a file from
+    // outside the repo entirely, and then quote a line of it back to the
+    // agent through whichever note re-anchored onto it.
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AnchorSource::Gone,
+        Err(_) => return AnchorSource::Unreadable,
+    };
+    if !meta.is_file() || meta.len() > MAX_ANCHOR_FILE_SIZE {
+        return AnchorSource::Unreadable;
+    }
+    match std::fs::read_to_string(path) {
+        Ok(text) => AnchorSource::Lines(text.lines().map(str::to_string).collect()),
+        Err(_) => AnchorSource::Unreadable,
+    }
+}
+
+/// How the confirmation names what is about to be thrown away. Kept
+/// deliberately concrete — "hunk 2/5 of src/app.rs" rather than "this
+/// change" — since it is the last thing shown before content that exists
+/// nowhere else goes away.
+///
+/// A brand-new file is called out separately because it is the one case
+/// where the phrase "discard" understates what happens: there is no
+/// previous version to fall back to, so discarding it is deleting it.
+fn describe_discard(file: &data::FileEntry, unit: usize, units: usize) -> String {
+    if matches!(file.meta.change, data::ChangeKind::Added) {
+        return format!("delete {} (a new file \u{2014} nothing to fall back to)", file.path);
+    }
+    if file.is_metadata_only() {
+        let what = file.meta.describe().join(", ");
+        let what = if what.is_empty() { "change".to_string() } else { what };
+        return format!("undo {}'s {what}", file.path);
+    }
+    format!("throw away hunk {}/{units} of {}", unit + 1, file.path)
+}
+
 impl App {
     pub fn new(target_dir: PathBuf, keymap: Keymap, agent_backend: AgentBackend, demo: bool) -> Self {
         let review = crate::gitreview::load(&target_dir);
@@ -293,6 +435,10 @@ impl App {
             review_error: review.error,
             tree_truncated,
             symbols_truncated,
+            review_scope: ReviewScope::All,
+            turn_baseline: None,
+            turn_scope: Vec::new(),
+            tree_visible: Vec::new(),
             demo,
             split_diff: false,
 
@@ -320,7 +466,7 @@ impl App {
             note_input: String::new(),
             note_cursor: 0,
             iterate_draft: String::new(),
-            review_clipboard_status: None,
+            review_status: None,
 
             target_dir,
             agent_backend,
@@ -348,8 +494,11 @@ impl App {
             commit_message_status: None,
             open_editor_requested: None,
             last_commit: None,
+            pending_discard: None,
+            last_discard: None,
         };
         app.content_view = app.default_content_view();
+        app.recompute_turn_scope();
         app.refresh_hover();
         app
     }
@@ -365,6 +514,144 @@ impl App {
         self.commit_message.clear();
         self.commit_message_status = None;
         self.content_view = self.default_content_view();
+        // A commit moves HEAD, and `turn_baseline` is a changeset measured
+        // against the old one — every entry in it is now describing a
+        // comparison that no longer exists. "What this turn wrote" stops
+        // being computable at that point, so it's dropped rather than
+        // reinterpreted, and Review falls back to showing everything.
+        self.turn_baseline = None;
+        self.review_scope = ReviewScope::All;
+        self.recompute_turn_scope();
+    }
+
+    // -------------------------------------------------------------
+    // REVIEW SCOPE (what this turn wrote, vs everything uncommitted)
+    // -------------------------------------------------------------
+
+    /// Re-derives `turn_scope` and `tree_visible` from the current
+    /// changeset, baseline and scope. Cheap, and called from every place
+    /// that can change any of those three — a stale scope would show the
+    /// previous turn's files under this turn's heading, which is worse
+    /// than not offering the filter at all.
+    fn recompute_turn_scope(&mut self) {
+        self.turn_scope = match &self.turn_baseline {
+            None => Vec::new(),
+            Some(baseline) => self
+                .project
+                .files
+                .iter()
+                .filter(|f| !baseline.iter().any(|b| b.path == f.path && b.same_change_as(f)))
+                .map(|f| f.path.clone())
+                .collect(),
+        };
+        self.recompute_tree_visibility();
+    }
+
+    /// Which tree rows the active scope shows. Under `Turn`, a file row is
+    /// visible when this turn changed it, and a directory row when it
+    /// leads to one that is — a bare list of basenames would leave two
+    /// `mod.rs` entries indistinguishable.
+    fn recompute_tree_visibility(&mut self) {
+        if self.review_scope == ReviewScope::All {
+            self.tree_visible = vec![true; self.tree.len()];
+            return;
+        }
+        let mut visible = vec![false; self.tree.len()];
+        let mut shown_files: Vec<PathBuf> = Vec::new();
+        for (i, entry) in self.tree.iter().enumerate() {
+            if entry.is_dir {
+                continue;
+            }
+            let rel = crate::gitreview::display_path_of(entry.path.strip_prefix(&self.target_dir).unwrap_or(&entry.path));
+            if self.turn_scope.contains(&rel) {
+                visible[i] = true;
+                shown_files.push(entry.path.clone());
+            }
+        }
+        for (i, entry) in self.tree.iter().enumerate() {
+            if entry.is_dir && shown_files.iter().any(|f| f.starts_with(&entry.path)) {
+                visible[i] = true;
+            }
+        }
+        self.tree_visible = visible;
+    }
+
+    /// Whether tree row `i` is shown under the active scope. Always true
+    /// under `All`. `pub(crate)` so `ui::review` renders exactly the rows
+    /// navigation moves through.
+    pub(crate) fn tree_row_visible(&self, i: usize) -> bool {
+        self.tree_visible.get(i).copied().unwrap_or(true)
+    }
+
+    /// Stands in for a real agent turn: snapshots the changeset the way
+    /// `spawn_turn_now` does, runs `turn` (whatever it writes to the repo
+    /// is that turn's output), then folds the result back in the way
+    /// `finish_turn` does — without spawning a subprocess or waiting out a
+    /// poll interval.
+    ///
+    /// Test-only, and deliberately the *same* two calls production makes
+    /// rather than a hand-set baseline: a seam that skipped either end
+    /// would let the scope pass a test while being wrong in the app.
+    #[cfg(test)]
+    pub(crate) fn run_fake_turn(&mut self, turn: impl FnOnce()) {
+        self.turn_baseline = crate::gitreview::diff_files(&self.target_dir).ok();
+        self.recompute_turn_scope();
+        turn();
+        self.sync_review_from_disk();
+        self.sync_tree_from_disk();
+    }
+
+    /// How many files the last turn changed. `pub` for Review's footer,
+    /// which counts a different thing under each scope.
+    pub fn turn_scope_len(&self) -> usize {
+        self.turn_scope.len()
+    }
+
+    /// Whether there is a turn to narrow to at all. Drives whether Review
+    /// offers the scope toggle: a key that only ever reports "there is no
+    /// this-turn yet" is worse than no key on screen.
+    pub fn has_turn_baseline(&self) -> bool {
+        self.turn_baseline.is_some()
+    }
+
+    /// Every tree row the active scope shows, in order.
+    pub(crate) fn visible_tree_rows(&self) -> Vec<usize> {
+        (0..self.tree.len()).filter(|i| self.tree_row_visible(*i)).collect()
+    }
+
+    /// Switches Review between the whole changeset and just this turn's
+    /// files. A `Turn` scope with no baseline behind it would silently
+    /// show an empty tree for a reason the user has no way to see, so it
+    /// says why instead and stays where it is.
+    fn toggle_review_scope(&mut self) {
+        match self.review_scope {
+            ReviewScope::Turn => self.review_scope = ReviewScope::All,
+            ReviewScope::All => {
+                if self.turn_baseline.is_none() {
+                    self.review_status = Some(Err("no agent turn has run yet \u{2014} there is no \"this turn\" to narrow to".to_string()));
+                    return;
+                }
+                self.review_scope = ReviewScope::Turn;
+            }
+        }
+        self.review_status = None;
+        self.recompute_tree_visibility();
+        self.settle_tree_selection();
+    }
+
+    /// Pulls the tree cursor onto a row the active scope actually shows,
+    /// and opens whatever it lands on. A selection left parked on a hidden
+    /// row renders as no selection at all, with the arrow keys appearing
+    /// to do nothing until they walk far enough to reach a visible row.
+    fn settle_tree_selection(&mut self) {
+        if self.tree.is_empty() || self.tree_row_visible(self.tree_index) {
+            return;
+        }
+        let Some(target) = self.visible_tree_rows().into_iter().min_by_key(|i| i.abs_diff(self.tree_index)) else {
+            return;
+        };
+        self.tree_index = target;
+        self.preview_tree_selection();
     }
 
     /// `self.project.files`' index for `path` (relative to `target_dir`),
@@ -413,9 +700,91 @@ impl App {
         }
         let result = crate::gitcommit::commit(&self.target_dir, &self.project, &self.curation_files, &self.commit_message);
         let ok = result.is_ok();
+        self.last_discard = None;
         self.last_commit = Some(result);
         if ok {
             self.refresh_review();
+        }
+    }
+
+    // -------------------------------------------------------------
+    // DISCARD (the other half of curation)
+    // -------------------------------------------------------------
+
+    /// `D` in Curate: asks about throwing away the hunk currently on
+    /// screen. Nothing is applied here — this only assembles the question,
+    /// because unlike every other key in Curate the answer isn't
+    /// recoverable.
+    fn request_discard(&mut self) {
+        self.last_discard = None;
+        // One result row, showing whichever of the two actually happened
+        // last — a success line left over from the previous commit sitting
+        // under a discard's error would read as if the discard had worked.
+        self.last_commit = None;
+        // Same reasoning as `commit_selected`: the agent is a known writer
+        // to this exact tree, and reversing a patch out from under a turn
+        // that is still writing is racing a writer whose output nobody has
+        // reviewed. Refusing to start beats failing partway.
+        if self.agent_running {
+            self.last_discard = Some(Err(
+                "an agent turn is running \u{2014} wait for it to finish, or press Esc to cancel it, before discarding".to_string(),
+            ));
+            return;
+        }
+        let Some(cf) = self.curation_files.get(self.curation_index) else { return };
+        let path = cf.path.clone();
+        let Some(file) = self.project.files.iter().find(|f| f.path == path) else { return };
+        let units = crate::gitreview::selectable_units(file);
+        if units == 0 {
+            self.last_discard = Some(Err(format!(
+                "{path}: {} \u{2014} hoot can't discard it; use `git checkout`/`rm` outside hoot",
+                file.unsupported.unwrap_or("nothing here can be curated")
+            )));
+            return;
+        }
+        let unit = self.curation_hunk_index.min(units - 1);
+        let what = describe_discard(file, unit, units);
+        self.pending_discard = Some(PendingDiscard { path, unit, what });
+        self.overlay = Overlay::DiscardConfirm;
+    }
+
+    fn on_key_discard_confirm(&mut self, key: KeyEvent) {
+        // Deliberately not the same "Enter or the action's own key"
+        // shorthand the quit confirmation uses: the key that opened this
+        // is `D`, and accepting an irreversible discard by pressing the
+        // same key twice is exactly how a held keypress destroys something.
+        if key.code == KeyCode::Enter {
+            self.overlay = Overlay::None;
+            self.perform_discard();
+            return;
+        }
+        if self.keymap.is(&key, Action::NoteCancel) || key.code == KeyCode::Char('n') {
+            self.overlay = Overlay::None;
+            self.pending_discard = None;
+        }
+    }
+
+    /// Reverse-applies the confirmed hunk and folds the result back in.
+    fn perform_discard(&mut self) {
+        let Some(pending) = self.pending_discard.take() else { return };
+        // Re-checked rather than assumed: the confirmation is a real pause,
+        // and a turn can have been started from another mode during it.
+        if self.agent_running {
+            self.last_discard = Some(Err("an agent turn started while that was open \u{2014} nothing was discarded".to_string()));
+            return;
+        }
+        let result = crate::gitcommit::discard(&self.target_dir, &self.project, &pending.path, pending.unit);
+        let ok = result.is_ok();
+        self.last_discard = Some(result);
+        if ok {
+            // Straight through the normal sync rather than a wholesale
+            // reload: the discarded file's hunks have genuinely shifted
+            // shape, so it lands in Curate marked stale with nothing
+            // selected — which is the correct reading of "part of this
+            // file just went away, look at the rest again" — while every
+            // other file keeps the selection the user built up.
+            self.sync_review_from_disk();
+            self.sync_tree_from_disk();
         }
     }
 
@@ -516,6 +885,17 @@ impl App {
                         if old_cf.hunk_selected.len() == cf.hunk_selected.len() {
                             cf.hunk_selected = old_cf.hunk_selected.clone();
                         }
+                        // The `Stale` badge has to come across with the
+                        // selection it explains. `gitreview::load` builds
+                        // every file with `status: None`, so a file marked
+                        // stale on one tick lost its badge on the next —
+                        // but kept the empty selection the badge was there
+                        // to account for, which reads as a file that
+                        // simply has nothing selected for no reason. (Only
+                        // reachable once a note or a flag exists anywhere:
+                        // until then the byte-identical early return above
+                        // means this loop never runs a second time.)
+                        cf.status = old_cf.status;
                     }
                 }
                 Some(_) => {
@@ -525,6 +905,32 @@ impl App {
                 None => {}
             }
         }
+        // Every path whose change identity moved in this sync — the same
+        // comparison the stale marking above is built on. Collected before
+        // `self.project` is replaced, since that's the only moment both
+        // views exist, and used below to re-place the notes hanging off
+        // those files.
+        let mut moved: Vec<String> = Vec::new();
+        let every_path = review.project.files.iter().map(|f| f.path.clone()).chain(self.project.files.iter().map(|f| f.path.clone()));
+        for path in every_path {
+            if moved.contains(&path) {
+                continue;
+            }
+            let before = self.project.files.iter().find(|f| f.path == path);
+            let after = review.project.files.iter().find(|f| f.path == path);
+            let changed = match (before, after) {
+                (Some(b), Some(a)) => !b.same_change_as(a),
+                (None, None) => false,
+                // Entering or leaving the changeset is a content change
+                // like any other: a file the agent just created, or one
+                // whose edit was discarded back to what HEAD holds.
+                _ => true,
+            };
+            if changed {
+                moved.push(path);
+            }
+        }
+
         self.project = review.project;
         self.curation_files = review.curation_files;
         self.curation_index = self.curation_index.min(self.curation_files.len().saturating_sub(1));
@@ -535,6 +941,78 @@ impl App {
         if self.current_diff_index().is_none() {
             self.content_view = ContentView::Context;
         }
+        self.reanchor_notes(&moved);
+        // Deliberately no `settle_tree_selection` here. A poll that drops
+        // a file out of the turn scope — you discarded its hunk, or
+        // reverted it by hand — must not also drag the cursor off whatever
+        // you were reading; being moved once a second by a background
+        // refresh is worse than a cursor parked on a row that has stopped
+        // being drawn, which `tree_step` already navigates out of.
+        self.recompute_turn_scope();
+    }
+
+    /// Re-places every line-scoped note on a file in `moved`, or marks it
+    /// stale when its anchor is gone.
+    ///
+    /// This is what stops `i`/`y` from being a one-shot. A note says "Line
+    /// 47", the agent then edits the file, and line 47 is now a different
+    /// function — so the next iterate prompt would send a correction
+    /// pointing at code the note was never about. Re-anchoring moves the
+    /// note to wherever its line actually went; failing that, the note is
+    /// kept and marked, and `build_iterate_prompt` says the line is gone
+    /// rather than naming one.
+    ///
+    /// Deliberately never deletes a note. The user wrote it, and `d`/`D`
+    /// remain the only things that throw one away.
+    fn reanchor_notes(&mut self, moved: &[String]) {
+        if moved.is_empty() || self.notes.is_empty() {
+            return;
+        }
+        for path in moved {
+            if !self.notes.iter().any(|n| n.path == *path && n.line.is_some() && n.anchor.is_some()) {
+                continue;
+            }
+            // The changeset's own path bytes when the file is still in it —
+            // `Note.path` is a printable rendering, which for a name that
+            // isn't valid UTF-8 names nothing on disk. Falling back to
+            // joining it is only reached for a file that has left the
+            // changeset entirely, where there's nothing better to use.
+            let full = match self.project.files.iter().find(|f| f.path == *path) {
+                Some(f) => self.target_dir.join(f.meta.os_path()),
+                None => self.target_dir.join(path),
+            };
+            // Read straight from disk rather than through
+            // `fsnav::read_file`, which is a *display* reader: it answers a
+            // symlink, an oversized file or a permission error with a
+            // one-line placeholder describing the problem. That
+            // placeholder contains no source line, so every note on the
+            // file would match nothing and be marked stale — a verdict
+            // about the user's notes reached from a failure to read the
+            // file at all.
+            let lines = match read_lines_for_anchoring(&full) {
+                AnchorSource::Lines(lines) => lines,
+                // The file is gone, so every line in it is. That is the
+                // same statement `stale` makes, arrived at without needing
+                // to search for anything.
+                AnchorSource::Gone => Vec::new(),
+                AnchorSource::Unreadable => continue,
+            };
+            for note in self.notes.iter_mut().filter(|n| n.path == *path) {
+                let (Some(anchor), Some(line)) = (&note.anchor, note.line) else { continue };
+                match anchor.reanchor(&lines, line) {
+                    Some(now) => {
+                        note.line = Some(now);
+                        note.stale = false;
+                    }
+                    None => note.stale = true,
+                }
+            }
+        }
+    }
+
+    /// How many queued notes no longer point at a line that exists.
+    pub fn notes_stale(&self) -> u32 {
+        self.notes.iter().filter(|n| n.stale).count() as u32
     }
 
     /// Re-scans the file tree and re-reads the currently open source file,
@@ -552,6 +1030,10 @@ impl App {
             self.symbols = symbol_scan.results;
             self.symbols_truncated = symbol_scan.truncated;
             self.symbol_index = self.symbol_index.min(self.symbols.len().saturating_sub(1));
+            // `tree_visible` is indexed by row, so it is only meaningful
+            // against the scan it was built from.
+            self.recompute_tree_visibility();
+            self.settle_tree_selection();
         }
 
         let new_source = fsnav::read_file(&self.nav_file);
@@ -611,6 +1093,15 @@ impl App {
             // is the same answer the directory case gives one level down.
             .or_else(|| (path.parent() == Some(self.target_dir.as_path()) && !self.tree.is_empty()).then_some(0))
             .unwrap_or(self.tree_index);
+        // Asking for a file the active scope hides is a clear enough
+        // statement that the scope is in the way — widening beats landing
+        // the cursor on a row nothing draws and leaving the tree looking
+        // like it ignored the request. Nothing is hidden about it either:
+        // Review's footer names the scope on every frame.
+        if !self.tree_row_visible(self.tree_index) {
+            self.review_scope = ReviewScope::All;
+            self.recompute_tree_visibility();
+        }
         self.refresh_hover();
         self.mode = Mode::Review;
     }
@@ -690,6 +1181,21 @@ impl App {
         self.agent_purpose = purpose;
         self.agent_model_live = None;
         if purpose == TurnPurpose::Chat {
+            // The baseline for "what this turn wrote", taken here rather
+            // than read off the last poll: up to a second of drift would
+            // hand this turn credit for an edit someone else had already
+            // made. Read fresh from git, and only for a Chat turn — a
+            // commit-message turn is read-only and has no business
+            // resetting what Review is scoped to.
+            //
+            // A git failure leaves the previous baseline in place rather
+            // than installing an empty one: an empty baseline would make
+            // every uncommitted file look like this turn's work, which is
+            // exactly the confusion the scope exists to remove.
+            if let Ok(files) = crate::gitreview::diff_files(&cwd) {
+                self.turn_baseline = Some(files);
+                self.recompute_turn_scope();
+            }
             self.transcript.push(AgentLine { kind: AgentLineKind::UserPrompt, text: prompt.clone() });
             self.transcript.push(AgentLine { kind: AgentLineKind::Blank, text: String::new() });
             self.agent_scroll = 0; // jump to the bottom to watch it stream in
@@ -879,28 +1385,60 @@ impl App {
         if cancelled {
             self.transcript.push(AgentLine { kind: AgentLineKind::Text, text: "Cancelled.".to_string() });
             // A cancelled turn can still have written real files before it
-            // was killed — pull those in too, same as a completed turn.
+            // was killed — pull those in too, same as a completed turn,
+            // and scope Review to them the same way. Half a turn's output
+            // is exactly the kind of thing you want isolated from
+            // everything else in the tree before deciding what to keep.
             self.sync_review_from_disk();
             self.sync_tree_from_disk();
+            self.report_turn_changes("changed before the turn was cancelled");
             return;
         }
-        // Every turn writes directly to target_dir now, so whatever's
-        // uncommitted there is exactly what this turn (and anything else
-        // outstanding) changed — pull Review's view of it forward
-        // immediately rather than waiting for the next background poll.
-        let text = match crate::gitreview::diff_files(&self.target_dir) {
-            Ok(files) if files.is_empty() => "  (no file changes)".to_string(),
-            Ok(files) => {
-                format!("{} file{} changed \u{2014} see Review (F1) for the diff", files.len(), if files.len() == 1 { "" } else { "s" })
-            }
-            // Not "(no file changes)": the turn may well have written
-            // plenty, and saying otherwise here is the one summary the user
-            // is most likely to act on without opening Review.
-            Err(e) => format!("  (couldn't read the diff after this turn: {e})"),
-        };
-        self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
         self.sync_review_from_disk();
         self.sync_tree_from_disk();
+        self.report_turn_changes("changed");
+    }
+
+    /// Summarizes what the turn that just ended actually wrote, and points
+    /// Review at exactly those files.
+    ///
+    /// The count is `turn_scope`'s, not the whole changeset's. "N files
+    /// changed" used to mean every dirty file in the repo — work that was
+    /// already there before the turn started, and files the agent never
+    /// touched — which made the one line the user is most likely to act on
+    /// without opening Review the least accurate thing on screen.
+    ///
+    /// Switching the scope here is what makes the line's own advice work:
+    /// F1 lands on this turn's files, and `t` steps back out to the whole
+    /// tree. Nothing is hidden silently — Review's footer names the active
+    /// scope either way.
+    fn report_turn_changes(&mut self, verb: &str) {
+        // Not "(no file changes)": the turn may well have written plenty,
+        // and saying otherwise here is the one summary the user is most
+        // likely to act on without opening Review.
+        if let Some(e) = &self.review_error {
+            let text = format!("  (couldn't read the diff after this turn: {e})");
+            self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
+            return;
+        }
+        let scoped = self.turn_baseline.is_some();
+        let n = if scoped { self.turn_scope.len() } else { self.project.files.len() };
+        let plural = if n == 1 { "" } else { "s" };
+        let text = if n == 0 {
+            "  (no file changes)".to_string()
+        } else if scoped {
+            self.review_scope = ReviewScope::Turn;
+            self.recompute_tree_visibility();
+            self.settle_tree_selection();
+            format!("{n} file{plural} {verb} \u{2014} Review (F1) is scoped to them; t shows the whole tree")
+        } else {
+            // No baseline to measure against — only reachable if the diff
+            // read at spawn time failed. Falls back to the whole
+            // uncommitted changeset, and says that's what it is rather
+            // than letting the number pass for this turn's work.
+            format!("{n} file{plural} uncommitted (no pre-turn snapshot, so this isn't only what {verb}) \u{2014} see Review (F1)")
+        };
+        self.transcript.push(AgentLine { kind: AgentLineKind::Proposal, text });
     }
 
     /// Kills the running agent subprocess, if any — the only way to stop a
@@ -946,6 +1484,7 @@ impl App {
             Overlay::NoteInput => return self.on_key_note_input(key),
             Overlay::QuitConfirm => return self.on_key_quit_confirm(key),
             Overlay::AgentTrustConfirm => return self.on_key_agent_trust_confirm(key),
+            Overlay::DiscardConfirm => return self.on_key_discard_confirm(key),
             Overlay::None => {}
         }
 
@@ -1016,7 +1555,7 @@ impl App {
     /// source have different lengths and only one is relevant per call.
     fn move_nav_focus(&mut self, delta: i64, tree_len: usize) {
         if self.nav_focus == NavFocus::Tree {
-            self.tree_index = clamped_move(self.tree_index, delta, tree_len);
+            self.tree_index = self.tree_step(delta, tree_len);
             self.preview_tree_selection();
         } else {
             self.nav_line = clamped_move(self.nav_line, delta, self.content_line_count());
@@ -1026,11 +1565,48 @@ impl App {
         }
     }
 
+    /// Where `delta` rows of tree movement land, counting only the rows
+    /// the active scope actually shows. Identical to `clamped_move` under
+    /// `ReviewScope::All`, where every row is visible; under `Turn` the
+    /// hidden rows are stepped over rather than through, so a filtered
+    /// tree moves one visible row per keypress instead of appearing to
+    /// stall for however many hidden rows sit in between.
+    fn tree_step(&self, delta: i64, tree_len: usize) -> usize {
+        if self.review_scope == ReviewScope::All {
+            return clamped_move(self.tree_index, delta, tree_len);
+        }
+        let rows = self.visible_tree_rows();
+        if rows.is_empty() {
+            return self.tree_index;
+        }
+        // The cursor can sit on a hidden row (an out-of-scope file opened
+        // from the finder, say), so "where am I in the visible list" is a
+        // nearest-match question, not a lookup.
+        let here = rows
+            .iter()
+            .position(|i| *i == self.tree_index)
+            .unwrap_or_else(|| rows.iter().enumerate().min_by_key(|(_, i)| i.abs_diff(self.tree_index)).map(|(n, _)| n).unwrap_or(0));
+        rows[clamped_move(here, delta, rows.len())]
+    }
+
     /// Jumps the focused pane's index directly to `target` (clamped to its
     /// bounds) — `usize::MAX` means "the last entry".
     fn jump_nav_focus(&mut self, target: usize, tree_len: usize) {
         if self.nav_focus == NavFocus::Tree {
-            self.tree_index = target.min(tree_len.saturating_sub(1));
+            let clamped = target.min(tree_len.saturating_sub(1));
+            // Home/End have to mean the first/last row that is actually on
+            // screen, not the first/last row of the underlying scan — a
+            // filtered tree would otherwise jump the cursor onto a row
+            // nothing is drawing.
+            self.tree_index = if self.review_scope == ReviewScope::All {
+                clamped
+            } else {
+                let rows = self.visible_tree_rows();
+                match rows.iter().rev().find(|i| **i <= clamped).or_else(|| rows.first()) {
+                    Some(i) => *i,
+                    None => self.tree_index,
+                }
+            };
             self.preview_tree_selection();
         } else {
             self.nav_line = target.min(self.content_line_count().saturating_sub(1));
@@ -1195,6 +1771,8 @@ impl App {
                 f.notes = 0;
             }
             self.notes.clear();
+        } else if k.is(&key, Action::ReviewToggleScope) {
+            self.toggle_review_scope();
         } else if k.is(&key, Action::ReviewSplitView) {
             self.split_diff = true;
         } else if k.is(&key, Action::ReviewUnifiedView) {
@@ -1212,7 +1790,7 @@ impl App {
             // prompt as Iterate, but puts it on the system clipboard
             // instead of sending it anywhere.
             let prompt = self.build_iterate_prompt();
-            self.review_clipboard_status = Some(match crate::clipboard::copy(&prompt) {
+            self.review_status = Some(match crate::clipboard::copy(&prompt) {
                 Ok(()) => {
                     let n = self.notes_queued();
                     Ok(format!("Copied prompt ({n} note{})", if n == 1 { "" } else { "s" }))
@@ -1270,9 +1848,22 @@ impl App {
             any = true;
             prompt.push_str(&format!("File: {path}\n"));
             for note in &grouped[path] {
-                match note.line {
-                    Some(line) => prompt.push_str(&format!("  - Line {line}: {}\n", note.text)),
-                    None => prompt.push_str(&format!("  - {}\n", note.text)),
+                match (note.line, note.stale) {
+                    // A note whose anchor survived the agent's own edits
+                    // carries the line it moved to, not the one it was
+                    // written against — see `App::reanchor_notes`.
+                    (Some(line), false) => prompt.push_str(&format!("  - Line {line}: {}\n", note.text)),
+                    // The line is gone and hoot could not work out where
+                    // it went. Sending "Line 47" here would point at
+                    // whatever now occupies line 47, which is the one
+                    // thing the note is definitely not about — so the note
+                    // still goes, with its position given as history
+                    // rather than as fact.
+                    (Some(line), true) => prompt.push_str(&format!(
+                        "  - (was on line {line}, which no longer exists \u{2014} find where this applies now): {}\n",
+                        note.text
+                    )),
+                    (None, _) => prompt.push_str(&format!("  - {}\n", note.text)),
                 }
             }
         }
@@ -1381,7 +1972,12 @@ impl App {
     // NOTES
     // -------------------------------------------------------------
     fn open_note_input(&mut self, path: String, line: Option<usize>) {
-        self.note_target = Some((path, line));
+        // Captured here rather than when the note is confirmed: this is
+        // the file exactly as it was on screen when the user decided to
+        // comment on it, and the poll can re-read `source` underneath an
+        // open overlay.
+        let anchor = line.and_then(|l| crate::data::NoteAnchor::capture(&self.source, l));
+        self.note_target = Some(NoteTarget { path, line, anchor });
         self.note_input.clear();
         self.note_cursor = 0;
         self.overlay = Overlay::NoteInput;
@@ -1429,10 +2025,14 @@ impl App {
 
     fn confirm_note(&mut self) {
         let text = self.note_input.trim().to_string();
-        if let Some((path, line)) = self.note_target.take() {
+        if let Some(target) = self.note_target.take() {
             if !text.is_empty() {
-                self.notes.push(Note { path: path.clone(), line, text });
-                if let Some(f) = self.project.files.iter_mut().find(|f| f.path == path) {
+                let note = match target.line {
+                    Some(line) => Note::on_line(target.path.clone(), line, target.anchor, text),
+                    None => Note::on_file(target.path.clone(), text),
+                };
+                self.notes.push(note);
+                if let Some(f) = self.project.files.iter_mut().find(|f| f.path == target.path) {
                     f.notes += 1;
                 }
             }
@@ -1610,6 +2210,8 @@ impl App {
                     }
                 }
             }
+        } else if k.is(&key, Action::CurateDiscardHunk) {
+            self.request_discard();
         } else if k.is(&key, Action::CurateOpenInReview) {
             if let Some(cf) = self.curation_files.get(self.curation_index) {
                 let path = self.target_dir.join(&cf.path);
@@ -1719,7 +2321,7 @@ mod tests {
         // just opened is showing confirms right away, no second key needed
         // beyond the same Ctrl+C.
         let (mut app, dir) = two_file_app("ctrlc-confirm");
-        app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "don't lose me".to_string() });
+        app.notes.push(Note::on_file("a.txt".to_string(), "don't lose me".to_string()));
         app.project.files[0].notes = 1;
 
         app.on_key(ctrl('c'));
@@ -1860,7 +2462,13 @@ mod tests {
 
         app.on_key(key(KeyCode::Char('c')));
         assert_eq!(app.overlay, Overlay::NoteInput);
-        assert_eq!(app.note_target, Some(("f.rs".to_string(), Some(5))));
+        let target = app.note_target.as_ref().expect("a note target");
+        assert_eq!((target.path.as_str(), target.line), ("f.rs", Some(5)));
+        assert_eq!(
+            target.anchor.as_ref().map(|a| a.line_text()),
+            Some("line5-CHANGED"),
+            "the note should anchor to the line it was left on, not just its number"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1890,7 +2498,8 @@ mod tests {
         app.on_key(key(KeyCode::Char('s'))); // switch to split view
         app.on_key(key(KeyCode::Char('c')));
         assert_eq!(app.overlay, Overlay::NoteInput);
-        assert_eq!(app.note_target, Some(("f.rs".to_string(), None)), "should be a whole-file comment, not line 5");
+        let target = app.note_target.as_ref().expect("a note target");
+        assert_eq!((target.path.as_str(), target.line), ("f.rs", None), "should be a whole-file comment, not line 5");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1954,7 +2563,8 @@ mod tests {
 
         app.on_key(key(KeyCode::Char('c')));
         assert_eq!(app.overlay, Overlay::NoteInput);
-        assert_eq!(app.note_target, Some(("main.rs".to_string(), Some(2))));
+        let target = app.note_target.as_ref().expect("a note target");
+        assert_eq!((target.path.as_str(), target.line), ("main.rs", Some(2)));
 
         for c in "extract this".chars() {
             app.on_key(key(KeyCode::Char(c)));
@@ -2536,9 +3146,9 @@ mod tests {
         // per-file "selected" gate to remember to toggle first.
         let (mut app, dir) = two_file_app("iterate-prompt");
 
-        app.notes.push(Note { path: "a.txt".to_string(), line: Some(2), text: "tighten this up".to_string() });
-        app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "consider a rename".to_string() });
-        app.notes.push(Note { path: "b.txt".to_string(), line: Some(1), text: "this one too".to_string() });
+        app.notes.push(Note::on_line("a.txt".to_string(), 2, None, "tighten this up".to_string()));
+        app.notes.push(Note::on_file("a.txt".to_string(), "consider a rename".to_string()));
+        app.notes.push(Note::on_line("b.txt".to_string(), 1, None, "this one too".to_string()));
 
         let prompt = app.build_iterate_prompt();
         assert!(prompt.contains("File: a.txt"), "{prompt}");
@@ -2577,11 +3187,11 @@ mod tests {
         // recorded — clipboard::copy's own fallback/error behavior is
         // covered directly in clipboard.rs.
         let (mut app, dir) = two_file_app("copy-prompt");
-        assert!(app.review_clipboard_status.is_none());
+        assert!(app.review_status.is_none());
 
         app.mode = Mode::Review;
         app.on_key(key(KeyCode::Char('y')));
-        assert!(app.review_clipboard_status.is_some());
+        assert!(app.review_status.is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2590,8 +3200,8 @@ mod tests {
     fn clear_file_notes_only_touches_the_open_files_notes_and_not_its_flag() {
         let (mut app, dir) = two_file_app("clear-file-notes");
         app.mode = Mode::Review;
-        app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "on a".to_string() });
-        app.notes.push(Note { path: "b.txt".to_string(), line: None, text: "on b".to_string() });
+        app.notes.push(Note::on_file("a.txt".to_string(), "on a".to_string()));
+        app.notes.push(Note::on_file("b.txt".to_string(), "on b".to_string()));
         app.project.files[0].notes = 1;
         app.project.files[0].flagged = true;
         app.project.files[1].notes = 1;
@@ -2612,8 +3222,8 @@ mod tests {
     fn clear_all_notes_wipes_every_file_but_leaves_flags_alone() {
         let (mut app, dir) = two_file_app("clear-all-notes");
         app.mode = Mode::Review;
-        app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "on a".to_string() });
-        app.notes.push(Note { path: "b.txt".to_string(), line: None, text: "on b".to_string() });
+        app.notes.push(Note::on_file("a.txt".to_string(), "on a".to_string()));
+        app.notes.push(Note::on_file("b.txt".to_string(), "on b".to_string()));
         app.project.files[0].notes = 1;
         app.project.files[0].flagged = true;
         app.project.files[1].notes = 1;
@@ -2643,7 +3253,7 @@ mod tests {
     #[test]
     fn quit_asks_for_confirmation_when_notes_are_queued() {
         let (mut app, dir) = two_file_app("quit-with-notes");
-        app.notes.push(Note { path: "a.txt".to_string(), line: None, text: "don't lose me".to_string() });
+        app.notes.push(Note::on_file("a.txt".to_string(), "don't lose me".to_string()));
         app.project.files[0].notes = 1;
         assert!(app.quit_risk().is_some());
 
@@ -2691,7 +3301,7 @@ mod tests {
         let (mut app, dir) = two_file_app("notes-queued-clean-file");
         assert_eq!(app.notes_queued(), 0);
 
-        app.notes.push(Note { path: "clean-file-with-no-diff.txt".to_string(), line: Some(3), text: "a note".to_string() });
+        app.notes.push(Note::on_line("clean-file-with-no-diff.txt".to_string(), 3, None, "a note".to_string()));
         assert_eq!(app.notes_queued(), 1, "should count a note even on a file with no active diff");
         assert!(app.quit_risk().is_some(), "and quit_risk should see it too");
 
@@ -3140,6 +3750,496 @@ mod tests {
         assert_eq!(app.agent_scroll, PAGE_SIZE * 2);
         app.on_key(key(KeyCode::PageDown));
         assert_eq!(app.agent_scroll, PAGE_SIZE);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------------
+    // TURN-SCOPED REVIEW
+    // -------------------------------------------------------------
+
+    #[test]
+    fn turn_scope_is_what_moved_since_the_turn_started_not_the_whole_dirty_tree() {
+        // b.txt is already dirty when the turn begins. The turn touches
+        // only a.txt. "What this turn wrote" is a.txt — the whole point of
+        // the baseline is that b.txt's pre-existing work isn't credited to
+        // a turn that never opened it.
+        let (mut app, dir) = two_file_app("turn-scope-basic");
+        app.run_fake_turn(|| {});
+        assert!(app.turn_scope.is_empty(), "a turn that wrote nothing owns nothing");
+
+        app.run_fake_turn(|| fs::write(dir.join("a.txt"), "a1-changed\na2\na3-by-the-agent\n").unwrap());
+
+        assert_eq!(app.turn_scope, vec!["a.txt".to_string()]);
+        assert_eq!(app.project.files.len(), 2, "the whole changeset is still two files");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_the_turn_creates_counts_as_this_turns_work() {
+        let (mut app, dir) = two_file_app("turn-scope-new-file");
+        app.run_fake_turn(|| fs::write(dir.join("c.txt"), "written by the agent\n").unwrap());
+
+        assert_eq!(app.turn_scope, vec!["c.txt".to_string()], "entering the changeset is a change like any other");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn turn_scope_hides_the_files_the_turn_never_touched_from_the_tree() {
+        let (mut app, dir) = two_file_app("turn-scope-tree");
+        app.run_fake_turn(|| fs::write(dir.join("a.txt"), "a1-changed\na2\na3-by-the-agent\n").unwrap());
+
+        let all_rows = app.visible_tree_rows().len();
+        assert_eq!(all_rows, app.tree.len(), "nothing is hidden until the scope says so");
+
+        app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(app.review_scope, ReviewScope::Turn);
+
+        let shown: Vec<String> = app.visible_tree_rows().into_iter().map(|i| app.tree[i].label.clone()).collect();
+        assert_eq!(shown, vec!["a.txt".to_string()], "b.txt is dirty but not this turn's work: {shown:?}");
+
+        app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(app.review_scope, ReviewScope::All);
+        assert_eq!(app.visible_tree_rows().len(), all_rows, "toggling back restores the whole tree");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn narrowing_to_a_turn_before_one_has_run_says_so_rather_than_emptying_the_tree() {
+        // With no baseline, every file would fall outside "this turn" and
+        // the tree would go blank for a reason nothing on screen explains.
+        let (mut app, dir) = two_file_app("turn-scope-no-baseline");
+        app.on_key(key(KeyCode::Char('t')));
+
+        assert_eq!(app.review_scope, ReviewScope::All, "the scope must not change");
+        assert!(app.visible_tree_rows().len() == app.tree.len());
+        let status = app.review_status.as_ref().expect("a status message");
+        assert!(status.as_ref().err().is_some_and(|e| e.contains("no agent turn has run")), "{status:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_narrowed_tree_moves_one_visible_row_per_keypress() {
+        // Regression risk in the filtered tree: `tree_index` still indexes
+        // the full scan, so a naive +1 would walk through hidden rows and
+        // look like a dead arrow key.
+        let dir = scratch_repo("turn-scope-nav");
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            commit_file(&dir, name, "one\n");
+        }
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+        app.run_fake_turn(|| {
+            for name in ["a.txt", "d.txt"] {
+                fs::write(dir.join(name), "one\ntwo\n").unwrap();
+            }
+        });
+        app.on_key(key(KeyCode::Char('t')));
+
+        let rows = app.visible_tree_rows();
+        assert_eq!(rows.len(), 2, "only a.txt and d.txt are this turn's");
+        app.on_key(key(KeyCode::Home));
+        assert_eq!(app.tree_index, rows[0]);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.tree_index, rows[1], "one Down should cross b.txt and c.txt in a single step");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.tree_index, rows[1], "and stop at the last visible row");
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.tree_index, rows[0]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finishing_a_turn_scopes_review_to_that_turns_files_and_says_how_many() {
+        let (mut app, dir) = two_file_app("turn-scope-finish");
+        app.mode = Mode::Agent;
+        app.turn_baseline = Some(crate::gitreview::diff_files(&dir).unwrap());
+        fs::write(dir.join("a.txt"), "a1-changed\na2\na3-by-the-agent\n").unwrap();
+
+        app.finish_turn();
+
+        assert_eq!(app.review_scope, ReviewScope::Turn, "F1 should land on this turn's work");
+        let summary = app.transcript.last().expect("a summary line");
+        assert!(summary.text.starts_with("1 file changed"), "{:?}", summary.text);
+        assert!(summary.text.contains('t'), "the way back out has to be on the line too: {:?}", summary.text);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancelled_turn_is_scoped_the_same_way_as_a_finished_one() {
+        // A killed turn can have written plenty before it died, and that
+        // half-finished output is exactly what you want isolated.
+        let (mut app, dir) = two_file_app("turn-scope-cancelled");
+        app.mode = Mode::Agent;
+        app.agent_running = true;
+        app.turn_baseline = Some(crate::gitreview::diff_files(&dir).unwrap());
+        fs::write(dir.join("a.txt"), "a1-changed\na2\na3-half-written\n").unwrap();
+        app.agent_cancelled = true;
+
+        app.finish_turn();
+
+        assert_eq!(app.review_scope, ReviewScope::Turn);
+        let texts: Vec<&str> = app.transcript.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.contains(&"Cancelled."), "{texts:?}");
+        assert!(texts.last().is_some_and(|t| t.contains("cancelled")), "{texts:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn committing_drops_the_turn_baseline_instead_of_reinterpreting_it() {
+        // The baseline is a changeset measured against the old HEAD. Once
+        // HEAD moves, every entry in it describes a comparison that no
+        // longer exists.
+        let dir = scratch_repo("turn-scope-after-commit");
+        commit_file(&dir, "a.txt", "one\n");
+        fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+        app.run_fake_turn(|| {});
+        app.review_scope = ReviewScope::Turn;
+
+        app.mode = Mode::Curation;
+        app.commit_message = "a change".to_string();
+        app.on_key(key(KeyCode::Char('c')));
+        assert!(app.last_commit.as_ref().unwrap().is_ok(), "{:?}", app.last_commit);
+
+        assert!(app.turn_baseline.is_none());
+        assert_eq!(app.review_scope, ReviewScope::All);
+        assert!(app.turn_scope.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------------
+    // NOTES THAT RE-ANCHOR
+    // -------------------------------------------------------------
+
+    /// A repo with one committed multi-line file, opened with the content
+    /// pane focused so `c` leaves a line-scoped note.
+    fn note_app(label: &str, content: &str) -> (App, PathBuf) {
+        let dir = scratch_repo(label);
+        commit_file(&dir, "f.rs", content);
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+        app.on_key(key(KeyCode::Tab)); // focus the content pane
+        (app, dir)
+    }
+
+    fn leave_note_on_line(app: &mut App, line: usize, text: &str) {
+        app.nav_line = line - 1;
+        app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(app.overlay, Overlay::NoteInput);
+        for ch in text.chars() {
+            app.on_key(key(KeyCode::Char(ch)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn a_note_follows_its_line_when_the_agent_inserts_code_above_it() {
+        let (mut app, dir) = note_app("note-follows", "fn one() {\n    let a = 1;\n}\n\nfn two() {\n    let b = 2;\n}\n");
+        leave_note_on_line(&mut app, 6, "this shadows a");
+        assert_eq!(app.notes[0].line, Some(6));
+
+        // The agent adds a use statement and a doc comment at the top.
+        fs::write(dir.join("f.rs"), "use std::fmt;\n\n/// Docs.\nfn one() {\n    let a = 1;\n}\n\nfn two() {\n    let b = 2;\n}\n")
+            .unwrap();
+        app.sync_review_from_disk();
+
+        assert_eq!(app.notes[0].line, Some(9), "the note should point at where its line went");
+        assert!(!app.notes[0].stale);
+        assert_eq!(app.notes_stale(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_whose_line_is_gone_is_kept_and_marked_rather_than_dropped() {
+        let (mut app, dir) = note_app("note-stale", "fn one() {\n    let a = 1;\n}\n\nfn two() {\n    let b = 2;\n}\n");
+        leave_note_on_line(&mut app, 6, "this shadows a");
+
+        // The agent rewrote the line the note was about, and everything
+        // around it — there is nowhere left to put the note.
+        fs::write(dir.join("f.rs"), "fn one() {\n    let a = 1;\n}\n").unwrap();
+        app.sync_review_from_disk();
+
+        assert_eq!(app.notes.len(), 1, "a note the user wrote is never thrown away on their behalf");
+        assert!(app.notes[0].stale);
+        assert_eq!(app.notes_stale(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_notes_prompt_says_the_line_is_gone_instead_of_naming_one() {
+        let (mut app, dir) = note_app("note-stale-prompt", "fn one() {\n    let a = 1;\n}\n\nfn two() {\n    let b = 2;\n}\n");
+        leave_note_on_line(&mut app, 6, "this shadows a");
+        fs::write(dir.join("f.rs"), "fn one() {\n    let a = 1;\n}\n").unwrap();
+        app.sync_review_from_disk();
+
+        let prompt = app.build_iterate_prompt();
+        assert!(prompt.contains("no longer exists"), "{prompt}");
+        assert!(prompt.contains("this shadows a"), "the note itself still goes: {prompt}");
+        assert!(!prompt.contains("- Line 6:"), "and it must not be presented as still being line 6: {prompt}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_re_anchored_note_reaches_the_agent_with_its_new_line_number() {
+        let (mut app, dir) = note_app("note-prompt-moved", "fn one() {\n    let a = 1;\n}\n\nfn two() {\n    let b = 2;\n}\n");
+        leave_note_on_line(&mut app, 6, "this shadows a");
+        fs::write(dir.join("f.rs"), "use std::fmt;\n\n/// Docs.\nfn one() {\n    let a = 1;\n}\n\nfn two() {\n    let b = 2;\n}\n")
+            .unwrap();
+        app.sync_review_from_disk();
+
+        let prompt = app.build_iterate_prompt();
+        assert!(prompt.contains("- Line 9: this shadows a"), "{prompt}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_whole_file_note_is_left_alone_when_the_file_moves() {
+        let (mut app, dir) = note_app("note-whole-file", "fn one() {\n    let a = 1;\n}\n");
+        app.notes.push(Note::on_file("f.rs".to_string(), "split this module".to_string()));
+
+        fs::write(dir.join("f.rs"), "fn renamed() {\n    let a = 2;\n}\n").unwrap();
+        app.sync_review_from_disk();
+
+        assert!(!app.notes[0].stale, "a note with no line can't have lost one");
+        assert_eq!(app.notes[0].line, None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_curation_badge_survives_a_poll_that_finds_nothing_new() {
+        // Regression: `gitreview::load` rebuilds every CurationFile with
+        // `status: None`, and the byte-identical early return that used to
+        // hide that never fires once a note or a flag exists — so a file
+        // marked stale kept its emptied selection but silently lost the
+        // badge explaining it, one poll tick later.
+        let (mut app, dir) = two_file_app("stale-badge-survives-poll");
+        app.notes.push(Note::on_file("b.txt".to_string(), "unrelated note".to_string()));
+
+        fs::write(dir.join("a.txt"), "a1-changed\na2\na3-new\n").unwrap();
+        app.sync_review_from_disk();
+        assert_eq!(app.curation_files[0].status, Some(crate::theme::FileStatus::Stale));
+
+        app.sync_review_from_disk(); // nothing changed on disk this time
+        assert_eq!(
+            app.curation_files[0].status,
+            Some(crate::theme::FileStatus::Stale),
+            "the badge has to outlive the poll that follows it"
+        );
+        assert!(!app.curation_files[0].hunk_selected[0], "and still match the selection it explains");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------------
+    // DISCARD
+    // -------------------------------------------------------------
+
+    /// One committed file, edited in two places far enough apart to parse
+    /// as two separate hunks, and left unstaged.
+    fn two_hunk_app(label: &str) -> (App, PathBuf) {
+        let dir = scratch_repo(label);
+        let base: String = (1..=20).map(|n| format!("line{n}\n")).collect();
+        commit_file(&dir, "f.txt", &base);
+        let mut edited: Vec<String> = (1..=20).map(|n| format!("line{n}")).collect();
+        edited[1] = "line2-FIRST-EDIT".to_string();
+        edited[17] = "line18-SECOND-EDIT".to_string();
+        fs::write(dir.join("f.txt"), edited.join("\n") + "\n").unwrap();
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+        app.mode = Mode::Curation;
+        assert_eq!(app.project.files[0].hunks.len(), 2, "the fixture needs two separate hunks");
+        (app, dir)
+    }
+
+    #[test]
+    fn discarding_a_hunk_reverses_only_that_hunk_on_disk() {
+        let (mut app, dir) = two_hunk_app("discard-one-hunk");
+        app.curation_hunk_index = 0;
+
+        app.on_key(key(KeyCode::Char('D')));
+        assert_eq!(app.overlay, Overlay::DiscardConfirm, "an irreversible action asks first");
+        assert!(app.pending_discard.as_ref().unwrap().what.contains("hunk 1/2 of f.txt"), "{:?}", app.pending_discard);
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.last_discard.as_ref().unwrap().is_ok(), "{:?}", app.last_discard);
+        let on_disk = fs::read_to_string(dir.join("f.txt")).unwrap();
+        assert!(on_disk.contains("line2\n"), "the discarded hunk should be back to what HEAD holds:\n{on_disk}");
+        assert!(on_disk.contains("line18-SECOND-EDIT"), "the other hunk must be untouched:\n{on_disk}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_discarded_file_comes_back_marked_stale_with_nothing_selected() {
+        // Its hunks genuinely shifted shape — "look at the rest of this
+        // again" is the correct reading, and it's the same vocabulary an
+        // outside edit gets.
+        let (mut app, dir) = two_hunk_app("discard-then-stale");
+        app.on_key(key(KeyCode::Char('D')));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.curation_files[0].status, Some(crate::theme::FileStatus::Stale));
+        assert!(app.curation_files[0].hunk_selected.iter().all(|s| !*s));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn esc_at_the_discard_prompt_keeps_the_hunk() {
+        let (mut app, dir) = two_hunk_app("discard-cancel");
+        let before = fs::read_to_string(dir.join("f.txt")).unwrap();
+
+        app.on_key(key(KeyCode::Char('D')));
+        app.on_key(key(KeyCode::Esc));
+
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.pending_discard.is_none());
+        assert!(app.last_discard.is_none(), "cancelling isn't an outcome worth reporting");
+        assert_eq!(fs::read_to_string(dir.join("f.txt")).unwrap(), before);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pressing_d_again_at_the_discard_prompt_does_not_confirm_it() {
+        // The confirmation opens on `D`; accepting on `D` would mean a
+        // held or double-tapped key destroys content on its own.
+        let (mut app, dir) = two_hunk_app("discard-double-tap");
+        let before = fs::read_to_string(dir.join("f.txt")).unwrap();
+
+        app.on_key(key(KeyCode::Char('D')));
+        app.on_key(key(KeyCode::Char('D')));
+
+        assert_eq!(app.overlay, Overlay::DiscardConfirm, "still waiting for a real answer");
+        assert_eq!(fs::read_to_string(dir.join("f.txt")).unwrap(), before);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discarding_is_refused_while_an_agent_turn_is_running() {
+        // Same reasoning as committing: the agent writes to this exact
+        // tree, and reversing a patch out from under a live writer takes
+        // out lines nobody has looked at.
+        let (mut app, dir) = two_hunk_app("discard-during-turn");
+        let before = fs::read_to_string(dir.join("f.txt")).unwrap();
+        app.agent_running = true;
+
+        app.on_key(key(KeyCode::Char('D')));
+
+        assert_eq!(app.overlay, Overlay::None, "it never even gets as far as asking");
+        let err = app.last_discard.as_ref().unwrap().as_ref().unwrap_err();
+        assert!(err.contains("agent turn is running"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("f.txt")).unwrap(), before);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_turn_started_during_the_confirmation_cancels_the_discard() {
+        let (mut app, dir) = two_hunk_app("discard-turn-races-prompt");
+        let before = fs::read_to_string(dir.join("f.txt")).unwrap();
+
+        app.on_key(key(KeyCode::Char('D')));
+        app.agent_running = true; // a turn started from another mode while it was open
+        app.on_key(key(KeyCode::Enter));
+
+        let err = app.last_discard.as_ref().unwrap().as_ref().unwrap_err();
+        assert!(err.contains("nothing was discarded"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("f.txt")).unwrap(), before);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discarding_a_brand_new_file_says_plainly_that_it_is_a_deletion() {
+        // The one case where "discard" understates it: an untracked file
+        // has no previous version to fall back to.
+        let dir = scratch_repo("discard-new-file");
+        commit_file(&dir, "committed.txt", "one\n");
+        fs::write(dir.join("fresh.txt"), "written by the agent\n").unwrap();
+        let mut app = App::new(dir.clone(), Keymap::defaults(), AgentBackend::Pi, false);
+        app.mode = Mode::Curation;
+        app.curation_index = app.curation_files.iter().position(|c| c.path == "fresh.txt").expect("the new file");
+
+        app.on_key(key(KeyCode::Char('D')));
+        let what = &app.pending_discard.as_ref().unwrap().what;
+        assert!(what.contains("delete fresh.txt"), "{what}");
+        assert!(what.contains("nothing to fall back to"), "{what}");
+        app.on_key(key(KeyCode::Enter));
+
+        assert!(app.last_discard.as_ref().unwrap().is_ok(), "{:?}", app.last_discard);
+        assert!(!dir.join("fresh.txt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_file_the_turn_scope_hides_widens_the_scope_instead_of_hiding_the_cursor() {
+        // Ctrl+F to a file the last turn never opened is an unambiguous
+        // "show me this" — landing the cursor on a row nothing draws would
+        // look like the finder had simply ignored it.
+        let (mut app, dir) = two_file_app("scope-widens-on-open");
+        app.run_fake_turn(|| fs::write(dir.join("a.txt"), "a1-changed\na2\na3-by-the-agent\n").unwrap());
+        app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(app.review_scope, ReviewScope::Turn);
+
+        app.on_key(ctrl('f'));
+        app.on_key(key(KeyCode::Char('b')));
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(app.review_scope, ReviewScope::All, "the scope gets out of the way");
+        assert!(app.nav_file.ends_with("b.txt"), "{:?}", app.nav_file);
+        assert!(app.tree_row_visible(app.tree_index), "and the cursor lands somewhere that is actually drawn");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_poll_does_not_drag_the_cursor_off_the_row_you_are_reading() {
+        // The scope set moves on its own as the tree changes; the cursor
+        // must not be re-homed once a second because of it.
+        let (mut app, dir) = two_file_app("scope-poll-keeps-cursor");
+        app.run_fake_turn(|| {
+            fs::write(dir.join("a.txt"), "a1-changed\na2\na3-by-the-agent\n").unwrap();
+            fs::write(dir.join("b.txt"), "b1-changed\nb2\nb3-by-the-agent\n").unwrap();
+        });
+        app.on_key(key(KeyCode::Char('t')));
+        app.on_key(key(KeyCode::Home));
+        let parked = app.tree_index;
+
+        // b.txt leaves the turn scope — reverted to what the baseline held.
+        fs::write(dir.join("b.txt"), "b1-changed\nb2\n").unwrap();
+        app.sync_review_from_disk();
+
+        assert_eq!(app.tree_index, parked, "a background refresh must not move the cursor");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_on_a_file_the_agent_deleted_is_marked_rather_than_left_quoting_a_line() {
+        let (mut app, dir) = note_app("note-file-deleted", "fn one() {\n    let a = 1;\n}\n");
+        leave_note_on_line(&mut app, 2, "inline this");
+
+        app.run_fake_turn(|| fs::remove_file(dir.join("f.rs")).unwrap());
+
+        assert!(app.notes[0].stale, "there is no line 2 in a file that isn't there");
+        let prompt = app.build_iterate_prompt();
+        assert!(prompt.contains("no longer exists"), "{prompt}");
 
         let _ = fs::remove_dir_all(&dir);
     }

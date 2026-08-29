@@ -55,6 +55,7 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | `review_unified_view` | Unified view | `u` |  | Switch the diff view back to unified |
 | `review_iterate` | Iterate | `i` |  | Send queued notes to the real agent |
 | `review_copy_prompt` | Copy prompt | `y` |  | Copy the same assembled review prompt to the system clipboard, for pasting into an agent running elsewhere |
+| `review_toggle_scope` | Toggle turn scope | `t` |  | Narrow the tree to the files the last agent turn changed, or widen it back to the whole repo. Does nothing until a turn has actually run — there is no baseline to measure against before that |
 
 ## Symbol Jump
 
@@ -99,6 +100,7 @@ Note: `ctrl+enter`, `ctrl+tab`, and similar Ctrl-plus-whitespace-key chords don'
 | `curate_hunk_prev` | Previous hunk | `←` |  | View the previous hunk in this file |
 | `curate_hunk_next` | Next hunk | `→` |  | View the next hunk in this file |
 | `curate_toggle_hunk` | Toggle hunk | `Space` |  | Select/deselect the hunk currently shown |
+| `curate_discard_hunk` | Discard hunk | `D` |  | Throw away the hunk currently shown by reverse-applying it to the working tree, after a confirmation. Not undoable by git — the content was never committed |
 | `curate_open_in_review` | Open in Review | `r` |  | Jump to this hunk's file in Review, file tree and content both |
 | `curate_edit_message` | Edit message | `e` |  | Open the commit message in $EDITOR |
 | `curate_generate_message` | Generate message | `g` |  | Draft a message from the real diff with the agent, then open it in $EDITOR for a last pass |
