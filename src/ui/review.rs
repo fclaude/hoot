@@ -117,6 +117,20 @@ fn tree_scope_notice(uncommitted: usize, width: usize) -> String {
     }
 }
 
+/// The change indicator owns a fixed-width column in every tree row.
+///
+/// Omitting the span for unchanged files made `├─` start two columns
+/// earlier than it did for changed files, so adjacent files appeared to sit
+/// at different depths (or under one another) even though their `depth` was
+/// identical.
+fn tree_change_marker(changed: bool) -> &'static str {
+    if changed {
+        "± "
+    } else {
+        "  "
+    }
+}
+
 fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
     let tick_color = if app.nav_focus == NavFocus::Tree { theme::CYAN } else { theme::DIM };
     // Counts + blank separator, plus a row for each optional notice that is
@@ -158,9 +172,7 @@ fn draw_tree(f: &mut Frame, app: &App, area: Rect) {
             vec![Span::styled("\u{258c} ", Style::default().fg(tick_color)), Span::styled(indent, Style::default().fg(theme::DIM))];
 
         let diff_idx = if entry.is_dir { None } else { app.diff_index_for(&entry.path) };
-        if diff_idx.is_some() {
-            spans.push(Span::styled("\u{00b1} ", Style::default().fg(theme::CYAN)));
-        }
+        spans.push(Span::styled(tree_change_marker(diff_idx.is_some()), Style::default().fg(theme::CYAN)));
 
         spans.push(Span::styled("\u{251c}\u{2500} ", Style::default().fg(theme::DIM)));
         spans.push(Span::styled(entry.label.clone(), Style::default().fg(theme::FG)));
@@ -592,6 +604,23 @@ fn draw_hover(f: &mut Frame, hover: &crate::data::HoverInfo, cursor_line: usize,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn change_marker_does_not_shift_the_tree_connector() {
+        use unicode_width::UnicodeWidthStr;
+
+        let changed = tree_change_marker(true);
+        let unchanged = tree_change_marker(false);
+        assert_eq!(UnicodeWidthStr::width(changed), 2);
+        assert_eq!(UnicodeWidthStr::width(unchanged), 2);
+
+        let changed_prefix = format!("▌ │  {changed}├─ ");
+        let unchanged_prefix = format!("▌ │  {unchanged}├─ ");
+        let changed_before_connector = changed_prefix.split_once('├').unwrap().0;
+        let unchanged_before_connector = unchanged_prefix.split_once('├').unwrap().0;
+        assert_eq!(UnicodeWidthStr::width(changed_before_connector), UnicodeWidthStr::width(unchanged_before_connector));
+        assert_eq!(UnicodeWidthStr::width(changed_prefix.as_str()), UnicodeWidthStr::width(unchanged_prefix.as_str()));
+    }
 
     #[test]
     fn tree_footer_never_exceeds_the_sidebar_width() {
