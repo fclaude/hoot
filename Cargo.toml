@@ -1,6 +1,6 @@
 [package]
 name = "hoot"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A terminal UI for reviewing a git working tree alongside an AI coding agent (opencode or pi)"
 license = "MIT"
