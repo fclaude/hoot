@@ -60,7 +60,10 @@ fn main() -> io::Result<()> {
                 return Ok(());
             }
             "--version" | "-V" => {
-                println!("hoot {}", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "{}",
+                    version_string(env!("CARGO_PKG_VERSION"), option_env!("HOOT_SOURCE_COMMIT"), option_env!("HOOT_PACKAGE_REVISION"))
+                );
                 return Ok(());
             }
             "--demo" => {
@@ -255,4 +258,29 @@ fn open_external_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, a
     }
 
     Ok(())
+}
+
+// Package builds identify their exact main revision; ordinary Cargo builds keep
+// the upstream version without claiming package provenance.
+fn version_string(version: &str, commit: Option<&str>, revision: Option<&str>) -> String {
+    match (commit, revision) {
+        (Some(commit), Some(revision)) => format!("hoot {version} (main build {revision}; commit {commit})"),
+        _ => format!("hoot {version}"),
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::version_string;
+
+    #[test]
+    fn packaged_version_identifies_the_source_and_revision() {
+        assert_eq!(version_string("0.1.2", Some("abc123"), Some("7")), "hoot 0.1.2 (main build 7; commit abc123)");
+    }
+
+    #[test]
+    fn local_build_does_not_claim_package_provenance() {
+        assert_eq!(version_string("0.1.2", None, None), "hoot 0.1.2");
+        assert_eq!(version_string("0.1.2", Some("abc123"), None), "hoot 0.1.2");
+    }
 }
