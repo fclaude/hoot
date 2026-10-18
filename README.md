@@ -22,6 +22,9 @@ cargo run -- --demo
 - `$VISUAL` or `$EDITOR`, for editing prompts and commit messages (falls back to `vi`)
 - Optional: `pbcopy` (macOS) or `wl-copy`/`xclip`/`xsel` (Linux), if you want the clipboard shortcut
 
+Private workstation packages also track tested `main` through Gitea Beauties;
+see [installation and update ownership](docs/BEAUTIES.md).
+
 ## Build & run
 
 ```sh
